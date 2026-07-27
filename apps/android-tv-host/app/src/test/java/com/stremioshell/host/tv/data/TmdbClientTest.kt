@@ -23,21 +23,68 @@ class TmdbClientTest {
 
   @Test
   fun `trending parses entries and builds image urls`() = runBlocking {
-    val items = client(
+    val page = client(
       """
-      {"results":[{"id":42,"title":"Obsession","poster_path":"/p.jpg","backdrop_path":"/b.jpg",
+      {"page":1,"total_pages":12,
+       "results":[{"id":42,"title":"Obsession","poster_path":"/p.jpg","backdrop_path":"/b.jpg",
         "overview":"A film.","release_date":"2026-03-01","vote_average":7.5}]}
       """.trimIndent()
     ).trending(MediaType.Movie)
 
-    assertEquals(1, items.size)
-    val item = items.first()
+    assertEquals(1, page.items.size)
+    assertEquals(1, page.page)
+    assertEquals(12, page.totalPages)
+    val item = page.items.first()
     assertEquals(42, item.tmdbId)
     assertEquals("Obsession", item.title)
     assertEquals("https://image.tmdb.org/t/p/w342/p.jpg", item.posterUrl)
     assertEquals("https://image.tmdb.org/t/p/w1280/b.jpg", item.backdropUrl)
     assertEquals("2026", item.year)
     assertTrue(requested.single().contains("trending/movie/week?api_key=test-key"))
+  }
+
+  @Test
+  fun `catalog page counters default so an endpoint that omits them still parses`() = runBlocking {
+    val page = client("""{"results":[{"id":1,"title":"A"}]}""").popular(MediaType.Movie)
+
+    assertEquals(1, page.page)
+    assertEquals(1, page.totalPages)
+  }
+
+  @Test
+  fun `rails ask for the page they are paging to`() = runBlocking {
+    client("""{"results":[]}""").trending(MediaType.Show, page = 3)
+    assertTrue(requested.single().contains("&page=3"))
+
+    requested.clear()
+    // A nonsense page is clamped rather than sent: TMDB answers page=0 with an error.
+    client("""{"results":[]}""").popular(MediaType.Movie, page = 0)
+    assertTrue(requested.single().contains("&page=1"))
+  }
+
+  @Test
+  fun `discover builds a genre rail sorted by popularity`() = runBlocking {
+    val page = client(
+      """{"page":2,"total_pages":500,"results":[{"id":7,"name":"Show","first_air_date":"2020-01-01"}]}"""
+    ).discover(MediaType.Show, genreId = 10765, page = 2)
+
+    assertEquals(MediaType.Show, page.items.single().type)
+    assertEquals(500, page.totalPages)
+    val url = requested.single()
+    assertTrue(url.contains("discover/tv"))
+    assertTrue(url.contains("sort_by=popularity.desc"))
+    assertTrue(url.contains("with_genres=10765"))
+    // Without a vote floor, popularity.desc leads with unrated junk that has no artwork.
+    assertTrue(url.contains("vote_count.gte="))
+    assertTrue(url.contains("&page=2"))
+  }
+
+  @Test
+  fun `movie discover excludes adult titles`() = runBlocking {
+    client("""{"results":[]}""").discover(MediaType.Movie, genreId = 28)
+    val url = requested.single()
+    assertTrue(url.contains("discover/movie"))
+    assertTrue(url.contains("include_adult=false"))
   }
 
   @Test
@@ -174,9 +221,10 @@ class TmdbClientTest {
     val client = TmdbClient(apiKey = "test-key", fetcher = fetcher)
     client.trending(MediaType.Movie)
     client.popular(MediaType.Show)
+    client.discover(MediaType.Movie, genreId = 28)
     client.search("q")
 
-    assertEquals(3, stale)
+    assertEquals(4, stale)
     assertEquals(0, plain)
   }
 

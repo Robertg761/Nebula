@@ -15,6 +15,24 @@ data class MediaItem(
   val overview: String,
   val year: String?,
   val rating: Double?,
+) {
+  /**
+   * Identity across TMDB pages and across endpoints. TMDB numbers movies and shows in separate
+   * spaces, so the id alone collides between a film and a series that share one.
+   */
+  val key: String get() = "$type:$tmdbId"
+}
+
+/**
+ * One page of a TMDB catalog endpoint.
+ *
+ * The page counters ride along because a rail pages itself as the user drives right: without
+ * [totalPages] the only way to learn a catalog has ended is to request past it.
+ */
+data class MediaPage(
+  val items: List<MediaItem>,
+  val page: Int,
+  val totalPages: Int,
 )
 
 data class SeasonSummary(
@@ -69,7 +87,13 @@ data class EpisodeItem(
 // --- Wire models -----------------------------------------------------------
 
 @Serializable
-internal data class TmdbPagedResults(val results: List<TmdbEntry> = emptyList())
+internal data class TmdbPagedResults(
+  val results: List<TmdbEntry> = emptyList(),
+  val page: Int = 1,
+  // Absent on the appended `similar` block, which is why both counters default rather than being
+  // required: a details response must not fail to parse over pagination it never uses.
+  @SerialName("total_pages") val totalPages: Int = 1,
+)
 
 @Serializable
 internal data class TmdbEntry(

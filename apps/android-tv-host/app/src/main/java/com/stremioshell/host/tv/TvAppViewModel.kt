@@ -16,10 +16,15 @@ import com.stremioshell.host.tv.data.addon.StreamOrder
 import com.stremioshell.host.tv.data.addon.StreamQuality
 import com.stremioshell.host.tv.data.addon.StreamSelection
 import com.stremioshell.host.tv.data.persistenceScope
+import com.stremioshell.host.tv.data.tmdb.CatalogQuery
+import com.stremioshell.host.tv.data.tmdb.CatalogRails
 import com.stremioshell.host.tv.data.tmdb.EpisodeItem
 import com.stremioshell.host.tv.data.tmdb.MediaDetails
 import com.stremioshell.host.tv.data.tmdb.MediaItem
+import com.stremioshell.host.tv.data.tmdb.MediaPage
 import com.stremioshell.host.tv.data.tmdb.MediaType
+import com.stremioshell.host.tv.data.tmdb.RailPageState
+import com.stremioshell.host.tv.data.tmdb.RailPaging
 import com.stremioshell.host.tv.data.tmdb.TmdbClient
 import com.stremioshell.host.tv.pairing.ConfigMerge
 import com.stremioshell.host.tv.pairing.ConfigPairingServer
@@ -45,24 +50,48 @@ import kotlinx.coroutines.withContext
 data class HomeRail(val title: String, val items: List<MediaItem>)
 
 /**
- * Assembles Home's rails from a load where individual endpoints may have failed.
+ * Assembles Home's rails from a load that may still be in progress and whose individual endpoints
+ * may have failed.
  *
- * Split out of the ViewModel so the partial-success rule is unit-testable: rails keep their
- * declared order, a rail that failed falls back to the copy already on screen (a refresh must
- * never make a row vanish under the user), and only a rail with no data at all counts as a gap
- * worth reporting.
+ * Split out of the ViewModel so the rules that keep Home stable are unit-testable:
+ *  - rails keep their declared order, whatever order they come back in;
+ *  - a rail that failed falls back to the copy already on screen, because a refresh must never make
+ *    a row vanish under the user;
+ *  - only a rail with no data at all counts as a gap worth reporting;
+ *  - a rail that has not answered yet holds back every rail below it, so rows only ever *append*.
+ *    That last one is what lets Home paint the first rail the moment it lands: nothing already on
+ *    screen can be pushed down later, so the focused row never moves.
  */
 object HomeRailAssembly {
   data class Assembled(val rails: List<HomeRail>, val missingTitles: List<String>)
 
-  fun merge(order: List<String>, fresh: List<HomeRail>, previous: List<HomeRail>): Assembled {
-    val freshByTitle = fresh.associateBy { it.title }
+  /**
+   * @param loaded rails that have come back with items during this load.
+   * @param failed titles whose request came back empty-handed. A title in neither is still in
+   *   flight; at the end of a load there are none of those left.
+   * @param previous the rails already on screen, used as the fallback for both cases.
+   */
+  fun visible(
+    order: List<String>,
+    loaded: List<HomeRail>,
+    failed: Set<String> = emptySet(),
+    previous: List<HomeRail> = emptyList(),
+  ): Assembled {
+    val loadedByTitle = loaded.associateBy { it.title }
     val previousByTitle = previous.associateBy { it.title }
     val rails = mutableListOf<HomeRail>()
     val missing = mutableListOf<String>()
     for (title in order) {
-      val rail = freshByTitle[title] ?: previousByTitle[title]
-      if (rail == null) missing += title else rails += rail
+      val rail = loadedByTitle[title] ?: previousByTitle[title]
+      if (rail != null) {
+        rails += rail
+        continue
+      }
+      if (title in failed) {
+        missing += title
+        continue
+      }
+      break
     }
     return Assembled(rails, missing)
   }
@@ -111,6 +140,13 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   private val _railsNotice = MutableStateFlow<String?>(null)
   val railsNotice: StateFlow<String?> = _railsNotice
 
+  /**
+   * How far each rail has paged, by rail title. Exposed only so a row can show that its next page
+   * is on the way; the decision to fetch one lives in [paginateRail].
+   */
+  private val _railPaging = MutableStateFlow<Map<String, RailPageState>>(emptyMap())
+  val railPaging: StateFlow<Map<String, RailPageState>> = _railPaging
+
   private val _searchResults = MutableStateFlow<LoadState<List<MediaItem>>>(LoadState.Ready(emptyList()))
   val searchResults: StateFlow<LoadState<List<MediaItem>>> = _searchResults
 
@@ -125,6 +161,9 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
 
   private var railsLoadedForKey: String? = null
   private var railsJob: Job? = null
+
+  /** One in-flight next-page fetch per rail, so a rails reload can drop them all. */
+  private val railPageJobs = mutableMapOf<String, Job>()
 
   /** When the rails last loaded completely; null until they have, so a partial load retries. */
   private var railsLoadedAtMillis: Long? = null
@@ -269,15 +308,11 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
 
   private fun tmdb(): TmdbClient? = tmdbApiKey.value?.takeIf { it.isNotBlank() }?.let { TmdbClient(it) }
 
-  /** The rails Home shows, in order. Each one is an independent TMDB endpoint. */
-  private class RailSpec(val title: String, val load: suspend (TmdbClient) -> List<MediaItem>)
-
-  private val railSpecs = listOf(
-    RailSpec("Trending Movies") { it.trending(MediaType.Movie) },
-    RailSpec("Trending Shows") { it.trending(MediaType.Show) },
-    RailSpec("Popular Movies") { it.popular(MediaType.Movie) },
-    RailSpec("Popular Shows") { it.popular(MediaType.Show) },
-  )
+  private suspend fun TmdbClient.load(query: CatalogQuery, page: Int): MediaPage = when (query) {
+    is CatalogQuery.Trending -> trending(query.type, page)
+    is CatalogQuery.Popular -> popular(query.type, page)
+    is CatalogQuery.Genre -> discover(query.type, query.genreId, page)
+  }
 
   fun loadHomeRails(force: Boolean = false) {
     val key = tmdbApiKey.value?.takeIf { it.isNotBlank() } ?: return
@@ -296,9 +331,14 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    * place instead of blanking Home back to Loading (which would throw away the row the user is on
    * plus their scroll position). Only an actual key change starts over from Loading.
    *
-   * The four endpoints are fetched concurrently (awaiting them in turn made cold Home latency the
-   * sum of four round trips) and scored independently: one rail failing shows the other three with
-   * a retry notice underneath, rather than blanking the ones that worked.
+   * Endpoints within a wave are fetched concurrently (awaiting them in turn made cold Home latency
+   * the sum of every round trip) and scored independently: one rail failing shows the others with a
+   * retry notice underneath, rather than blanking the ones that worked. Each rail is published the
+   * moment it lands, so Home paints its first row without waiting on the slowest of nine.
+   *
+   * Waves exist because the genre rails are below the fold: firing all nine at once would put the
+   * four headline rails behind them in OkHttp's five-per-host queue, making the part of Home the
+   * user is actually looking at slower to arrive.
    */
   private fun loadRails(key: String, force: Boolean) {
     val sameKey = railsLoadedForKey == key
@@ -311,26 +351,57 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       railsLoadedAtMillis = null
     }
     railsLoadedForKey = key
+    // A page fetch for the rails we are about to replace would land on a row that no longer exists.
+    cancelRailPaging()
     val refreshingInPlace = sameKey && _homeRails.value is LoadState.Ready
     if (!refreshingInPlace) {
       _homeRails.value = LoadState.Loading
       _railsNotice.value = null
+      _railPaging.value = emptyMap()
     }
     railsJob = viewModelScope.launch {
       val client = TmdbClient(key)
-      val results = railSpecs
-        .map { spec -> async { spec.title to catchingFailure { spec.load(client) } } }
-        .awaitAll()
-      if (!isActive || railsLoadedForKey != key) return@launch
-      val assembled = HomeRailAssembly.merge(
-        order = railSpecs.map { it.title },
-        fresh = results.mapNotNull { (title, result) ->
-          result.getOrNull()?.let { items -> HomeRail(title, items) }
-        },
-        previous = (_homeRails.value as? LoadState.Ready)?.value.orEmpty(),
-      )
-      val failure = results.firstNotNullOfOrNull { it.second.exceptionOrNull() }
-      val message = failure?.let { NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, it) }
+      // Snapshots: everything below publishes into _homeRails as it goes, so the fallback copy has
+      // to be the one from before this load started.
+      val previous = (_homeRails.value as? LoadState.Ready)?.value.orEmpty()
+      val carriedPaging = _railPaging.value
+      val loaded = LinkedHashMap<String, HomeRail>()
+      val failed = mutableSetOf<String>()
+      val failures = mutableListOf<Throwable>()
+
+      fun publishPartial() {
+        val assembled = HomeRailAssembly.visible(CatalogRails.ORDER, loaded.values.toList(), failed, previous)
+        // Mid-load emptiness is just "nothing has answered yet"; only the completed load below
+        // may call a load failed.
+        if (assembled.rails.isNotEmpty()) _homeRails.value = LoadState.Ready(assembled.rails)
+      }
+
+      for (wave in CatalogRails.WAVES) {
+        wave.map { spec ->
+          async {
+            val result = catchingFailure { client.load(spec.query, page = 1) }
+            if (!isActive || railsLoadedForKey != key) return@async
+            val page = result.getOrNull()
+            if (page == null) {
+              failed += spec.title
+              result.exceptionOrNull()?.let { failures += it }
+            } else {
+              val items = RailPaging.merge(page.items, previous.itemsFor(spec.title))
+              loaded[spec.title] = HomeRail(spec.title, items)
+              setRailPaging(
+                spec.title,
+                RailPaging.afterFirstPage(page, items.size, carriedPaging[spec.title]),
+              )
+            }
+            publishPartial()
+          }
+        }.awaitAll()
+        if (!isActive || railsLoadedForKey != key) return@launch
+      }
+
+      val assembled = HomeRailAssembly.visible(CatalogRails.ORDER, loaded.values.toList(), failed, previous)
+      val message = failures.firstOrNull()
+        ?.let { NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, it) }
       if (assembled.rails.isEmpty()) {
         // Nothing loaded and nothing to fall back on: the one case Home reports as an outright
         // failure.
@@ -342,9 +413,62 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       // on screen needs no notice, just a retry on the next visit.
       _railsNotice.value = if (assembled.missingTitles.isEmpty()) null else message
       // Only a complete load counts as fresh, so a partial one is retried on the next visit.
-      railsLoadedAtMillis = if (failure == null) System.currentTimeMillis() else null
+      railsLoadedAtMillis = if (failed.isEmpty()) System.currentTimeMillis() else null
     }
   }
+
+  /**
+   * Fetches the next page of the rail titled [title] when its row has been scrolled close enough to
+   * the end.
+   *
+   * Called from the row on every change to its last visible card, so the cheap rejections come
+   * first. The result replaces exactly one entry of the rail list: the other rails keep their
+   * identity, so LazyColumn recomposes only this row, and the row's own keyed items leave every card
+   * already on screen at the index it was at - which is what keeps focus and scroll offset put.
+   */
+  fun paginateRail(title: String, lastVisibleIndex: Int) {
+    val key = railsLoadedForKey ?: return
+    val state = _railPaging.value[title] ?: return
+    val rails = (_homeRails.value as? LoadState.Ready)?.value ?: return
+    val items = rails.firstOrNull { it.title == title }?.items ?: return
+    if (!RailPaging.shouldFetchNext(state, items.size, lastVisibleIndex)) return
+    val spec = CatalogRails.specFor(title) ?: return
+    setRailPaging(title, state.copy(loading = true))
+    railPageJobs[title] = viewModelScope.launch {
+      val result = catchingFailure { TmdbClient(key).load(spec.query, state.nextPage) }
+      if (!isActive || railsLoadedForKey != key) return@launch
+      val page = result.getOrNull()
+      if (page == null) {
+        setRailPaging(title, RailPaging.failed(state))
+        return@launch
+      }
+      val current = (_homeRails.value as? LoadState.Ready)?.value ?: return@launch
+      val index = current.indexOfFirst { it.title == title }
+      if (index < 0) return@launch
+      val merged = RailPaging.merge(current[index].items, page.items)
+      _homeRails.value = LoadState.Ready(
+        current.toMutableList().also { it[index] = HomeRail(title, merged) },
+      )
+      setRailPaging(title, RailPaging.afterNextPage(state, page, merged.size))
+    }
+  }
+
+  private fun setRailPaging(title: String, state: RailPageState) {
+    _railPaging.value = _railPaging.value + (title to state)
+  }
+
+  private fun cancelRailPaging() {
+    railPageJobs.values.forEach { it.cancel() }
+    railPageJobs.clear()
+    // A cancelled fetch never clears its own flag, and a rail left marked as loading would show a
+    // placeholder that never resolves and would refuse to page again.
+    if (_railPaging.value.values.any { it.loading }) {
+      _railPaging.value = _railPaging.value.mapValues { (_, state) -> state.copy(loading = false) }
+    }
+  }
+
+  private fun List<HomeRail>.itemsFor(title: String): List<MediaItem> =
+    firstOrNull { it.title == title }?.items.orEmpty()
 
   /**
    * [runCatching] would swallow CancellationException too, letting a cancelled rail look like a

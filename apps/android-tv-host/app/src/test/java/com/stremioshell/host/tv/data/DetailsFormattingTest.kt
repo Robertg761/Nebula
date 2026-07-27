@@ -293,4 +293,22 @@ class DetailsMetadataTest {
     )
     assertEquals("2019", line)
   }
+
+  @Test
+  fun `the billboard line names the medium a catalog entry cannot describe`() {
+    assertEquals(
+      "2019  •  Film  •  7.5 / 10",
+      DetailsMetadata.ofItem(details(rating = 7.5).item),
+    )
+    assertEquals(
+      "2019  •  Series",
+      DetailsMetadata.ofItem(details(type = MediaType.Show).item),
+    )
+  }
+
+  @Test
+  fun `the billboard line collapses around a missing year or score`() {
+    assertEquals("Film", DetailsMetadata.ofItem(details(year = null).item))
+    assertEquals("2019  •  Film", DetailsMetadata.ofItem(details(rating = 0.0).item))
+  }
 }

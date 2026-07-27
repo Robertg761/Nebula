@@ -19,14 +19,33 @@ class TmdbClient(
 ) {
   private val json = Json { ignoreUnknownKeys = true }
 
-  suspend fun trending(type: MediaType): List<MediaItem> {
+  suspend fun trending(type: MediaType, page: Int = 1): MediaPage {
     val path = if (type == MediaType.Movie) "trending/movie/week" else "trending/tv/week"
-    return pagedItems(path, type)
+    return pagedItems(path, type, page)
   }
 
-  suspend fun popular(type: MediaType): List<MediaItem> {
+  suspend fun popular(type: MediaType, page: Int = 1): MediaPage {
     val path = if (type == MediaType.Movie) "movie/popular" else "tv/popular"
-    return pagedItems(path, type)
+    return pagedItems(path, type, page)
+  }
+
+  /**
+   * A genre rail.
+   *
+   * `vote_count.gte` is the difference between a browsable row and a junk drawer: discover sorted
+   * by popularity alone leads with whatever was uploaded this week, including titles with a handful
+   * of votes and no artwork.
+   */
+  suspend fun discover(type: MediaType, genreId: Int, page: Int = 1): MediaPage {
+    val isMovie = type == MediaType.Movie
+    val path = if (isMovie) "discover/movie" else "discover/tv"
+    val query = buildString {
+      append("sort_by=popularity.desc")
+      append("&with_genres=$genreId")
+      append("&vote_count.gte=$MIN_DISCOVER_VOTES")
+      if (isMovie) append("&include_adult=false")
+    }
+    return pagedItems(path, type, page, query)
   }
 
   suspend fun search(query: String): List<MediaItem> {
@@ -123,9 +142,21 @@ class TmdbClient(
     }
   }
 
-  private suspend fun pagedItems(path: String, type: MediaType): List<MediaItem> {
-    val body = fetcher.getAllowingStale(url(path, null))
-    return json.decodeFromString<TmdbPagedResults>(body).results.map { it.toItem(type) }
+  private suspend fun pagedItems(
+    path: String,
+    type: MediaType,
+    page: Int,
+    query: String? = null,
+  ): MediaPage {
+    val paged = listOfNotNull(query?.ifBlank { null }, "page=${page.coerceAtLeast(1)}")
+      .joinToString("&")
+    val body = fetcher.getAllowingStale(url(path, paged))
+    val decoded = json.decodeFromString<TmdbPagedResults>(body)
+    return MediaPage(
+      items = decoded.results.map { it.toItem(type) },
+      page = decoded.page,
+      totalPages = decoded.totalPages,
+    )
   }
 
   private fun url(path: String, query: String? = null): String {
@@ -159,5 +190,8 @@ class TmdbClient(
     /** Full TMDB casts run to hundreds of one-line parts; nobody scrolls a row that far. */
     private const val MAX_CAST = 20
     private const val MAX_SIMILAR = 20
+
+    /** Low enough to keep genre rails deep, high enough to keep unreleased noise out of them. */
+    private const val MIN_DISCOVER_VOTES = 100
   }
 }

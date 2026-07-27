@@ -228,7 +228,7 @@ fun MediaRow(title: String, items: List<MediaItem>, onItemClick: (MediaItem) -> 
       contentPadding = PaddingValues(horizontal = 48.dp),
       horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-      items(items, key = { "${it.type}:${it.tmdbId}" }) { item ->
+      items(items, key = { it.key }) { item ->
         MediaCard(item = item, onClick = { onItemClick(item) })
       }
     }

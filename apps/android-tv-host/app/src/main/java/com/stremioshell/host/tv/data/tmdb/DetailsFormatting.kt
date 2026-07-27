@@ -172,6 +172,18 @@ object DetailsMetadata {
     return String.format(Locale.US, "%.1f / 10", voteAverage)
   }
 
+  /**
+   * The same line for a surface that only has a catalog entry, not a full details response - Home's
+   * billboard renders before any title has been opened, so runtime, certification and genres simply
+   * do not exist yet. "Film"/"Series" stands in for them: it is the one fact a viewer needs before
+   * pressing OK, and without it the line can collapse to a bare year.
+   */
+  fun ofItem(item: MediaItem): String = listOfNotNull(
+    item.year?.trim()?.ifBlank { null },
+    if (item.type == MediaType.Show) "Series" else "Film",
+    scoreLabel(item.rating),
+  ).joinToString(SEPARATOR)
+
   fun of(details: MediaDetails): String {
     val isShow = details.item.type == MediaType.Show
     // Specials are excluded from the count for the same reason they sort last: "3 seasons" for a
