@@ -9,6 +9,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.lifecycleScope
 import com.stremioshell.host.BuildConfig
+import com.stremioshell.host.tv.channel.WatchNextDeepLink
+import com.stremioshell.host.tv.channel.WatchNextSync
+import com.stremioshell.host.tv.channel.WatchNextTarget
 import com.stremioshell.host.tv.data.SettingsStore
 import com.stremioshell.host.tv.data.WatchStateStore
 import com.stremioshell.host.tv.player.MpvPlayerActivity
@@ -43,6 +46,21 @@ class TvAppActivity : ComponentActivity() {
   private val pendingStreams = mutableStateOf<Screen.Streams?>(null)
 
   /**
+   * The title a Watch Next row on the TV home asked to reopen, parsed off the
+   * launch intent.
+   *
+   * Held rather than acted on: routing it needs a starting destination on TvApp,
+   * which this activity does not own yet (see the deep-link patch in the Watch
+   * Next notes). Until that lands, a Watch Next press opens Home - the same place
+   * the launcher icon goes, which is where it went before the row existed.
+   *
+   * Compose state, and populated from onNewIntent as well, because singleTask
+   * means a second press while the app is already up arrives as a new intent into
+   * a running composition rather than as a fresh onCreate.
+   */
+  internal val pendingWatchNextTarget = mutableStateOf<WatchNextTarget?>(null)
+
+  /**
    * The player is started for a result purely so it can hand an episode back for
    * stream selection; a plain exit returns no data and only clears the guard.
    */
@@ -61,6 +79,7 @@ class TvAppActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     val watchStore = WatchStateStore(applicationContext)
+    pendingWatchNextTarget.value = WatchNextDeepLink.parse(intent?.dataString)
     // The native app is the launcher target, so it owns update scheduling now;
     // the WebView shell may never be opened again on a fresh install.
     UpdateWorkScheduler.ensureScheduled(this)
@@ -111,9 +130,26 @@ class TvAppActivity : ComponentActivity() {
     }
   }
 
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    // getIntent() is what the rest of the activity reads; leaving it on the
+    // original launch intent would make a second deep link invisible to it.
+    setIntent(intent)
+    WatchNextDeepLink.parse(intent.dataString)?.let { pendingWatchNextTarget.value = it }
+  }
+
   override fun onResume() {
     super.onResume()
     // Back from the player (or never left): launching is allowed again.
     launchInFlight.set(false)
+  }
+
+  override fun onStop() {
+    super.onStop()
+    // "Mark watched" and "Remove from row" change the watch state from the UI,
+    // which the player's publish hook never sees. Leaving the app is the moment
+    // the home screen is about to be looked at, so this one skips the throttle -
+    // a row the viewer just dismissed must not still be there behind them.
+    WatchNextSync.publish(this, force = true)
   }
 }

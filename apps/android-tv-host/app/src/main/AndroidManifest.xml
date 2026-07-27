@@ -37,7 +37,20 @@
       android:configChanges="colorMode|orientation|screenSize|smallestScreenSize|screenLayout|density|keyboardHidden|navigation|uiMode"
       android:exported="true"
       android:launchMode="singleTask"
-      android:theme="@style/Theme.StremioShell.NoActionBar" />
+      android:theme="@style/Theme.StremioShell.NoActionBar">
+      <!-- Watch Next rows on the TV home carry an intent that names this
+           component explicitly, so this filter is not what routes them; it is
+           what makes the same URI reachable from `adb shell am start` and from
+           the assistant, which is the only practical way to exercise the deep
+           link without a home screen that shows the row. -->
+      <intent-filter>
+        <action android:name="android.intent.action.VIEW" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data
+          android:host="watch-next"
+          android:scheme="stremio-tv" />
+      </intent-filter>
+    </activity>
 
     <!-- Handles its own config changes: matching the display refresh rate to the
          content frame rate can switch display mode mid-playback, and mpv's

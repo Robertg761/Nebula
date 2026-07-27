@@ -56,6 +56,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.tv.material3.Button
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.stremioshell.host.tv.channel.WatchNextSync
 import com.stremioshell.host.tv.data.PlayerPrefs
 import com.stremioshell.host.tv.data.PlayerPrefsStore
 import com.stremioshell.host.tv.data.SettingsStore
@@ -2443,6 +2444,9 @@ class MpvPlayerActivity : ComponentActivity() {
     val durationMs = (durationSec.doubleValue * 1000).toLong()
     val store = watchStore
     val key = watchKey
+    // Read here, not inside the coroutine: these saves run while the activity is
+    // finishing, and touching it after onDestroy is what this avoids.
+    val appContext = applicationContext
     val entry = WatchEntry(
       key = key,
       tmdbId = tmdbId,
@@ -2469,7 +2473,14 @@ class MpvPlayerActivity : ComponentActivity() {
         store.upsert(entry.copy(positionMs = 0, watchedAtMs = entry.updatedAtMs))
       } else if (positionMs > MIN_SAVE_MS) {
         store.upsert(entry)
+      } else {
+        return@launch
       }
+      // Keep the TV home's Watch Next row in step with what was just written.
+      // Forced on the saves that end a session so a finished episode leaves the
+      // home screen immediately; the periodic ticks go through the throttle so a
+      // running film does not rewrite the provider every 30 seconds.
+      WatchNextSync.publish(appContext, force = reason != SaveReason.Progress)
     }
   }
 
