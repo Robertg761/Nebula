@@ -91,7 +91,9 @@ class MpvPlayerActivity : ComponentActivity() {
   private lateinit var settingsStore: SettingsStore
   private lateinit var streamPickStore: StreamPickStore
   private val addonClient = AddonClient()
-  private val subtitlesClient = SubtitlesClient()
+  // Reads Settings at request time, not construction: settingsStore is only bound
+  // in onCreate, and the search this feeds runs long after.
+  private val subtitlesClient = SubtitlesClient(baseUrl = { settingsStore.subtitlesBaseUrl.first() })
   private val mainHandler = Handler(Looper.getMainLooper())
 
   /**

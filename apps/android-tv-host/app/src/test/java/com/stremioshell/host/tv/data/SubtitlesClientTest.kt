@@ -161,6 +161,62 @@ class SubtitlesClientTest {
     assertEquals(0, plain)
   }
 
+  @Test
+  fun `the configured subtitles addon is asked instead of the default`() = runBlocking {
+    var requested = ""
+    val client = SubtitlesClient(
+      fetcher = fetcher { url ->
+        requested = url
+        """{"subtitles":[]}"""
+      },
+      baseUrl = { "https://subs.example" },
+    )
+
+    client.movieSubtitles("tt1")
+
+    assertEquals("https://subs.example/subtitles/movie/tt1.json", requested)
+  }
+
+  @Test
+  fun `the base url is resolved per request, so a Settings change applies mid-session`() = runBlocking {
+    // The player builds one client for the whole film.
+    val bases = ArrayDeque(listOf("https://first.example", "https://second.example"))
+    var requested = ""
+    val client = SubtitlesClient(
+      fetcher = fetcher { url ->
+        requested = url
+        """{"subtitles":[]}"""
+      },
+      baseUrl = { bases.removeFirst() },
+    )
+
+    client.movieSubtitles("tt1")
+    client.movieSubtitles("tt1")
+
+    assertEquals("https://second.example/subtitles/movie/tt1.json", requested)
+  }
+
+  @Test
+  fun `a blank configured url falls back to the built-in addon`() = runBlocking {
+    var requested = ""
+    val client = SubtitlesClient(
+      fetcher = fetcher { url ->
+        requested = url
+        """{"subtitles":[]}"""
+      },
+      baseUrl = { "  " },
+    )
+
+    client.movieSubtitles("tt1")
+
+    assertEquals("${SubtitlesClient.OPENSUBTITLES_V3_BASE}/subtitles/movie/tt1.json", requested)
+  }
+
+  private fun fetcher(body: (String) -> String) = object : HttpFetcher {
+    override suspend fun get(url: String): String = body(url)
+    override suspend fun getAllowingStale(url: String): String = body(url)
+  }
+
   private fun client(body: (String) -> String) = SubtitlesClient(
     fetcher = object : HttpFetcher {
       override suspend fun get(url: String): String = body(url)

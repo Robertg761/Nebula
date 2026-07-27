@@ -67,6 +67,30 @@ class AddonClientTest {
   }
 
   @Test
+  fun `infoHash and fileIdx are read, so one torrent can be spotted across two addons`() = runBlocking {
+    val client = AddonClient(fetcher = {
+      """{"streams":[{"name":"Comet","url":"https://rd.example/v.mkv",
+        "infoHash":"ABC123","fileIdx":2}]}"""
+    })
+
+    val stream = client.movieStreams("https://comet.example/cfg/manifest.json", "tt1").single()
+
+    assertEquals("ABC123", stream.infoHash)
+    assertEquals(2, stream.fileIdx)
+    // Ours to set, never the addon's: a response cannot claim to come from elsewhere.
+    assertEquals(null, stream.source)
+  }
+
+  @Test
+  fun `an addon cannot name itself as the source of a row`() = runBlocking {
+    val client = AddonClient(fetcher = {
+      """{"streams":[{"name":"Comet","url":"https://rd.example/v.mkv","source":"Torrentio"}]}"""
+    })
+
+    assertEquals(null, client.movieStreams("https://comet.example/cfg/manifest.json", "tt1").single().source)
+  }
+
+  @Test
   fun `manifest url without manifest json is rejected`() {
     assertThrows(IllegalArgumentException::class.java) {
       AddonClient.streamUrl("https://comet.example/abc123", "movie", "tt1")

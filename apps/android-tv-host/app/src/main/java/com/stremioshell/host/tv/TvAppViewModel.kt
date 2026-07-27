@@ -3,18 +3,25 @@ package com.stremioshell.host.tv
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.stremioshell.host.tv.data.AddonProbe
 import com.stremioshell.host.tv.data.NetworkErrorMessage
 import com.stremioshell.host.tv.data.NetworkSource
+import com.stremioshell.host.tv.data.SettingsDraft
+import com.stremioshell.host.tv.data.SettingsSaveGuard
+import com.stremioshell.host.tv.data.SettingsStatus
 import com.stremioshell.host.tv.data.SettingsStore
 import com.stremioshell.host.tv.data.StalenessPolicy
+import com.stremioshell.host.tv.data.StoredSettings
 import com.stremioshell.host.tv.data.StreamPickStore
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.WatchStateStore
 import com.stremioshell.host.tv.data.WatchlistEntry
 import com.stremioshell.host.tv.data.WatchlistStore
 import com.stremioshell.host.tv.data.addon.AddonClient
+import com.stremioshell.host.tv.data.addon.AddonFetch
+import com.stremioshell.host.tv.data.addon.AddonList
 import com.stremioshell.host.tv.data.addon.AddonStream
-import com.stremioshell.host.tv.data.addon.StreamOrder
+import com.stremioshell.host.tv.data.addon.StreamMerge
 import com.stremioshell.host.tv.data.addon.StreamQuality
 import com.stremioshell.host.tv.data.addon.StreamSelection
 import com.stremioshell.host.tv.data.persistenceScope
@@ -33,6 +40,7 @@ import com.stremioshell.host.tv.pairing.ConfigPairingServer
 import com.stremioshell.host.tv.pairing.PairingSubmission
 import com.stremioshell.host.tv.pairing.PairingTokenGenerator
 import com.stremioshell.host.tv.pairing.findLanIpv4
+import java.net.SocketTimeoutException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -48,6 +56,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class HomeRail(val title: String, val items: List<MediaItem>)
 
@@ -114,7 +123,13 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
 
   val tmdbApiKey: StateFlow<String?> = settings.tmdbApiKey
     .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+  /** Every configured stream addon, in the viewer's order. Null until DataStore answers. */
+  val addonManifestUrls: StateFlow<List<String>?> = settings.addonManifestUrls
+    .stateIn(viewModelScope, SharingStarted.Eagerly, null)
   val addonManifestUrl: StateFlow<String?> = settings.addonManifestUrl
+    .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+  val subtitlesBaseUrl: StateFlow<String?> = settings.subtitlesBaseUrl
     .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
   /** Everything ever played, watched records included: what episode lists mark from. */
@@ -181,6 +196,14 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
 
   private val _streams = MutableStateFlow<LoadState<List<AddonStream>>>(LoadState.Loading)
   val streams: StateFlow<LoadState<List<AddonStream>>> = _streams
+
+  /**
+   * Set when some but not all addons answered. Like [railsNotice], it belongs
+   * beside the rows that did load rather than instead of them: a viewer with three
+   * addons and one outage still has streams to play.
+   */
+  private val _streamsNotice = MutableStateFlow<String?>(null)
+  val streamsNotice: StateFlow<String?> = _streamsNotice
 
   private var railsLoadedForKey: String? = null
   private var railsJob: Job? = null
@@ -572,29 +595,72 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
+  /**
+   * Asks every configured addon for this title at once and shows one merged list.
+   *
+   * Parallel with a per-addon budget, because the list is only as fast as its
+   * slowest member otherwise: one addon whose debrid backend is wedged would hold
+   * the picker on "Asking..." for OkHttp's full 40s call timeout while three
+   * healthy ones sat finished. A partial answer beats a complete one that arrives
+   * after the viewer has given up, so a timed-out addon is reported as a failure
+   * alongside the rows that did land.
+   */
   fun loadStreams(imdbId: String, season: Int?, episode: Int?) {
     val key = "$imdbId/${season ?: "-"}/${episode ?: "-"}"
     // Switching episodes must not let the previous episode's list render under the new header.
     streamsJob?.cancel()
     streamsKey = key
-    val manifest = addonManifestUrl.value?.takeIf { it.isNotBlank() }
-    if (manifest == null) {
-      _streams.value = LoadState.Failed("No addon configured. Set your Comet manifest URL in Settings.")
-      return
-    }
     _streams.value = LoadState.Loading
+    _streamsNotice.value = null
     streamsJob = viewModelScope.launch {
-      val result = runCatching {
-        val streams = if (season != null && episode != null) {
-          addonClient.episodeStreams(manifest, imdbId, season, episode)
-        } else {
-          addonClient.movieStreams(manifest, imdbId)
+      // Read inside the coroutine rather than off the eagerly-shared StateFlow: on a
+      // cold start that flow is still null, and the old code reported "no addon
+      // configured" to a viewer who had one.
+      val addons = settings.addonManifestUrls.first()
+      if (!isActive || streamsKey != key) return@launch
+      if (addons.isEmpty()) {
+        _streams.value = LoadState.Failed("No addon configured. Add a stream addon in Settings.")
+        return@launch
+      }
+      val labels = AddonList.labels(addons)
+      val failures = mutableListOf<Throwable>()
+      val fetches = addons.mapIndexed { index, url ->
+        async {
+          // withTimeoutOrNull around the catch, not inside it: the timeout arrives as a
+          // CancellationException, which catchingFailure deliberately rethrows.
+          val outcome = withTimeoutOrNull(ADDON_STREAM_TIMEOUT_MS) {
+            catchingFailure {
+              if (season != null && episode != null) {
+                addonClient.episodeStreams(url, imdbId, season, episode)
+              } else {
+                addonClient.movieStreams(url, imdbId)
+              }
+            }
+          }
+          // Named by label, never by URL: an addon's configured path can carry a
+          // debrid key, and exception messages get logged.
+          // Collected on the ViewModel's own (main) dispatcher, so no locking.
+          val error = if (outcome == null) {
+            SocketTimeoutException("${labels[index]} timed out")
+          } else {
+            outcome.exceptionOrNull()
+          }
+          error?.let { failures += it }
+          AddonFetch(labels[index], outcome?.getOrNull())
         }
-        // Comet returns its rows grouped by debrid service, so 2160p, 1080p and 480p
-        // are interleaved and the best release is rarely near the top.
-        LoadState.Ready(StreamOrder.byQuality(streams)) as LoadState<List<AddonStream>>
-      }.getOrElse { LoadState.Failed(NetworkErrorMessage.forThrowable(NetworkSource.Addon, it)) }
-      if (isActive && streamsKey == key) _streams.value = result
+      }.awaitAll()
+      if (!isActive || streamsKey != key) return@launch
+      val merged = StreamMerge.merge(fetches)
+      if (merged.allFailed) {
+        // Every addon down is the same dead end a single addon's failure always was,
+        // so it keeps that screen: one message and a Retry, not an empty list.
+        _streams.value = LoadState.Failed(
+          NetworkErrorMessage.forThrowable(NetworkSource.Addon, failures.firstOrNull()),
+        )
+        return@launch
+      }
+      _streamsNotice.value = merged.notice
+      _streams.value = LoadState.Ready(merged.streams)
     }
   }
 
@@ -648,42 +714,78 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     persistenceScope.launch { runCatching { watchlist.remove(entry.key) } }
   }
 
-  fun saveSettings(tmdbKey: String, addonUrl: String, onStatus: (String) -> Unit) {
+  /** Appends an addon and persists immediately; see [AddonList.added] for what is rejected. */
+  fun addAddon(rawUrl: String) {
     viewModelScope.launch {
-      settings.setTmdbApiKey(tmdbKey)
-      settings.setAddonManifestUrl(addonUrl)
+      val current = settings.addonManifestUrls.first()
+      val next = AddonList.added(current, rawUrl)
+      if (next != current) settings.setAddonManifestUrls(next)
+    }
+  }
+
+  /**
+   * Removes one addon and persists immediately.
+   *
+   * Deliberately not staged behind Save: a list whose edits only take effect later
+   * shows the viewer a state that is not the one being used, and removing the last
+   * addon that way would collide with [SettingsSaveGuard], which refuses to write
+   * an empty list over a stored one. Pressing Remove is the explicit clear.
+   */
+  fun removeAddon(url: String) {
+    viewModelScope.launch {
+      settings.setAddonManifestUrls(AddonList.removed(settings.addonManifestUrls.first(), url))
+    }
+  }
+
+  /** The explicit clear the blank-save guard points at. */
+  fun clearTmdbKey() {
+    viewModelScope.launch { settings.setTmdbApiKey("") }
+  }
+
+  fun saveSettings(
+    tmdbKey: String,
+    addonUrls: List<String>,
+    subtitlesBaseUrl: String,
+    onStatus: (String) -> Unit,
+  ) {
+    viewModelScope.launch {
+      val resolved = SettingsSaveGuard.resolve(
+        SettingsDraft(tmdbKey, addonUrls, subtitlesBaseUrl),
+        StoredSettings(settings.tmdbApiKey.first(), settings.addonManifestUrls.first()),
+      )
+      settings.setTmdbApiKey(resolved.tmdbKey)
+      settings.setAddonManifestUrls(resolved.addonUrls)
+      settings.setSubtitlesBaseUrl(resolved.subtitlesBaseUrl)
       // Persisting the key is what makes Home load its rails, so start that load here, with the key
       // we just wrote (the exposed flow has not caught up yet). loadRails de-dupes it against the
       // load Home asks for when it next composes, so the save produces exactly one. The connection
       // checks below can block for ~30s each, and a load kicked off after them would land long
       // after Home had rendered and blank it back to "Loading catalogs..." mid-scroll.
-      if (tmdbKey.isNotBlank()) loadRails(tmdbKey, force = true)
-      onStatus("Saved. Checking connections...")
+      if (resolved.tmdbKey.isNotBlank()) loadRails(resolved.tmdbKey, force = true)
+      val kept = SettingsSaveGuard.keptNotice(resolved)
+      onStatus(listOfNotNull(kept, "Saved. Checking connections...").joinToString("  "))
 
-      val tmdbStatus = if (tmdbKey.isBlank()) {
-        "TMDB: no key"
-      } else {
-        runCatching { TmdbClient(tmdbKey).trending(MediaType.Movie) }
-          .fold(
-            onSuccess = { "TMDB: connected" },
-            onFailure = { "TMDB: failed (check the key)" },
-          )
+      // Every addon at once, for the reason the stream loader does it: a viewer with
+      // four addons should not wait four timeouts to find out which one is broken.
+      val labels = AddonList.labels(resolved.addonUrls)
+      val probes = resolved.addonUrls.mapIndexed { index, url ->
+        async { AddonProbe(labels[index], runCatching { addonClient.manifest(url) }.getOrNull()?.name) }
+      }.awaitAll()
+
+      val tmdbConnected = resolved.tmdbKey.takeIf { it.isNotBlank() }?.let {
+        runCatching { TmdbClient(it).trending(MediaType.Movie) }.isSuccess
       }
-
-      val addonStatus = if (addonUrl.isBlank()) {
-        "Addon: no URL"
-      } else {
-        runCatching { addonClient.manifest(addonUrl) }
-          .fold(
-            onSuccess = { manifest ->
-              val name = manifest.name.ifBlank { "addon" }
-              "Addon: connected ($name)"
-            },
-            onFailure = { "Addon: failed (check the URL)" },
-          )
-      }
-
-      onStatus("$tmdbStatus   |   $addonStatus")
+      val status = SettingsStatus.tmdbStatus(resolved.tmdbKey, tmdbConnected) +
+        "   |   " + SettingsStatus.addonStatus(probes)
+      onStatus(listOfNotNull(kept, status).joinToString("  "))
     }
+  }
+
+  private companion object {
+    /**
+     * Per-addon budget for a stream request. Well under OkHttp's 40s call timeout,
+     * because that ceiling is for one request and this is a race between several.
+     */
+    const val ADDON_STREAM_TIMEOUT_MS = 20_000L
   }
 }

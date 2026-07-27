@@ -39,7 +39,10 @@ fun StreamsScreen(
   onStreamClick: (AddonStream) -> Unit,
 ) {
   val streams by viewModel.streams.collectAsState()
+  val notice by viewModel.streamsNotice.collectAsState()
+  val addons by viewModel.addonManifestUrls.collectAsState()
   val remembered by viewModel.rememberedPicks.collectAsState()
+  val addonCount = addons?.size ?: 1
   val firstStreamFocus = rememberInitialFocusTarget()
   val goBack = rememberBackAction()
   val listState = rememberLazyListState()
@@ -90,9 +93,27 @@ fun StreamsScreen(
       modifier = Modifier.padding(bottom = 16.dp),
     )
 
+    // Above the rows and outside LoadStateContent: it qualifies the list rather than
+    // replacing it, and an addon that went down is not a reason to hide the ones that
+    // answered. Only shown while a list is actually up; an all-addons failure is the
+    // Failed state's message, not a footnote on an empty screen.
+    val partialFailure = notice?.takeIf { loadIssued && state is LoadState.Ready }
+    if (partialFailure != null) {
+      Text(
+        partialFailure,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.error,
+        modifier = Modifier.padding(bottom = 12.dp),
+      )
+    }
+
     LoadStateContent(
       state,
-      loadingText = "Asking the addon for streams...",
+      loadingText = if (addonCount > 1) {
+        "Asking $addonCount addons for streams..."
+      } else {
+        "Asking the addon for streams..."
+      },
       onRetry = { viewModel.loadStreams(screen.imdbId, screen.season, screen.episode) },
     ) { list ->
       if (list.isEmpty()) {
@@ -100,7 +121,11 @@ fun StreamsScreen(
         // the D-pad dead on this route.
         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
           Text(
-            "The addon returned no playable streams for this title.",
+            if (addonCount > 1) {
+              "No addon returned a playable stream for this title."
+            } else {
+              "The addon returned no playable streams for this title."
+            },
             style = MaterialTheme.typography.titleMedium,
           )
           Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -137,8 +162,18 @@ fun StreamsScreen(
             ) {
               Column(modifier = Modifier.padding(14.dp)) {
                 Text(stream.label, style = MaterialTheme.typography.titleMedium)
-                if (badges.isNotEmpty() || index == preselected && preselected > 0) {
+                // Set only when more than one addon is configured, so a single-addon
+                // list keeps the rows it has always had.
+                val source = stream.source
+                if (badges.isNotEmpty() || source != null || index == preselected && preselected > 0) {
                   Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (source != null) {
+                      Text(
+                        source,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                      )
+                    }
                     badges.forEach { badge -> QualityBadge(badge) }
                     if (index == preselected && preselected > 0) {
                       Text(

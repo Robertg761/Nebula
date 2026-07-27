@@ -4,7 +4,9 @@ import android.content.Context
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.stremioshell.host.tv.data.addon.AddonList
 import com.stremioshell.host.tv.data.addon.StreamSelection
+import com.stremioshell.host.tv.data.subtitles.SubtitlesClient
 import com.stremioshell.host.tv.data.tmdb.MediaItem
 import com.stremioshell.host.tv.data.tmdb.MediaType
 import kotlinx.coroutines.CoroutineScope
@@ -28,20 +30,74 @@ val persistenceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
 /** User configuration for the native TV app. */
 class SettingsStore(private val context: Context) {
+  private val json = Json { ignoreUnknownKeys = true }
+
   val tmdbApiKey: Flow<String> = context.tvDataStore.data.map { it[KEY_TMDB] .orEmpty() }
-  val addonManifestUrl: Flow<String> = context.tvDataStore.data.map { it[KEY_ADDON].orEmpty() }
+
+  /**
+   * Every stream addon, in the viewer's own order.
+   *
+   * Reads through [AddonList.migrated], so an install that predates the list - and
+   * therefore has only [KEY_ADDON] written - sees its one URL as a one-entry list
+   * with nothing to do and nothing to lose. The legacy key is left in place rather
+   * than rewritten: nothing reads it once the list key exists, and leaving it makes
+   * a downgrade survivable.
+   */
+  val addonManifestUrls: Flow<List<String>> = context.tvDataStore.data.map { prefs ->
+    AddonList.migrated(decodeUrls(prefs[KEY_ADDONS]), prefs[KEY_ADDON].orEmpty())
+  }
+
+  /**
+   * The first addon. For the callers that predate the list and still deal in
+   * exactly one: the phone pairing form and the player's next-episode resolver.
+   */
+  val addonManifestUrl: Flow<String> = addonManifestUrls.map { it.firstOrNull().orEmpty() }
+
+  /**
+   * Where subtitles are fetched from. Configurable because the default is one
+   * community server with no account behind it, and a viewer whose language it
+   * covers badly has nowhere else to point.
+   */
+  val subtitlesBaseUrl: Flow<String> = context.tvDataStore.data.map { prefs ->
+    prefs[KEY_SUBTITLES]?.trim()?.ifBlank { null } ?: SubtitlesClient.OPENSUBTITLES_V3_BASE
+  }
 
   suspend fun setTmdbApiKey(value: String) {
     context.tvDataStore.edit { it[KEY_TMDB] = value.trim() }
   }
 
+  suspend fun setAddonManifestUrls(urls: List<String>) {
+    context.tvDataStore.edit { it[KEY_ADDONS] = json.encodeToString(AddonList.sanitized(urls)) }
+  }
+
+  /** Replaces the first addon, leaving any others alone. See [AddonList.replacingFirst]. */
   suspend fun setAddonManifestUrl(value: String) {
-    context.tvDataStore.edit { it[KEY_ADDON] = value.trim() }
+    context.tvDataStore.edit { prefs ->
+      val current = AddonList.migrated(decodeUrls(prefs[KEY_ADDONS]), prefs[KEY_ADDON].orEmpty())
+      prefs[KEY_ADDONS] = json.encodeToString(AddonList.replacingFirst(current, value))
+    }
+  }
+
+  /** Blank resets to [SubtitlesClient.OPENSUBTITLES_V3_BASE]. */
+  suspend fun setSubtitlesBaseUrl(value: String) {
+    context.tvDataStore.edit { it[KEY_SUBTITLES] = value.trim() }
+  }
+
+  /**
+   * Null when the list has never been written, which is the one state that makes
+   * the legacy single-URL key worth reading. A stored `[]` is a viewer who removed
+   * their last addon and must stay removed.
+   */
+  private fun decodeUrls(raw: String?): List<String>? {
+    if (raw == null) return null
+    return runCatching { json.decodeFromString<List<String>>(raw) }.getOrNull()
   }
 
   private companion object {
     val KEY_TMDB = stringPreferencesKey("tmdb_api_key")
     val KEY_ADDON = stringPreferencesKey("addon_manifest_url")
+    val KEY_ADDONS = stringPreferencesKey("addon_manifest_urls")
+    val KEY_SUBTITLES = stringPreferencesKey("subtitles_base_url")
   }
 }
 

@@ -4,6 +4,7 @@ import com.stremioshell.host.tv.data.HttpFetcher
 import com.stremioshell.host.tv.data.OkHttpFetcher
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import kotlinx.serialization.json.Json
 
 /**
@@ -71,7 +72,24 @@ data class AddonStream(
   val title: String? = null,
   val description: String? = null,
   val url: String? = null,
+  /**
+   * The torrent this release lives in, when the addon says. Two addons pointed at
+   * the same debrid account hand back the same file under different signed URLs,
+   * and this is the only field that gives them away as one release; see
+   * [StreamMerge].
+   */
+  @SerialName("infoHash") val infoHash: String? = null,
+  /** Which file inside a pack [infoHash] refers to. */
+  @SerialName("fileIdx") val fileIdx: Int? = null,
   @SerialName("behaviorHints") val behaviorHints: AddonBehaviorHints? = null,
+  /**
+   * Which configured addon produced this row, filled in by [StreamMerge] once
+   * there is more than one and left null when there is not.
+   *
+   * Transient because it is ours, not the protocol's: it must never be read from
+   * an addon's response, and nothing that persists a stream has any use for it.
+   */
+  @Transient val source: String? = null,
 ) {
   val label: String get() = name ?: "Stream"
   val detail: String get() = (description ?: title).orEmpty()

@@ -19,7 +19,12 @@ import kotlinx.serialization.json.Json
  */
 class SubtitlesClient(
   private val fetcher: HttpFetcher = OkHttpFetcher,
-  private val baseUrl: String = OPENSUBTITLES_V3_BASE,
+  /**
+   * Resolved per request rather than held: the player builds one of these for the
+   * whole session, and a viewer who changes the addon in Settings mid-film should
+   * not have to restart playback for the next subtitle search to use it.
+   */
+  private val baseUrl: suspend () -> String = { OPENSUBTITLES_V3_BASE },
 ) {
   private val json = Json {
     ignoreUnknownKeys = true
@@ -45,7 +50,8 @@ class SubtitlesClient(
     id: String,
     extra: Map<String, String>,
   ): List<AddonSubtitle> {
-    val body = fetcher.getAllowingStale(subtitlesUrl(baseUrl, type, id, extra))
+    val base = baseUrl().trim().ifBlank { OPENSUBTITLES_V3_BASE }
+    val body = fetcher.getAllowingStale(subtitlesUrl(base, type, id, extra))
     return json.decodeFromString<SubtitlesResponse>(body).subtitles
       .filter { it.url.isNotBlank() }
   }
