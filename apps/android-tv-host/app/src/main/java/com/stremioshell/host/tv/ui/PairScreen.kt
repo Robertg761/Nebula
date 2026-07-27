@@ -116,10 +116,13 @@ private fun ReadyContent(url: String) {
     } else {
       Box(modifier = Modifier.size(260.dp))
     }
+    // The URL carries the one-time pairing token, so it is long enough to need wrapping.
     Text(
       "or open  $url  in your phone browser",
       style = MaterialTheme.typography.bodyMedium,
       color = MaterialTheme.colorScheme.onSurfaceVariant,
+      textAlign = TextAlign.Center,
+      modifier = Modifier.padding(horizontal = 40.dp),
     )
     Text(
       "Your phone must be on the same Wi-Fi as this TV.",

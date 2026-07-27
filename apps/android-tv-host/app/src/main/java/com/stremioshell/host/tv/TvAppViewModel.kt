@@ -8,14 +8,20 @@ import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.WatchStateStore
 import com.stremioshell.host.tv.data.addon.AddonClient
 import com.stremioshell.host.tv.data.addon.AddonStream
+import com.stremioshell.host.tv.data.persistenceScope
 import com.stremioshell.host.tv.data.tmdb.EpisodeItem
 import com.stremioshell.host.tv.data.tmdb.MediaDetails
 import com.stremioshell.host.tv.data.tmdb.MediaItem
 import com.stremioshell.host.tv.data.tmdb.MediaType
 import com.stremioshell.host.tv.data.tmdb.TmdbClient
+import com.stremioshell.host.tv.pairing.ConfigMerge
 import com.stremioshell.host.tv.pairing.ConfigPairingServer
+import com.stremioshell.host.tv.pairing.PairingSubmission
+import com.stremioshell.host.tv.pairing.PairingTokenGenerator
 import com.stremioshell.host.tv.pairing.findLanIpv4
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -23,6 +29,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class HomeRail(val title: String, val items: List<MediaItem>)
 
@@ -83,49 +90,120 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
 
   private val _pairing = MutableStateFlow<PairingState>(PairingState.Idle)
   val pairing: StateFlow<PairingState> = _pairing
-  private var pairingServer: ConfigPairingServer? = null
+
+  /**
+   * One pairing attempt. The session exists from the moment [startPairing] is
+   * called - before the socket is bound - so a stop request can never arrive
+   * "too early" to be noticed: it flips [stopped], and whichever side gets
+   * there second closes the socket.
+   */
+  private class PairingSession {
+    val token: String = PairingTokenGenerator.generate()
+
+    @Volatile
+    var server: ConfigPairingServer? = null
+
+    @Volatile
+    var stopped: Boolean = false
+  }
+
+  private sealed interface PairingStartOutcome {
+    data class Ready(val url: String) : PairingStartOutcome
+    data class Failed(val message: String) : PairingStartOutcome
+    data object Aborted : PairingStartOutcome
+  }
+
+  @Volatile
+  private var pairingSession: PairingSession? = null
 
   fun startPairing() {
-    if (pairingServer != null) return
-    val ip = findLanIpv4()
-    if (ip == null) {
-      _pairing.value = PairingState.Failed("Connect your TV to Wi-Fi or Ethernet first.")
-      return
-    }
+    if (pairingSession != null) return
+    val session = PairingSession()
+    pairingSession = session
+    _pairing.value = PairingState.Idle
     viewModelScope.launch {
-      val currentKey = settings.tmdbApiKey.first()
-      val currentAddon = settings.addonManifestUrl.first()
-      val server = ConfigPairingServer(currentKey, currentAddon) { tmdbKey, addonUrl ->
-        // Called on a server thread; hop back to persist and validate.
-        viewModelScope.launch {
-          settings.setTmdbApiKey(tmdbKey)
-          settings.setAddonManifestUrl(addonUrl)
-          _pairing.value = PairingState.Received
-          // Use the just-received key: the exposed tmdbApiKey flow may not have
-          // caught up yet, and loadHomeRails would resolve the stale value.
-          if (tmdbKey.isNotBlank()) loadRails(tmdbKey, force = true)
+      // NonCancellable so that a cancelled viewModelScope (onCleared) cannot strand a
+      // half-started server: the block below always runs to its own cleanup check.
+      val outcome = withContext(Dispatchers.IO + NonCancellable) { bindPairingServer(session) }
+      if (pairingSession !== session) return@launch
+      when (outcome) {
+        is PairingStartOutcome.Ready -> _pairing.value = PairingState.Ready(outcome.url)
+        is PairingStartOutcome.Failed -> {
+          pairingSession = null
+          _pairing.value = PairingState.Failed(outcome.message)
         }
+        PairingStartOutcome.Aborted -> pairingSession = null
       }
-      runCatching { server.start() }.fold(
-        onSuccess = {
-          pairingServer = server
-          _pairing.value = PairingState.Ready("http://$ip:${server.listeningPort}/")
-        },
-        onFailure = { _pairing.value = PairingState.Failed(it.message ?: "Could not start pairing.") },
+    }
+  }
+
+  /**
+   * Runs on [Dispatchers.IO]: both the NetworkInterface enumeration and NanoHTTPD's
+   * start() (which busy-waits for the bind) are blocking, and used to stutter the
+   * pairing screen's entry animation from the main thread.
+   */
+  private fun bindPairingServer(session: PairingSession): PairingStartOutcome {
+    val ip = findLanIpv4() ?: return PairingStartOutcome.Failed(
+      "Connect your TV to Wi-Fi or Ethernet first.",
+    )
+    val server = ConfigPairingServer(session.token, ::applyPairedConfig)
+    session.server = server
+    if (session.stopped) return PairingStartOutcome.Aborted
+    val started = runCatching { server.start() }
+    started.exceptionOrNull()?.let { error ->
+      runCatching { server.stop() }
+      return PairingStartOutcome.Failed(error.message ?: "Could not start pairing.")
+    }
+    if (session.stopped) {
+      // The pairing screen went away while we were binding. A stop request always
+      // wins, so undo the start here rather than leaving the port open.
+      runCatching { server.stop() }
+      return PairingStartOutcome.Aborted
+    }
+    // The token is what keeps the rest of the LAN out, so it travels in the QR URL.
+    return PairingStartOutcome.Ready(
+      "http://$ip:${server.listeningPort}/?${ConfigPairingServer.TOKEN_FIELD}=${session.token}",
+    )
+  }
+
+  /** Called on a NanoHTTPD worker thread when the phone submits the form. */
+  private fun applyPairedConfig(submission: PairingSubmission) {
+    viewModelScope.launch {
+      val merged = ConfigMerge.merge(
+        submission,
+        currentTmdbKey = settings.tmdbApiKey.first(),
+        currentAddonUrl = settings.addonManifestUrl.first(),
       )
+      // A field the phone left blank keeps its stored value instead of being erased.
+      if (merged.tmdbKeyChanged) settings.setTmdbApiKey(merged.tmdbKey)
+      if (merged.addonUrlChanged) settings.setAddonManifestUrl(merged.addonUrl)
+      _pairing.value = PairingState.Received
+      // Use the just-received key: the exposed tmdbApiKey flow may not have
+      // caught up yet, and loadHomeRails would resolve the stale value.
+      if (merged.tmdbKey.isNotBlank()) loadRails(merged.tmdbKey, force = true)
     }
   }
 
   fun stopPairing() {
-    runCatching { pairingServer?.stop() }
-    pairingServer = null
+    shutdownPairing()
     _pairing.value = PairingState.Idle
   }
 
   override fun onCleared() {
-    runCatching { pairingServer?.stop() }
-    pairingServer = null
+    shutdownPairing()
     super.onCleared()
+  }
+
+  private fun shutdownPairing() {
+    val session = pairingSession ?: return
+    pairingSession = null
+    // Marked before the socket is touched: if the bind is still in flight it will
+    // see this and close the server itself.
+    session.stopped = true
+    val server = session.server ?: return
+    // stop() joins the listener thread; never on the caller's (main) thread. Uses the
+    // app-scoped IO scope because onCleared has already cancelled viewModelScope.
+    persistenceScope.launch { runCatching { server.stop() } }
   }
 
   private fun tmdb(): TmdbClient? = tmdbApiKey.value?.takeIf { it.isNotBlank() }?.let { TmdbClient(it) }
