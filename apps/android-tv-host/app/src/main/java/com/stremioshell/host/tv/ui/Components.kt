@@ -26,14 +26,19 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.painter.ColorPainter
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Button
@@ -89,6 +94,22 @@ fun Modifier.initialFocusTarget(target: InitialFocusTarget?): Modifier {
       .focusRequester(target.requester)
   }
 }
+
+/**
+ * Makes a scrolling row (or grid) hand focus back to the card it was left on.
+ *
+ * Compose enters a lazy row with a plain geometric focus search, which lands on whichever card is
+ * nearest the entry edge - so a rail the viewer has scrolled ten cards into quietly rewinds to its
+ * first card every time they step down to the row below and back. [focusRestorer] saves the focused
+ * child on the way out and pins it, so the choice also survives the parent list recycling the row
+ * while it is off screen.
+ *
+ * Goes on the row's own modifier, in front of the scrollable container that is the actual focus
+ * group. Initial focus is unaffected: [RequestInitialFocus] asks a specific card for focus directly
+ * rather than entering through the group, and on a first visit there is nothing saved to restore.
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+fun Modifier.restoreRowFocus(): Modifier = focusRestorer()
 
 /**
  * Requests focus for [target] once its node has actually been placed, retrying for a bounded
@@ -210,11 +231,20 @@ fun MediaCard(
       onLongClick = onLongClick,
       // Modest focus scale so the poster does not grow over its own title.
       scale = CardDefaults.scale(focusedScale = 1.08f),
-      modifier = Modifier.width(140.dp).height(200.dp),
+      // The card is the node the remote - and therefore TalkBack - lands on; the title under it
+      // is a sibling it never visits, so without this a rail announces as a row of "unlabeled".
+      // Built in the lambda rather than in composition: it only runs when something is actually
+      // reading the screen.
+      modifier = Modifier.width(140.dp).height(200.dp)
+        .semantics(mergeDescendants = true) {
+          contentDescription = A11yLabels.card(item.title, subtitle, manageable = onLongClick != null)
+        },
     ) {
       ArtworkImage(
         url = item.posterUrl,
-        contentDescription = item.title,
+        // Decorative: the card above already says the title, and a second description here would
+        // make every poster announce its title twice.
+        contentDescription = null,
         modifier = Modifier.fillMaxSize(),
       ) {
         Text(item.title, maxLines = 3, style = MaterialTheme.typography.bodyMedium)
@@ -226,7 +256,9 @@ fun MediaCard(
       overflow = TextOverflow.Ellipsis,
       style = MaterialTheme.typography.bodySmall,
       // Clears the focused card's scaled-up bottom edge.
-      modifier = Modifier.padding(top = 14.dp).width(140.dp),
+      modifier = Modifier.padding(top = 14.dp).width(140.dp)
+        // Visual echo of the card's own description; left in the tree it is read a second time.
+        .clearAndSetSemantics {},
     )
     if (subtitle != null) {
       Text(
@@ -235,7 +267,7 @@ fun MediaCard(
         overflow = TextOverflow.Ellipsis,
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(top = 2.dp).width(140.dp),
+        modifier = Modifier.padding(top = 2.dp).width(140.dp).clearAndSetSemantics {},
       )
     }
   }
@@ -251,6 +283,7 @@ fun MediaRow(title: String, items: List<MediaItem>, onItemClick: (MediaItem) -> 
       modifier = Modifier.padding(start = 48.dp, bottom = 12.dp),
     )
     LazyRow(
+      modifier = Modifier.restoreRowFocus(),
       contentPadding = PaddingValues(horizontal = 48.dp),
       horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -28,6 +29,9 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Button
@@ -52,6 +56,12 @@ import java.time.LocalDate
 
 /** Lines of synopsis shown before the "More" affordance takes over. */
 private const val OVERVIEW_COLLAPSED_LINES = 4
+
+/**
+ * Lazy items that always sit above the episodes: the header and the season row. Only used to
+ * scroll a resumed episode into view, and the season row is a precondition for having one at all.
+ */
+private const val EPISODE_ITEM_OFFSET = 2
 
 @Composable
 fun DetailsScreen(
@@ -106,6 +116,7 @@ fun DetailsScreen(
     val primaryFocus = rememberInitialFocusTarget()
     val resumeFocus = rememberInitialFocusTarget()
     val goBack = rememberBackAction()
+    val listState = rememberLazyListState()
 
     // Same staleness trap one level down: the episode list can still be the previously selected
     // season's until loadSeason's effect has run.
@@ -147,7 +158,17 @@ fun DetailsScreen(
     // Deliberately not saveable: an activity recreation loses focus outright, so the primary
     // request has to be free to re-arm and put it back.
     var handedToEpisode by remember(type, tmdbId) { mutableStateOf(false) }
-    LaunchedEffect(canAimAtEpisode) { if (canAimAtEpisode) handedToEpisode = true }
+    LaunchedEffect(canAimAtEpisode) {
+      if (!canAimAtEpisode) return@LaunchedEffect
+      handedToEpisode = true
+      // The episode list is lazy, so the row focus is being aimed at is very likely not composed
+      // yet - a resume ten episodes into a season is off screen. Put it in view first: a focus
+      // request at a node that does not exist just times out and leaves focus in the header.
+      val index = (episodes as? LoadState.Ready)?.value
+        ?.indexOfFirst { it.episodeNumber == resumeEpisode }
+        ?: -1
+      if (index >= 0) listState.scrollToItem(EPISODE_ITEM_OFFSET + index)
+    }
 
     // Land focus on the primary action instead of leaving it in the nav rail. This wins the first
     // frames even on a resume arrival - the episode list is still loading then - and hands over
@@ -193,6 +214,7 @@ fun DetailsScreen(
       }
 
       LazyColumn(
+        state = listState,
         contentPadding = PaddingValues(horizontal = 48.dp, vertical = 32.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp),
         modifier = Modifier.fillMaxSize(),
@@ -234,6 +256,7 @@ fun DetailsScreen(
                 offerStartOver = resumable != null,
                 focusTarget = primaryFocus,
                 onPlay = { startOver -> onPlay(media, null, null, startOver) },
+                title = media.item.title,
                 inWatchlist = inWatchlist,
                 onToggleWatchlist = toggleWatchlist,
               )
@@ -250,8 +273,13 @@ fun DetailsScreen(
                 onPlay = { startOver ->
                   onPlay(media, showResume.season, showResume.episode, startOver)
                 },
+                title = media.item.title,
                 inWatchlist = inWatchlist,
                 onToggleWatchlist = toggleWatchlist,
+                // "S4E2" is announced a letter and a digit at a time, which is not what the
+                // viewer needs to hear before pressing the one button that starts playback.
+                playDescription = A11yLabels.episodeCode(showResume.season, showResume.episode)
+                  ?.let { "${if (resumable) "Resume" else "Play"} $it" },
               )
               if (resumable) ResumeHint(showResume)
             } else {
@@ -259,7 +287,7 @@ fun DetailsScreen(
               // to play from the header: a series with no resume point is the main reason a
               // viewer wants the button at all.
               Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                WatchlistButton(inWatchlist, toggleWatchlist)
+                WatchlistButton(media.item.title, inWatchlist, toggleWatchlist)
               }
             }
             if (needsFallbackAction) {
@@ -288,7 +316,10 @@ fun DetailsScreen(
 
         if (hasSeasonRow) {
           item(key = "seasons") {
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            LazyRow(
+              modifier = Modifier.restoreRowFocus(),
+              horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
               items(media.seasons, key = { it.seasonNumber }) { season ->
                 Button(
                   onClick = {
@@ -308,110 +339,41 @@ fun DetailsScreen(
             }
           }
 
-          item(key = "episodes") {
-            LoadStateContentInline(
-              episodes,
-              onRetry = { viewModel.loadSeason(media.item.tmdbId, selectedSeason) },
-            ) { list ->
+          // One lazy item per episode rather than one item holding a Column of all of them:
+          // a 24-episode season used to compose every row up front, and a season switch paid for
+          // all 24 before the first one appeared.
+          when (val loaded = episodes) {
+            is LoadState.Loading -> item(key = "episodes-status") { Text("Loading episodes...") }
+            // A bare error message would be unreachable by the D-pad, so failures offer Retry.
+            is LoadState.Failed -> item(key = "episodes-status") {
               Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                list.forEach { episode ->
-                  val entry = watching.firstOrNull {
-                    it.key == "episode:${media.item.tmdbId}:${episode.seasonNumber}:${episode.episodeNumber}"
-                  }
-                  val isResumeTarget = episode.episodeNumber == resumeEpisode
-                  // Nothing has been released for an episode that has not aired, so its streams
-                  // would come back empty. It stays focusable with a no-op OK rather than being
-                  // made unfocusable: a whole unaired season would otherwise render as a block the
-                  // D-pad cannot enter or read.
-                  val upcoming = AirDate.isUpcoming(episode.airDate, today)
-                  Card(
-                    onClick = {
-                      // Clicking a watched episode replays it: its stored position is 0, so
-                      // startOver would change nothing and is left false.
-                      if (!upcoming) {
-                        onPlay(media, episode.seasonNumber, episode.episodeNumber, false)
-                      }
-                    },
-                    modifier = Modifier.fillMaxWidth(0.8f)
-                      .then(if (upcoming) Modifier.alpha(0.6f) else Modifier)
-                      .initialFocusTarget(if (isResumeTarget) resumeFocus else null),
-                  ) {
-                    Row(modifier = Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                      // Accent bar rather than a Card border: tv-material3 swaps the border out for
-                      // focusedBorder, so a border marker would vanish the moment focus lands here.
-                      if (isResumeTarget) {
-                        Box(
-                          modifier = Modifier
-                            .width(4.dp)
-                            .height(90.dp)
-                            .background(MaterialTheme.colorScheme.primary),
-                        )
-                      }
-                      // Null keeps its no-op: an absent still should not reserve an empty slot
-                      // next to the episode text, while a failed one holds its tonal block.
-                      if (episode.stillUrl != null) {
-                        ArtworkImage(
-                          url = episode.stillUrl,
-                          contentDescription = null,
-                          modifier = Modifier.width(160.dp).height(90.dp),
-                        )
-                      }
-                      Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(
-                          // The tick is the whole point of keeping a finished episode's record:
-                          // a season list that never says what you have seen is the reason
-                          // "which one was I on" is a question at all.
-                          buildString {
-                            if (entry?.watched == true) append("✓  ")
-                            append("E${episode.episodeNumber}  ${episode.name}")
-                          },
-                          style = MaterialTheme.typography.titleMedium,
-                          color = if (isResumeTarget) MaterialTheme.colorScheme.primary else Color.Unspecified,
-                        )
-                        Text(
-                          episode.overview,
-                          style = MaterialTheme.typography.bodySmall,
-                          maxLines = 2,
-                          overflow = TextOverflow.Ellipsis,
-                        )
-                        // Watched progress, so a part-way episode reads the same here as it does
-                        // on its Continue Watching card.
-                        if (entry != null && entry.durationMs > 0) {
-                          Box(
-                            modifier = Modifier
-                              .fillMaxWidth(0.6f)
-                              .height(4.dp)
-                              .background(MaterialTheme.colorScheme.surfaceVariant),
-                          ) {
-                            Box(
-                              modifier = Modifier
-                                .fillMaxWidth(entry.progress)
-                                .height(4.dp)
-                                .background(MaterialTheme.colorScheme.primary),
-                            )
-                          }
-                        }
-                        val airLabel = AirDate.label(episode.airDate)
-                        val marker = listOfNotNull(
-                          // "Airs <date>" rather than a bare date, because that is the whole
-                          // explanation for why pressing OK on this row does nothing.
-                          airLabel?.let { if (upcoming) "Airs $it" else it },
-                          "Resume here".takeIf { isResumeTarget },
-                          "Watched".takeIf { entry?.watched == true },
-                          entry?.minutesLeft()?.let { "$it min left" },
-                        ).joinToString("  -  ")
-                        if (marker.isNotEmpty()) {
-                          Text(
-                            marker,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (isResumeTarget) MaterialTheme.colorScheme.primary else Color.Unspecified,
-                          )
-                        }
-                      }
-                    }
-                  }
+                Text(loaded.message)
+                Button(onClick = { viewModel.loadSeason(media.item.tmdbId, selectedSeason) }) {
+                  Text("Retry")
                 }
               }
+            }
+            is LoadState.Ready -> items(
+              loaded.value.size,
+              key = { "episode:${loaded.value[it].seasonNumber}:${loaded.value[it].episodeNumber}" },
+            ) { index ->
+              val episode = loaded.value[index]
+              EpisodeRow(
+                episode = episode,
+                entry = watching.firstOrNull {
+                  it.key == "episode:${media.item.tmdbId}:${episode.seasonNumber}:${episode.episodeNumber}"
+                },
+                isResumeTarget = episode.episodeNumber == resumeEpisode,
+                // Nothing has been released for an episode that has not aired, so its streams
+                // would come back empty. It stays focusable with a no-op OK rather than being
+                // made unfocusable: a whole unaired season would otherwise render as a block the
+                // D-pad cannot enter or read.
+                upcoming = AirDate.isUpcoming(episode.airDate, today),
+                focusTarget = if (episode.episodeNumber == resumeEpisode) resumeFocus else null,
+                // Clicking a watched episode replays it: its stored position is 0, so startOver
+                // would change nothing and is left false.
+                onPlay = { onPlay(media, episode.seasonNumber, episode.episodeNumber, false) },
+              )
             }
           }
         }
@@ -423,6 +385,110 @@ fun DetailsScreen(
         }
         if (media.similar.isNotEmpty()) {
           item(key = "similar") { SimilarRow(media.similar, onItemClick) }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * One episode row.
+ *
+ * @param entry this episode's watch record, if it has one: the tick, the progress bar and the
+ *   time left all come from it.
+ * @param upcoming the episode has not aired, so OK does nothing and the row says why.
+ */
+@Composable
+private fun EpisodeRow(
+  episode: EpisodeItem,
+  entry: WatchEntry?,
+  isResumeTarget: Boolean,
+  upcoming: Boolean,
+  focusTarget: InitialFocusTarget?,
+  onPlay: () -> Unit,
+) {
+  val airLabel = AirDate.label(episode.airDate)
+  val marker = listOfNotNull(
+    // "Airs <date>" rather than a bare date, because that is the whole explanation for why
+    // pressing OK on this row does nothing.
+    airLabel?.let { if (upcoming) "Airs $it" else it },
+    "Resume here".takeIf { isResumeTarget },
+    "Watched".takeIf { entry?.watched == true },
+    entry?.minutesLeft()?.let { "$it min left" },
+  ).joinToString("  -  ")
+  Card(
+    onClick = { if (!upcoming) onPlay() },
+    // The row is the focusable node, and its number, tick and progress bar are shapes rather than
+    // anything a screen reader can reach. The synopsis is deliberately left out: two truncated
+    // lines of flavour would stand between the viewer and the next episode.
+    modifier = Modifier.fillMaxWidth(0.8f)
+      .then(if (upcoming) Modifier.alpha(0.6f) else Modifier)
+      .initialFocusTarget(focusTarget)
+      .semantics(mergeDescendants = true) {
+        contentDescription = A11yLabels.episodeRow(episode.episodeNumber, episode.name, marker)
+      },
+  ) {
+    Row(modifier = Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+      // Accent bar rather than a Card border: tv-material3 swaps the border out for
+      // focusedBorder, so a border marker would vanish the moment focus lands here.
+      if (isResumeTarget) {
+        Box(
+          modifier = Modifier
+            .width(4.dp)
+            .height(90.dp)
+            .background(MaterialTheme.colorScheme.primary),
+        )
+      }
+      // Null keeps its no-op: an absent still should not reserve an empty slot next to the
+      // episode text, while a failed one holds its tonal block.
+      if (episode.stillUrl != null) {
+        ArtworkImage(
+          url = episode.stillUrl,
+          contentDescription = null,
+          modifier = Modifier.width(160.dp).height(90.dp),
+        )
+      }
+      Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+          // The tick is the whole point of keeping a finished episode's record: a season list
+          // that never says what you have seen is the reason "which one was I on" is a question
+          // at all.
+          buildString {
+            if (entry?.watched == true) append("✓  ")
+            append("E${episode.episodeNumber}  ${episode.name}")
+          },
+          style = MaterialTheme.typography.titleMedium,
+          color = if (isResumeTarget) MaterialTheme.colorScheme.primary else Color.Unspecified,
+        )
+        Text(
+          episode.overview,
+          style = MaterialTheme.typography.bodySmall,
+          maxLines = 2,
+          overflow = TextOverflow.Ellipsis,
+        )
+        // Watched progress, so a part-way episode reads the same here as it does on its
+        // Continue Watching card.
+        if (entry != null && entry.durationMs > 0) {
+          Box(
+            modifier = Modifier
+              .fillMaxWidth(0.6f)
+              .height(4.dp)
+              .background(MaterialTheme.colorScheme.surfaceVariant),
+          ) {
+            Box(
+              modifier = Modifier
+                .fillMaxWidth(entry.progress)
+                .height(4.dp)
+                .background(MaterialTheme.colorScheme.primary),
+            )
+          }
+        }
+        if (marker.isNotEmpty()) {
+          Text(
+            marker,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (isResumeTarget) MaterialTheme.colorScheme.primary else Color.Unspecified,
+          )
         }
       }
     }
@@ -472,7 +538,10 @@ private fun ExpandableOverview(text: String, stateKey: String) {
 private fun CastRow(cast: List<CastMember>) {
   Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
     Text("Cast", style = MaterialTheme.typography.titleLarge)
-    LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+    LazyRow(
+      modifier = Modifier.restoreRowFocus(),
+      horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
       // Index in the key: TMDB credits the same person twice on plenty of titles (an actor who
       // also voices something), and a duplicate key crashes a lazy list outright.
       items(cast.size, key = { "${cast[it].id}:$it" }) { index ->
@@ -481,11 +550,15 @@ private fun CastRow(cast: List<CastMember>) {
           Card(
             onClick = {},
             scale = CardDefaults.scale(focusedScale = 1.08f),
-            modifier = Modifier.width(CAST_CARD_WIDTH).height(160.dp),
+            modifier = Modifier.width(CAST_CARD_WIDTH).height(160.dp)
+              .semantics(mergeDescendants = true) {
+                contentDescription = A11yLabels.castMember(member.name, member.character)
+              },
           ) {
             ArtworkImage(
               url = member.profileUrl,
-              contentDescription = member.name,
+              // Decorative: the headshot's card is labelled with the same name.
+              contentDescription = null,
               modifier = Modifier.fillMaxSize(),
             ) {
               Text(
@@ -501,8 +574,9 @@ private fun CastRow(cast: List<CastMember>) {
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             style = MaterialTheme.typography.bodyMedium,
-            // Clears the focused card's scaled-up bottom edge, as on the poster rows.
-            modifier = Modifier.padding(top = 12.dp),
+            // Clears the focused card's scaled-up bottom edge, as on the poster rows. Semantics
+            // cleared for the same reason as the poster captions: the card already says this.
+            modifier = Modifier.padding(top = 12.dp).clearAndSetSemantics {},
           )
           if (member.character.isNotBlank()) {
             Text(
@@ -510,7 +584,7 @@ private fun CastRow(cast: List<CastMember>) {
               maxLines = 1,
               overflow = TextOverflow.Ellipsis,
               style = MaterialTheme.typography.bodySmall,
-              modifier = Modifier.alpha(0.7f),
+              modifier = Modifier.alpha(0.7f).clearAndSetSemantics {},
             )
           }
         }
@@ -524,7 +598,10 @@ private fun CastRow(cast: List<CastMember>) {
 private fun SimilarRow(items: List<MediaItem>, onItemClick: (MediaType, Int) -> Unit) {
   Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
     Text("More like this", style = MaterialTheme.typography.titleLarge)
-    LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+    LazyRow(
+      modifier = Modifier.restoreRowFocus(),
+      horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
       items(items.size, key = { "${items[it].type}:${items[it].tmdbId}" }) { index ->
         val item = items[index]
         MediaCard(item = item, onClick = { onItemClick(item.type, item.tmdbId) })
@@ -563,20 +640,29 @@ private fun PlayActions(
   offerStartOver: Boolean,
   focusTarget: InitialFocusTarget,
   onPlay: (startOver: Boolean) -> Unit,
+  title: String,
   inWatchlist: Boolean,
   onToggleWatchlist: () -> Unit,
+  playDescription: String? = null,
 ) {
   Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
     Button(
       onClick = { onPlay(false) },
-      modifier = Modifier.initialFocusTarget(focusTarget),
+      modifier = Modifier.initialFocusTarget(focusTarget)
+        .then(
+          if (playDescription == null) {
+            Modifier
+          } else {
+            Modifier.semantics(mergeDescendants = true) { contentDescription = playDescription }
+          },
+        ),
     ) {
       Text(playLabel)
     }
     if (offerStartOver) {
       Button(onClick = { onPlay(true) }) { Text("Start over") }
     }
-    WatchlistButton(inWatchlist, onToggleWatchlist)
+    WatchlistButton(title, inWatchlist, onToggleWatchlist)
   }
 }
 
@@ -585,8 +671,15 @@ private fun PlayActions(
  * to remove - would mean the row's width changed under the D-pad on every press.
  */
 @Composable
-private fun WatchlistButton(inWatchlist: Boolean, onToggle: () -> Unit) {
-  Button(onClick = onToggle) {
+private fun WatchlistButton(title: String, inWatchlist: Boolean, onToggle: () -> Unit) {
+  Button(
+    onClick = onToggle,
+    // The visible label is a tick and a dash - state, then action, in a shorthand that reads as
+    // neither out loud. Spoken, it has to say what pressing it will do, and to what.
+    modifier = Modifier.semantics(mergeDescendants = true) {
+      contentDescription = A11yLabels.watchlistButton(title, inWatchlist)
+    },
+  ) {
     Text(if (inWatchlist) "✓ In My List - Remove" else "+ Add to My List")
   }
 }
@@ -598,25 +691,4 @@ private fun ResumeHint(entry: WatchEntry) {
     "$minsLeft min left - picks up where you stopped",
     style = MaterialTheme.typography.bodySmall,
   )
-}
-
-@Composable
-private fun <T> LoadStateContentInline(
-  state: LoadState<T>,
-  onRetry: (() -> Unit)? = null,
-  content: @Composable (T) -> Unit,
-) {
-  when (state) {
-    is LoadState.Loading -> Text("Loading episodes...")
-    // A bare error message would be unreachable by the D-pad, so failures always offer Retry.
-    is LoadState.Failed -> Column(
-      verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-      Text(state.message)
-      if (onRetry != null) {
-        Button(onClick = onRetry) { Text("Retry") }
-      }
-    }
-    is LoadState.Ready -> content(state.value)
-  }
 }

@@ -25,6 +25,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -64,6 +65,9 @@ fun SearchScreen(viewModel: TvAppViewModel, onItemClick: (MediaType, Int) -> Uni
   val queryField = rememberInitialFocusTarget()
   val filterRowFocus = remember { FocusRequester() }
   val firstResultFocus = remember { FocusRequester() }
+  // The grid as a whole, so stepping back down into it can return to the card the viewer was on
+  // rather than rewinding to the first result every time they touch the chips.
+  val resultsFocus = remember { FocusRequester() }
 
   // Pressing Retry disposes the only focusable the failed state had, and what replaces it is a
   // spinner with none at all - which leaves the D-pad pointing at nothing until something asks for
@@ -115,7 +119,8 @@ fun SearchScreen(viewModel: TvAppViewModel, onItemClick: (MediaType, Int) -> Uni
       selected = filter,
       onSelect = { filterName = it.name },
       firstChipFocus = filterRowFocus,
-      resultsFocus = firstResultFocus,
+      resultsFocus = resultsFocus,
+      firstResultFocus = firstResultFocus,
       modifier = Modifier.padding(top = 18.dp, bottom = 18.dp),
     )
 
@@ -149,6 +154,7 @@ fun SearchScreen(viewModel: TvAppViewModel, onItemClick: (MediaType, Int) -> Uni
           horizontalArrangement = Arrangement.spacedBy(16.dp),
           verticalArrangement = Arrangement.spacedBy(20.dp),
           contentPadding = PaddingValues(bottom = 32.dp),
+          modifier = Modifier.focusRequester(resultsFocus).restoreRowFocus(),
         ) {
           items(ui.items.size, key = { ui.items[it].key }) { index ->
             val item = ui.items[index]
@@ -176,25 +182,36 @@ fun SearchScreen(viewModel: TvAppViewModel, onItemClick: (MediaType, Int) -> Uni
  * and a filter applies to results already in hand - switching it never refetches and never touches
  * the query.
  */
-@OptIn(ExperimentalTvMaterial3Api::class)
+/**
+ * @param resultsFocus the grid itself. Down asks it to restore the card focus was last on, which
+ *   is what makes changing a filter and coming back not lose the viewer's place.
+ * @param firstResultFocus the first card, for the first trip down - there is nothing saved yet.
+ */
+@OptIn(ExperimentalComposeUiApi::class, ExperimentalTvMaterial3Api::class)
 @Composable
 private fun SearchFilterRow(
   selected: SearchFilter,
   onSelect: (SearchFilter) -> Unit,
   firstChipFocus: FocusRequester,
   resultsFocus: FocusRequester,
+  firstResultFocus: FocusRequester,
   modifier: Modifier = Modifier,
 ) {
   Row(
     horizontalArrangement = Arrangement.spacedBy(12.dp),
     modifier = modifier
-      // Down out of the chips aims at the first card rather than letting the default focus search
-      // pick its way into a lazy grid. When there is no grid - the empty, failed and idle states -
-      // the requester is unattached and the key falls through to whatever else is below.
+      // Down out of the chips aims into the grid rather than letting the default focus search pick
+      // its way into a lazy one. When there is no grid - the empty, failed and idle states - both
+      // requesters are unattached and the key falls through to whatever else is below.
       .onPreviewKeyEvent { event ->
-        event.type == KeyEventType.KeyDown &&
-          event.key == Key.DirectionDown &&
-          runCatching { resultsFocus.requestFocus() }.isSuccess
+        if (event.type != KeyEventType.KeyDown || event.key != Key.DirectionDown) {
+          false
+        } else {
+          // restoreFocusedChild reports whether it had anything to restore; requestFocus throws
+          // when nothing is attached, so both need catching before the key is claimed.
+          runCatching { resultsFocus.restoreFocusedChild() }.getOrDefault(false) ||
+            runCatching { firstResultFocus.requestFocus() }.isSuccess
+        }
       },
   ) {
     SearchFilter.values().forEachIndexed { index, option ->

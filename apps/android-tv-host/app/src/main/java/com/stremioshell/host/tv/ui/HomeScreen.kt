@@ -40,6 +40,9 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -414,14 +417,21 @@ private fun HeroBillboard(
       // No focus scale: a banner this wide would grow past the screen edges, and TV overscan
       // would clip the border that says it is focused.
       scale = CardDefaults.scale(focusedScale = 1f),
-      modifier = Modifier.fillMaxWidth().height(HERO_HEIGHT),
+      // One focusable banner, so it announces as one sentence rather than as an image followed by
+      // four loose lines of text. The synopsis is left out on purpose: it is read in full one
+      // screen later, and here it would stand between the viewer and every rail below.
+      modifier = Modifier.fillMaxWidth().height(HERO_HEIGHT)
+        .semantics(mergeDescendants = true) {
+          contentDescription = A11yLabels.hero(featured.title, metadata)
+        },
     ) {
       Box(modifier = Modifier.fillMaxSize()) {
         // Backdrop, falling back to the poster: a banner with no artwork at all is a grey slab,
         // and a stretched poster still reads as the title.
         ArtworkImage(
           url = featured.backdropUrl ?: featured.posterUrl,
-          contentDescription = featured.title,
+          // Decorative: the banner itself is labelled.
+          contentDescription = null,
           modifier = Modifier.fillMaxSize(),
         )
         // TMDB backdrops are full-frame stills with no safe area for text, so the left side is
@@ -514,6 +524,7 @@ private fun MediaRowFocusable(
     )
     LazyRow(
       state = listState,
+      modifier = Modifier.restoreRowFocus(),
       contentPadding = PaddingValues(horizontal = 48.dp),
       horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
@@ -574,6 +585,7 @@ private fun WatchlistRow(
       modifier = Modifier.padding(start = 48.dp, bottom = 12.dp),
     )
     LazyRow(
+      modifier = Modifier.restoreRowFocus(),
       contentPadding = PaddingValues(horizontal = 48.dp),
       horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
@@ -605,6 +617,7 @@ private fun ContinueWatchingRow(
       modifier = Modifier.padding(start = 48.dp, bottom = 12.dp),
     )
     LazyRow(
+      modifier = Modifier.restoreRowFocus(),
       contentPadding = PaddingValues(horizontal = 48.dp),
       horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
@@ -615,13 +628,24 @@ private fun ContinueWatchingRow(
             onClick = { onResumeClick(entry) },
             onLongClick = { onOptions(entry) },
             scale = CardDefaults.scale(focusedScale = 1.08f),
+            // The bar across the bottom of the card is the only thing that says how far in this
+            // is, and a bar has nothing to announce, so the position rides in the description.
             modifier = Modifier.width(140.dp).height(200.dp)
-              .initialFocusTarget(if (index == 0) firstCardFocus else null),
+              .initialFocusTarget(if (index == 0) firstCardFocus else null)
+              .semantics(mergeDescendants = true) {
+                contentDescription = A11yLabels.continueWatching(
+                  entry.title,
+                  entry.season,
+                  entry.episode,
+                  entry.progress,
+                )
+              },
           ) {
             Box(modifier = Modifier.fillMaxSize()) {
               ArtworkImage(
                 url = entry.posterUrl,
-                contentDescription = entry.title,
+                // Decorative: the card carries the title, the episode and the progress.
+                contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
               ) {
                 Text(entry.title, maxLines = 3, modifier = Modifier.padding(8.dp))
@@ -649,7 +673,8 @@ private fun ContinueWatchingRow(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(top = 14.dp),
+            // Visual echo of the card's description; left readable it is announced twice.
+            modifier = Modifier.padding(top = 14.dp).clearAndSetSemantics {},
           )
         }
       }
