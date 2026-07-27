@@ -47,15 +47,6 @@ data class MergedConfig(
   val addonUrlsChanged: Boolean,
 ) {
   val changed: Boolean get() = tmdbKeyChanged || addonUrlsChanged
-
-  /**
-   * The first addon, for the caller that still writes one URL at a time. Applying only this
-   * degrades a multi-URL submission to its first entry rather than failing it; see the
-   * single-URL [ConfigMerge.merge] overload.
-   */
-  val addonUrl: String get() = addonUrls.firstOrNull().orEmpty()
-
-  val addonUrlChanged: Boolean get() = addonUrlsChanged
 }
 
 /** Folds a [PairingSubmission] onto the values currently stored on the TV. */
@@ -79,17 +70,4 @@ object ConfigMerge {
       addonUrlsChanged = addonUrls != stored,
     )
   }
-
-  /**
-   * The single-URL entry point, for a caller that reads and writes only the first addon.
-   *
-   * A phone that submits several URLs merges all of them, but such a caller can only apply
-   * [MergedConfig.addonUrl] - so the extra entries are dropped rather than persisted. Callers that
-   * can write the whole list should use the overload above.
-   */
-  fun merge(
-    submission: PairingSubmission,
-    currentTmdbKey: String,
-    currentAddonUrl: String,
-  ): MergedConfig = merge(submission, currentTmdbKey, listOf(currentAddonUrl))
 }

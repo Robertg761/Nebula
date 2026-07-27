@@ -35,6 +35,7 @@ import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.addon.AddonStream
 import com.stremioshell.host.tv.data.tmdb.MediaType
+import com.stremioshell.host.tv.search.SearchLaunch
 
 /** Launches playback of a resolved stream; provided by the hosting activity. */
 fun interface StreamLauncher {
@@ -56,6 +57,8 @@ private fun stateKeyFor(index: Int, screen: Screen): String = "$index:$screen"
  * @param pendingDeepLink a title a Watch Next row on the TV home asked to reopen.
  *   Cleared through [onPendingDeepLinkHandled] so a BACK out of Details does not push
  *   it straight back.
+ * @param pendingSearch a spoken query, or the bare search key. Cleared through
+ *   [onPendingSearchHandled] on the same terms as the deep link.
  */
 @Composable
 fun TvApp(
@@ -64,6 +67,8 @@ fun TvApp(
   onPendingStreamsHandled: () -> Unit = {},
   pendingDeepLink: Screen.Details? = null,
   onPendingDeepLinkHandled: () -> Unit = {},
+  pendingSearch: SearchLaunch? = null,
+  onPendingSearchHandled: () -> Unit = {},
 ) {
   val viewModel: TvAppViewModel = viewModel()
   // Saveable: Screen is Parcelable, so the stack outlives activity recreation
@@ -128,6 +133,18 @@ fun TvApp(
     popTo(1)
     push(target)
     onPendingDeepLinkHandled()
+  }
+
+  // The query runs before the screen exists, so results are already in flight by the time
+  // it paints - and the field seeds itself from the ViewModel, which is why this does not
+  // have to reach into SearchScreen. Rooted on Home like the deep link, and through the
+  // same drawer helper, so a search key press while already searching keeps the screen the
+  // viewer is on rather than resetting it.
+  LaunchedEffect(pendingSearch) {
+    val request = pendingSearch ?: return@LaunchedEffect
+    if (request.query.isNotEmpty()) viewModel.submitVoiceQuery(request.query)
+    openRootDestination(Screen.Search)
+    onPendingSearchHandled()
   }
 
   val openDetails: (MediaType, Int) -> Unit = { type, id -> push(Screen.Details(type, id)) }

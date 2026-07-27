@@ -164,30 +164,4 @@ class ConfigMergeTest {
     assertEquals(emptyList<String>(), merged.addonUrls)
     assertFalse(merged.changed)
   }
-
-  @Test
-  fun `the single-url caller sees the first submitted addon and nothing it cannot store`() {
-    // The overload a caller that reads and writes only "the" addon URL uses. It merges the whole
-    // submission, but all it can apply is the head of it.
-    val merged = ConfigMerge.merge(
-      PairingSubmission.of(null, "https://new/manifest.json\nhttps://second/manifest.json"),
-      currentTmdbKey = storedKey,
-      currentAddonUrl = storedUrl,
-    )
-
-    assertEquals("https://new/manifest.json", merged.addonUrl)
-    assertTrue(merged.addonUrlChanged)
-  }
-
-  @Test
-  fun `the single-url caller sees no change when only the tmdb key moved`() {
-    val merged = ConfigMerge.merge(
-      PairingSubmission.of("new-key", ""),
-      currentTmdbKey = storedKey,
-      currentAddonUrl = storedUrl,
-    )
-
-    assertEquals(storedUrl, merged.addonUrl)
-    assertFalse(merged.addonUrlChanged)
-  }
 }

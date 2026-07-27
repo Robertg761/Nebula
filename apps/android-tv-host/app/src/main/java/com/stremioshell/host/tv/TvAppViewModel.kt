@@ -40,6 +40,7 @@ import com.stremioshell.host.tv.pairing.ConfigPairingServer
 import com.stremioshell.host.tv.pairing.PairingSubmission
 import com.stremioshell.host.tv.pairing.PairingTokenGenerator
 import com.stremioshell.host.tv.pairing.findLanIpv4
+import com.stremioshell.host.tv.search.LaunchIntents
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -187,6 +188,17 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   private val _searchQuery = MutableStateFlow("")
   val searchQuery: StateFlow<String> = _searchQuery
 
+  /**
+   * A query that arrived from outside the app - the Assistant, or `am start` - for the
+   * search field to adopt. Null once the field has taken it, so returning to Search later
+   * does not re-fill it with something said an hour ago.
+   *
+   * The field cannot simply mirror [searchQuery]: it is the field that drives that flow,
+   * through a debounce, so mirroring it would fight the viewer's typing.
+   */
+  private val _voiceQuery = MutableStateFlow<String?>(null)
+  val voiceQuery: StateFlow<String?> = _voiceQuery
+
   private val _details = MutableStateFlow<LoadState<MediaDetails>>(LoadState.Loading)
   val details: StateFlow<LoadState<MediaDetails>> = _details
 
@@ -326,11 +338,11 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       val merged = ConfigMerge.merge(
         submission,
         currentTmdbKey = settings.tmdbApiKey.first(),
-        currentAddonUrl = settings.addonManifestUrl.first(),
+        currentAddonUrls = settings.addonManifestUrls.first(),
       )
       // A field the phone left blank keeps its stored value instead of being erased.
       if (merged.tmdbKeyChanged) settings.setTmdbApiKey(merged.tmdbKey)
-      if (merged.addonUrlChanged) settings.setAddonManifestUrl(merged.addonUrl)
+      if (merged.addonUrlsChanged) settings.setAddonManifestUrls(merged.addonUrls)
       _pairing.value = PairingState.Received
       // Use the just-received key: the exposed tmdbApiKey flow may not have
       // caught up yet, and loadHomeRails would resolve the stale value.
@@ -561,6 +573,11 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    * which query the state it is rendering belongs to.
    */
   fun search(query: String) {
+    // The search field re-submits what it holds whenever its collector is re-armed (a key
+    // arriving, a voice query seeding it), and the answer to a query already in hand or
+    // already on its way is the same answer. A failure is not: Retry sends the same string
+    // back through here and must actually retry.
+    if (query == _searchQuery.value && _searchResults.value !is LoadState.Failed) return
     searchJob?.cancel()
     _searchQuery.value = query
     if (query.isBlank()) {
@@ -581,6 +598,24 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       }.getOrElse { LoadState.Failed(NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, it)) }
       if (isActive && _searchQuery.value == query) _searchResults.value = result
     }
+  }
+
+  /**
+   * A query spoken to the remote, or handed over by another app. Runs immediately rather
+   * than waiting for the field to adopt it and its debounce to expire: the viewer has
+   * already finished asking, so there is nothing left to debounce and the results can be
+   * in flight while the screen is still being built.
+   */
+  fun submitVoiceQuery(query: String) {
+    val cleaned = LaunchIntents.sanitize(query)
+    if (cleaned.isEmpty()) return
+    _voiceQuery.value = cleaned
+    search(cleaned)
+  }
+
+  /** Called by the search field once it has taken [voiceQuery] into itself. */
+  fun clearVoiceQuery() {
+    _voiceQuery.value = null
   }
 
   /**

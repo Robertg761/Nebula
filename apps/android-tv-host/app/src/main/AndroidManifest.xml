@@ -50,6 +50,23 @@
           android:host="watch-next"
           android:scheme="stremio-tv" />
       </intent-filter>
+
+      <!-- "Search for dune on Stremio Shell" said to the remote. ACTION_SEARCH is the
+           one the Assistant sends for an app-scoped query; the other two are what some
+           Assistant surfaces and other apps still send for the same thing. All three
+           carry the query in the same extra, so all three land in the same routing. -->
+      <intent-filter>
+        <action android:name="android.intent.action.SEARCH" />
+        <action android:name="com.google.android.gms.actions.SEARCH_ACTION" />
+        <action android:name="android.media.action.MEDIA_PLAY_FROM_SEARCH" />
+        <category android:name="android.intent.category.DEFAULT" />
+      </intent-filter>
+
+      <!-- Declares this as the app's searchable activity, which is what makes the
+           system deliver an app-scoped voice query here rather than dropping it. -->
+      <meta-data
+        android:name="android.app.searchable"
+        android:resource="@xml/searchable" />
     </activity>
 
     <!-- Handles its own config changes: matching the display refresh rate to the

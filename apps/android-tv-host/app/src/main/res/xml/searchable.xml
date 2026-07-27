@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The searchable declaration TvAppActivity points at. No suggestion authority: this
+     app has no content provider to suggest from, and the Leanback global-search rows
+     that would need one are a separate feature. voiceSearchMode asks the recogniser for
+     free-form speech, which is what a title is - launchWebSearch would hand the words to
+     the browser instead of to us. -->
+<searchable xmlns:android="http://schemas.android.com/apk/res/android"
+  android:hint="@string/search_hint"
+  android:label="@string/app_name"
+  android:voiceLanguageModel="free_form"
+  android:voiceSearchMode="showVoiceSearchButton|launchRecognizer" />

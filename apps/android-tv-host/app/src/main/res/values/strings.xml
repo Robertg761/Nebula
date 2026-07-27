@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
   <string name="app_name">Stremio Shell</string>
+  <!-- Shown by the system's voice search UI, not by our own field. -->
+  <string name="search_hint">Search movies and shows</string>
   <string name="update_install_failed">Could not open installer. Please re-download the update.</string>
 </resources>

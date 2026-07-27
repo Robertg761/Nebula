@@ -58,6 +58,7 @@ fun SearchScreen(viewModel: TvAppViewModel, onItemClick: (MediaType, Int) -> Uni
   val results by viewModel.searchResults.collectAsState()
   val requested by viewModel.searchQuery.collectAsState()
   val apiKey by viewModel.tmdbApiKey.collectAsState()
+  val voiceQuery by viewModel.voiceQuery.collectAsState()
   // Membership only, the same flow the Details toggle reads: saving from here and saving from
   // there have to be the same act, or a title could be in My List twice over.
   val watchlistKeys by viewModel.watchlistKeys.collectAsState()
@@ -66,7 +67,14 @@ fun SearchScreen(viewModel: TvAppViewModel, onItemClick: (MediaType, Int) -> Uni
   // the card the viewer is standing on, so there is no focus to re-aim afterwards.
   var options by remember { mutableStateOf<MediaItem?>(null) }
 
-  var query by rememberSaveable { mutableStateOf("") }
+  // Seeded so a voice launch shows its words immediately; without it the field starts blank and
+  // the debounce below would fire search("") over the results the ViewModel already has.
+  var query by rememberSaveable { mutableStateOf(viewModel.voiceQuery.value.orEmpty()) }
+  LaunchedEffect(voiceQuery) {
+    val spoken = voiceQuery ?: return@LaunchedEffect
+    query = spoken
+    viewModel.clearVoiceQuery()
+  }
   // Saved by name; see [SearchFilter.of] for why the enum itself is not.
   var filterName by rememberSaveable { mutableStateOf(SearchFilter.All.name) }
   val filter = SearchFilter.of(filterName)
