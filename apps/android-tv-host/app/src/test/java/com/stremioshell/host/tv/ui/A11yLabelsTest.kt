@@ -96,8 +96,8 @@ class A11yLabelsTest {
   @Test
   fun `the billboard announces as one sentence`() {
     assertEquals(
-      "Featured: Dune, 2021, Film, 8.1 / 10, View details",
-      A11yLabels.hero("Dune", "2021  •  Film  •  8.1 / 10"),
+      "Featured: Dune, 2021, Movie, 8.1 / 10, View details",
+      A11yLabels.hero("Dune", "2021  •  Movie  •  8.1 / 10"),
     )
     assertEquals("Featured: Dune, View details", A11yLabels.hero("Dune", ""))
   }

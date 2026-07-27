@@ -98,7 +98,7 @@ private fun ReadyContent(url: String) {
   ) {
     Text("Set up with your phone", style = MaterialTheme.typography.headlineMedium)
     Text(
-      "Scan this code with your phone's camera, then paste your TMDB key and Comet URL there.",
+      "Scan this code with your phone's camera, then paste your TMDB key and addon URLs there.",
       style = MaterialTheme.typography.bodyLarge,
       textAlign = TextAlign.Center,
       modifier = Modifier.padding(horizontal = 40.dp),

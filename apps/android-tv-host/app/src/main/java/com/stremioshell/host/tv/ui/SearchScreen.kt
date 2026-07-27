@@ -43,6 +43,8 @@ import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.stremioshell.host.tv.TvAppViewModel
+import com.stremioshell.host.tv.data.WatchlistEntry
+import com.stremioshell.host.tv.data.tmdb.MediaItem
 import com.stremioshell.host.tv.data.tmdb.MediaType
 import com.stremioshell.host.tv.data.tmdb.SearchFilter
 import com.stremioshell.host.tv.data.tmdb.SearchResults
@@ -56,6 +58,13 @@ fun SearchScreen(viewModel: TvAppViewModel, onItemClick: (MediaType, Int) -> Uni
   val results by viewModel.searchResults.collectAsState()
   val requested by viewModel.searchQuery.collectAsState()
   val apiKey by viewModel.tmdbApiKey.collectAsState()
+  // Membership only, the same flow the Details toggle reads: saving from here and saving from
+  // there have to be the same act, or a title could be in My List twice over.
+  val watchlistKeys by viewModel.watchlistKeys.collectAsState()
+
+  // The card a long press opened the options for. Unlike Home's rows, toggling here never removes
+  // the card the viewer is standing on, so there is no focus to re-aim afterwards.
+  var options by remember { mutableStateOf<MediaItem?>(null) }
 
   var query by rememberSaveable { mutableStateOf("") }
   // Saved by name; see [SearchFilter.of] for why the enum itself is not.
@@ -164,6 +173,10 @@ fun SearchScreen(viewModel: TvAppViewModel, onItemClick: (MediaType, Int) -> Uni
               // Two same-named remakes are one of the things search is for, so the year and the
               // kind of title ride under every card.
               subtitle = SearchResults.caption(item),
+              // Same held-OK affordance the managed Home rows have: a result the viewer is not
+              // ready to watch is exactly the thing My List is for, and making them open Details
+              // to save it costs two screens and a load.
+              onLongClick = { options = item },
               // Landing spot for D-pad down out of the chips; up from the first row falls back to
               // the default focus search, which finds them.
               modifier = if (index == 0) Modifier.focusRequester(firstResultFocus) else Modifier,
@@ -172,6 +185,23 @@ fun SearchScreen(viewModel: TvAppViewModel, onItemClick: (MediaType, Int) -> Uni
         }
       }
     }
+  }
+
+  options?.let { item ->
+    val inList = WatchlistEntry.keyOf(item.type, item.tmdbId) in watchlistKeys
+    CardOptionsDialog(
+      title = item.title,
+      message = if (inList) "This title is in My List." else "Save this title for later.",
+      focusKey = item.key,
+      focusLabel = "Search result options",
+      actions = listOf(
+        CardAction(if (inList) "Remove from My List" else "Add to My List") {
+          viewModel.toggleWatchlist(item)
+          options = null
+        },
+      ),
+      onDismiss = { options = null },
+    )
   }
 }
 

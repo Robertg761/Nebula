@@ -175,12 +175,16 @@ object DetailsMetadata {
   /**
    * The same line for a surface that only has a catalog entry, not a full details response - Home's
    * billboard renders before any title has been opened, so runtime, certification and genres simply
-   * do not exist yet. "Film"/"Series" stands in for them: it is the one fact a viewer needs before
+   * do not exist yet. The kind of title stands in for them: it is the one fact a viewer needs before
    * pressing OK, and without it the line can collapse to a bare year.
+   *
+   * Borrows Search's wording rather than spelling it out again: the two surfaces describe the same
+   * media types, and this line said "Film" against Search's "Movie" for exactly as long as they
+   * were two independent strings.
    */
   fun ofItem(item: MediaItem): String = listOfNotNull(
     item.year?.trim()?.ifBlank { null },
-    if (item.type == MediaType.Show) "Series" else "Film",
+    SearchResults.typeLabel(item.type),
     scoreLabel(item.rating),
   ).joinToString(SEPARATOR)
 

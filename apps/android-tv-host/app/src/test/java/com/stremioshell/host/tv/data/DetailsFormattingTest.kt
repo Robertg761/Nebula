@@ -6,6 +6,7 @@ import com.stremioshell.host.tv.data.tmdb.DetailsMetadata
 import com.stremioshell.host.tv.data.tmdb.MediaDetails
 import com.stremioshell.host.tv.data.tmdb.MediaItem
 import com.stremioshell.host.tv.data.tmdb.MediaType
+import com.stremioshell.host.tv.data.tmdb.SearchResults
 import com.stremioshell.host.tv.data.tmdb.SeasonList
 import com.stremioshell.host.tv.data.tmdb.SeasonSummary
 import com.stremioshell.host.tv.data.tmdb.TrailerPick
@@ -297,7 +298,7 @@ class DetailsMetadataTest {
   @Test
   fun `the billboard line names the medium a catalog entry cannot describe`() {
     assertEquals(
-      "2019  •  Film  •  7.5 / 10",
+      "2019  •  Movie  •  7.5 / 10",
       DetailsMetadata.ofItem(details(rating = 7.5).item),
     )
     assertEquals(
@@ -308,7 +309,19 @@ class DetailsMetadataTest {
 
   @Test
   fun `the billboard line collapses around a missing year or score`() {
-    assertEquals("Film", DetailsMetadata.ofItem(details(year = null).item))
-    assertEquals("2019  •  Film", DetailsMetadata.ofItem(details(rating = 0.0).item))
+    assertEquals("Movie", DetailsMetadata.ofItem(details(year = null).item))
+    assertEquals("2019  •  Movie", DetailsMetadata.ofItem(details(rating = 0.0).item))
+  }
+
+  @Test
+  fun `the billboard names a medium in the same words Search does`() {
+    // These drifted apart once already - Details said "Film" where Search said "Movie" for the
+    // same title - so the two are pinned to each other rather than to two literals.
+    MediaType.values().forEach { type ->
+      assertEquals(
+        SearchResults.typeLabel(type),
+        DetailsMetadata.ofItem(details(type = type, year = null).item),
+      )
+    }
   }
 }

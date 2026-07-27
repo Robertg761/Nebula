@@ -1,33 +1,61 @@
 package com.stremioshell.host.tv.pairing
 
+import com.stremioshell.host.tv.data.addon.AddonList
+
 /**
  * What the phone actually typed into the pairing form.
  *
  * A field left blank is [null], which means "leave whatever the TV already has
  * alone". The form is never pre-filled with the stored values, so blank has to
  * mean "unchanged" rather than "erase" - otherwise fixing one setting would
- * silently wipe the other.
+ * silently wipe the other. That also means the phone has no way to spell "remove
+ * every addon"; clearing the list stays a deliberate act on the TV's own Settings
+ * screen, where the viewer can see what they are removing.
  */
-data class PairingSubmission(val tmdbKey: String?, val addonUrl: String?) {
-  val isEmpty: Boolean get() = tmdbKey == null && addonUrl == null
+data class PairingSubmission(val tmdbKey: String?, val addonUrls: List<String>?) {
+  val isEmpty: Boolean get() = tmdbKey == null && addonUrls == null
 
   companion object {
+    /** Line breaks only: a comma or a space can appear inside a real manifest URL. */
+    private val LINE_BREAK = Regex("""\R""")
+
     /** Normalises raw form values: trimmed, and blank collapsed to null. */
-    fun of(rawTmdbKey: String?, rawAddonUrl: String?): PairingSubmission = PairingSubmission(
+    fun of(rawTmdbKey: String?, rawAddonUrls: String?): PairingSubmission = PairingSubmission(
       tmdbKey = rawTmdbKey?.trim()?.ifEmpty { null },
-      addonUrl = rawAddonUrl?.trim()?.ifEmpty { null },
+      addonUrls = addonUrlsIn(rawAddonUrls).ifEmpty { null },
     )
+
+    /**
+     * The addon box read as a list: one URL per line, through [AddonList.sanitized] so what the
+     * phone submits is already in the form the TV stores - `stremio://` links resolved, bare hosts
+     * completed, duplicates and blank lines dropped, and the list capped.
+     *
+     * Empty for a box with nothing usable in it, which the caller has to tell apart from a box the
+     * viewer deliberately left blank: the first is a typo worth reporting, the second is "keep what
+     * you have".
+     */
+    fun addonUrlsIn(raw: String?): List<String> =
+      AddonList.sanitized(raw.orEmpty().split(LINE_BREAK))
   }
 }
 
 /** The configuration to persist, plus which halves actually moved. */
 data class MergedConfig(
   val tmdbKey: String,
-  val addonUrl: String,
+  val addonUrls: List<String>,
   val tmdbKeyChanged: Boolean,
-  val addonUrlChanged: Boolean,
+  val addonUrlsChanged: Boolean,
 ) {
-  val changed: Boolean get() = tmdbKeyChanged || addonUrlChanged
+  val changed: Boolean get() = tmdbKeyChanged || addonUrlsChanged
+
+  /**
+   * The first addon, for the caller that still writes one URL at a time. Applying only this
+   * degrades a multi-URL submission to its first entry rather than failing it; see the
+   * single-URL [ConfigMerge.merge] overload.
+   */
+  val addonUrl: String get() = addonUrls.firstOrNull().orEmpty()
+
+  val addonUrlChanged: Boolean get() = addonUrlsChanged
 }
 
 /** Folds a [PairingSubmission] onto the values currently stored on the TV. */
@@ -35,17 +63,33 @@ object ConfigMerge {
   fun merge(
     submission: PairingSubmission,
     currentTmdbKey: String,
-    currentAddonUrl: String,
+    currentAddonUrls: List<String>,
   ): MergedConfig {
     val tmdbKey = submission.tmdbKey ?: currentTmdbKey
-    val addonUrl = submission.addonUrl ?: currentAddonUrl
+    // Compared in stored form, so a viewer who re-pastes their addon as a `stremio://` link or
+    // without the `/manifest.json` tail is re-submitting the same value, not a new one.
+    val stored = AddonList.sanitized(currentAddonUrls)
+    val addonUrls = submission.addonUrls ?: stored
     return MergedConfig(
       tmdbKey = tmdbKey,
-      addonUrl = addonUrl,
+      addonUrls = addonUrls,
       // Re-submitting the value that is already stored is not a change either,
       // so a no-op POST does not churn DataStore.
       tmdbKeyChanged = tmdbKey != currentTmdbKey,
-      addonUrlChanged = addonUrl != currentAddonUrl,
+      addonUrlsChanged = addonUrls != stored,
     )
   }
+
+  /**
+   * The single-URL entry point, for a caller that reads and writes only the first addon.
+   *
+   * A phone that submits several URLs merges all of them, but such a caller can only apply
+   * [MergedConfig.addonUrl] - so the extra entries are dropped rather than persisted. Callers that
+   * can write the whole list should use the overload above.
+   */
+  fun merge(
+    submission: PairingSubmission,
+    currentTmdbKey: String,
+    currentAddonUrl: String,
+  ): MergedConfig = merge(submission, currentTmdbKey, listOf(currentAddonUrl))
 }

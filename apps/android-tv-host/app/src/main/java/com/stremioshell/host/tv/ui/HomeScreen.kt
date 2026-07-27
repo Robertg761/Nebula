@@ -45,14 +45,11 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.tv.material3.Button
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.MaterialTheme
-import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.tv.TvAppViewModel
@@ -194,6 +191,11 @@ fun HomeScreen(
       contentPadding = PaddingValues(top = 32.dp, bottom = 48.dp),
       modifier = Modifier
         .fillMaxSize()
+        // Each row already remembers its card; this is what makes the column remember the row, so
+        // returning from Details or the nav rail lands where the viewer left rather than back at
+        // the billboard. The one-shot initial-focus request above still wins on a cold open:
+        // nothing has been focused yet, so there is nothing here to restore.
+        .restoreColumnFocus()
         // Notes that the user is driving focus themselves; observed only, never consumed.
         .onPreviewKeyEvent { event ->
           if (event.type == KeyEventType.KeyDown && event.key.isDirectional()) {
@@ -296,58 +298,6 @@ fun HomeScreen(
       ),
       onDismiss = { watchlistOptions = null },
     )
-  }
-}
-
-private class CardAction(val label: String, val onClick: () -> Unit)
-
-/**
- * What a long press on a managed Home card offers.
- *
- * Long press rather than a visible menu button: the rows are posters, and every TV app the
- * user already owns puts row management behind a held OK. Cancel is appended here rather than
- * passed in, so no caller can ship a dialog with no way out of it but BACK.
- *
- * @param focusKey re-aims the first-option focus request when the dialog switches cards.
- */
-@Composable
-private fun CardOptionsDialog(
-  title: String,
-  message: String,
-  focusKey: Any,
-  focusLabel: String,
-  actions: List<CardAction>,
-  onDismiss: () -> Unit,
-) {
-  val firstOption = rememberInitialFocusTarget()
-
-  Dialog(
-    onDismissRequest = onDismiss,
-    properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false),
-  ) {
-    RequestInitialFocus(target = firstOption, key = focusKey, label = focusLabel)
-
-    Surface(modifier = Modifier.width(520.dp)) {
-      Column(
-        modifier = Modifier.padding(32.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-      ) {
-        Text(title, style = MaterialTheme.typography.headlineSmall)
-        Text(message, style = MaterialTheme.typography.bodyMedium)
-        actions.forEachIndexed { index, action ->
-          Button(
-            onClick = action.onClick,
-            modifier = Modifier.fillMaxWidth()
-              .initialFocusTarget(if (index == 0) firstOption else null),
-          ) {
-            Text(action.label)
-          }
-        }
-        Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
-          Text("Cancel")
-        }
-      }
-    }
   }
 }
 

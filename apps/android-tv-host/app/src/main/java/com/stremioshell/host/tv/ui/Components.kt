@@ -41,10 +41,13 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.tv.material3.Button
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
 import com.stremioshell.host.tv.LoadState
@@ -110,6 +113,21 @@ fun Modifier.initialFocusTarget(target: InitialFocusTarget?): Modifier {
  */
 @OptIn(ExperimentalComposeUiApi::class)
 fun Modifier.restoreRowFocus(): Modifier = focusRestorer()
+
+/**
+ * The same restoration one axis out: a screen's vertical list hands focus back to the row it was
+ * left on.
+ *
+ * Without it the rows remember their card and the column forgets the row, so coming back to Home
+ * from Details or the nav rail re-enters by geometry - the topmost row nearest the entry edge -
+ * and a viewer eight rails down lands on the billboard again. Distinct from [restoreRowFocus] only
+ * in what it documents; kept separate so the call sites still say which axis they mean.
+ *
+ * Safe next to [RequestInitialFocus]: that asks a named node for focus directly rather than
+ * entering through this group, and on a cold open there is nothing saved here to restore.
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+fun Modifier.restoreColumnFocus(): Modifier = focusRestorer()
 
 /**
  * Requests focus for [target] once its node has actually been placed, retrying for a bounded
@@ -338,6 +356,63 @@ fun CenteredLoading(text: String) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
       CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
       Text(text, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 14.dp))
+    }
+  }
+}
+
+/** One button in a [CardOptionsDialog]. */
+class CardAction(val label: String, val onClick: () -> Unit)
+
+/**
+ * What a long press on a managed card offers.
+ *
+ * Long press rather than a visible menu button: these surfaces are posters, and every TV app the
+ * viewer already owns puts card management behind a held OK. Cancel is appended here rather than
+ * passed in, so no caller can ship a dialog with no way out of it but BACK.
+ *
+ * Shared rather than per-screen because the affordance has to be identical everywhere it exists:
+ * a held OK that opens a differently shaped sheet on Search than on Home is a different gesture as
+ * far as the viewer is concerned.
+ *
+ * @param focusKey re-aims the first-option focus request when the dialog switches cards.
+ */
+@Composable
+fun CardOptionsDialog(
+  title: String,
+  message: String,
+  focusKey: Any,
+  focusLabel: String,
+  actions: List<CardAction>,
+  onDismiss: () -> Unit,
+) {
+  val firstOption = rememberInitialFocusTarget()
+
+  Dialog(
+    onDismissRequest = onDismiss,
+    properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false),
+  ) {
+    RequestInitialFocus(target = firstOption, key = focusKey, label = focusLabel)
+
+    Surface(modifier = Modifier.width(520.dp)) {
+      Column(
+        modifier = Modifier.padding(32.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+      ) {
+        Text(title, style = MaterialTheme.typography.headlineSmall)
+        Text(message, style = MaterialTheme.typography.bodyMedium)
+        actions.forEachIndexed { index, action ->
+          Button(
+            onClick = action.onClick,
+            modifier = Modifier.fillMaxWidth()
+              .initialFocusTarget(if (index == 0) firstOption else null),
+          ) {
+            Text(action.label)
+          }
+        }
+        Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
+          Text("Cancel")
+        }
+      }
     }
   }
 }

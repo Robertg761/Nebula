@@ -1,11 +1,12 @@
 package com.stremioshell.host.tv.pairing
 
+import com.stremioshell.host.tv.data.addon.AddonList
 import fi.iki.elonen.NanoHTTPD
 
 /**
  * Tiny LAN-only web server shown during phone pairing. The phone opens the
- * page, submits the TMDB key and Comet URL from its own keyboard, and the
- * values are handed back via [onConfig] (called on a server thread).
+ * page, submits the TMDB key and its stream addon URLs from its own keyboard,
+ * and the values are handed back via [onConfig] (called on a server thread).
  *
  * Runs only while the pairing screen is visible; bound to port 0 so the OS
  * assigns a free port, read back from [listeningPort] after start().
@@ -14,9 +15,10 @@ import fi.iki.elonen.NanoHTTPD
  * every request - GET and POST alike - must carry [token], which is only ever
  * published in the QR code on the user's own screen. Requests without it get a
  * 403 and nothing else. The served form is likewise never pre-filled with the
- * stored TMDB key or Comet URL (the latter embeds a Real-Debrid token): the
- * page is write-only, so even a leaked token cannot read the existing config
- * back out.
+ * stored TMDB key or addon URLs (those embed a Real-Debrid token): the page is
+ * write-only, so even a leaked token cannot read the existing config back out.
+ * The confirmation page obeys the same rule - it reports how many addons were
+ * saved and never which.
  */
 class ConfigPairingServer(
   private val token: String,
@@ -35,10 +37,17 @@ class ConfigPairingServer(
   }
 
   private fun handleSubmit(session: IHTTPSession): Response {
+    val rawAddons = session.parameters["addon"]?.firstOrNull()
     val submission = PairingSubmission.of(
       rawTmdbKey = session.parameters["tmdb"]?.firstOrNull(),
-      rawAddonUrl = session.parameters["addon"]?.firstOrNull(),
+      rawAddonUrls = rawAddons,
     )
+    // Typed something into the addon box and none of it survived sanitising. Reported rather than
+    // ignored, and reported before anything is applied: saving the key alone while quietly
+    // discarding the URLs would look like a success the viewer then has to debug on the TV.
+    if (!rawAddons.isNullOrBlank() && submission.addonUrls == null) {
+      return html(formPage(error = "No usable addon link in that box. Paste the manifest URL."))
+    }
     if (submission.isEmpty) {
       return html(formPage(error = "Enter at least one value."))
     }
@@ -90,9 +99,10 @@ class ConfigPairingServer(
         <label>TMDB API key <span class="hint">themoviedb.org &rsaquo; Settings &rsaquo; API</span></label>
         <input name="tmdb" autocomplete="off" autocapitalize="off" spellcheck="false"
                placeholder="Leave empty to keep current key">
-        <label>Comet addon manifest URL <span class="hint">from your Comet instance, with your Real-Debrid key</span></label>
-        <textarea name="addon" autocomplete="off" autocapitalize="off" spellcheck="false"
-               placeholder="Leave empty to keep current URL"></textarea>
+        <label>Stream addon manifest URLs
+          <span class="hint">one per line, up to ${AddonList.MAX_ADDONS} - e.g. your Comet instance, with your Real-Debrid key</span></label>
+        <textarea name="addon" rows="4" autocomplete="off" autocapitalize="off" spellcheck="false"
+               placeholder="Leave empty to keep the addons the TV already has"></textarea>
         <button type="submit">Save to TV</button>
       </form>
       </main></body></html>
@@ -101,7 +111,14 @@ class ConfigPairingServer(
 
   private fun donePage(submission: PairingSubmission): String {
     val tmdbState = if (submission.tmdbKey != null) "updated" else "unchanged"
-    val addonState = if (submission.addonUrl != null) "updated" else "unchanged"
+    // A count, never the URLs themselves: this page is served over the same cleartext HTTP the
+    // form is, and the URLs carry the viewer's Real-Debrid key.
+    val addons = submission.addonUrls
+    val addonState = when {
+      addons == null -> "unchanged"
+      addons.size == 1 -> "1 saved"
+      else -> "${addons.size} saved"
+    }
     return """
       <!doctype html><html><head>
       <meta charset="utf-8">
@@ -120,7 +137,7 @@ class ConfigPairingServer(
       <div><h1>Saved to your TV</h1>
       <ul>
         <li>TMDB API key: $tmdbState</li>
-        <li>Comet addon URL: $addonState</li>
+        <li>Stream addons: $addonState</li>
       </ul>
       <p>You can close this page and pick something to watch.</p></div>
       </body></html>

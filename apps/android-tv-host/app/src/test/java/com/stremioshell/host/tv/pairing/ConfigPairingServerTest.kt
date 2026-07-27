@@ -100,9 +100,33 @@ class ConfigPairingServerTest {
     val reply = request("/config", form = "t=$token&tmdb=my-key&addon=")
 
     assertEquals(200, reply.code)
-    assertEquals(PairingSubmission(tmdbKey = "my-key", addonUrl = null), nextSubmission())
+    assertEquals(PairingSubmission(tmdbKey = "my-key", addonUrls = null), nextSubmission())
     assertTrue(reply.body, reply.body.contains("TMDB API key: updated"))
-    assertTrue(reply.body, reply.body.contains("Comet addon URL: unchanged"))
+    assertTrue(reply.body, reply.body.contains("Stream addons: unchanged"))
+  }
+
+  @Test
+  fun `a tokened POST delivers every addon line the phone submitted`() {
+    val form = "t=$token&addon=" +
+      "https%3A%2F%2Fcomet.example%2Fmanifest.json%0D%0Atorrentio.example"
+
+    val reply = request("/config", form = form)
+
+    assertEquals(200, reply.code)
+    assertEquals(
+      PairingSubmission(
+        tmdbKey = null,
+        addonUrls = listOf(
+          "https://comet.example/manifest.json",
+          "https://torrentio.example/manifest.json",
+        ),
+      ),
+      nextSubmission(),
+    )
+    assertTrue(reply.body, reply.body.contains("Stream addons: 2 saved"))
+    // Count only: this page rides the same cleartext HTTP the form does, and the URLs carry the
+    // viewer's Real-Debrid key.
+    assertFalse(reply.body, reply.body.contains("comet.example"))
   }
 
   @Test
@@ -112,5 +136,16 @@ class ConfigPairingServerTest {
     assertEquals(200, reply.code)
     assertNull(nextSubmission())
     assertTrue(reply.body, reply.body.contains("Enter at least one value."))
+  }
+
+  @Test
+  fun `an addon box with nothing usable in it is reported, not half-applied`() {
+    val reply = request("/config", form = "t=$token&tmdb=my-key&addon=stremio%3A%2F%2F")
+
+    assertEquals(200, reply.code)
+    // The key is not saved either: a success page that quietly dropped the URLs would send the
+    // viewer to the TV to work out why nothing plays.
+    assertNull(nextSubmission())
+    assertTrue(reply.body, reply.body.contains("No usable addon link in that box."))
   }
 }
