@@ -21,11 +21,16 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -52,18 +57,39 @@ fun HomeScreen(
   val rails by viewModel.homeRails.collectAsState()
   val continueWatching by viewModel.continueWatching.collectAsState()
   val apiKey by viewModel.tmdbApiKey.collectAsState()
-  val firstContentFocus = remember { FocusRequester() }
+  val firstContentFocus = rememberInitialFocusTarget()
+
+  // Once the user has driven the D-pad, initial focus is their business: rails re-emitting
+  // (e.g. after a settings save) must not yank focus back to the first card.
+  //
+  // Both flags are saveable so the request is one-shot per *saved* Home state: the back stack
+  // restores this screen's scroll position through SaveableStateProvider, and re-requesting
+  // first-card focus would immediately scroll the restored LazyColumn back to the top.
+  var userNavigated by rememberSaveable { mutableStateOf(false) }
+  var landedFocus by rememberSaveable { mutableStateOf(false) }
 
   LaunchedEffect(apiKey) { viewModel.loadHomeRails() }
 
-  // Land focus on content (not the nav rail) once something focusable exists.
-  LaunchedEffect(rails, apiKey) {
-    if (rails is LoadState.Ready || (apiKey != null && apiKey!!.isBlank())) {
-      runCatching { firstContentFocus.requestFocus() }
-    }
+  val needsSetup = apiKey != null && apiKey!!.isBlank()
+  // Continue Watching resolves asynchronously and takes over the first-card slot, so the
+  // target is only known once both it and the rails have settled; re-aim when it appears.
+  val hasContinueWatching = continueWatching.isNotEmpty()
+
+  // Only the rails need the one-shot treatment; the setup screen has no scroll position to
+  // protect, so it stays free to re-aim at its button on every visit.
+  LaunchedEffect(firstContentFocus.focused, needsSetup) {
+    if (firstContentFocus.focused && !needsSetup) landedFocus = true
   }
 
-  if (apiKey != null && apiKey!!.isBlank()) {
+  // Land focus on content (not the nav rail) once something focusable exists.
+  RequestInitialFocus(
+    target = firstContentFocus,
+    key = if (needsSetup) "setup" else "content:$hasContinueWatching",
+    label = "Home first content card",
+    enabled = !userNavigated && (needsSetup || (!landedFocus && rails is LoadState.Ready)),
+  )
+
+  if (needsSetup) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
       Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text("Welcome", style = MaterialTheme.typography.displaySmall)
@@ -72,7 +98,7 @@ fun HomeScreen(
           style = MaterialTheme.typography.bodyLarge,
           modifier = Modifier.padding(top = 10.dp, bottom = 24.dp),
         )
-        Button(onClick = onPairWithPhone, modifier = Modifier.focusRequester(firstContentFocus)) {
+        Button(onClick = onPairWithPhone, modifier = Modifier.initialFocusTarget(firstContentFocus)) {
           Text("Set up with phone")
         }
         Button(
@@ -97,9 +123,17 @@ fun HomeScreen(
       LazyColumn(
         verticalArrangement = Arrangement.spacedBy(28.dp),
         contentPadding = PaddingValues(top = 32.dp, bottom = 48.dp),
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+          .fillMaxSize()
+          // Notes that the user is driving focus themselves; observed only, never consumed.
+          .onPreviewKeyEvent { event ->
+            if (event.type == KeyEventType.KeyDown && event.key.isDirectional()) {
+              userNavigated = true
+            }
+            false
+          },
       ) {
-        if (continueWatching.isNotEmpty()) {
+        if (hasContinueWatching) {
           item(key = "continue") {
             ContinueWatchingRow(continueWatching, onResumeClick, firstContentFocus)
           }
@@ -109,7 +143,7 @@ fun HomeScreen(
           MediaRowFocusable(
             title = rail.title,
             items = rail.items,
-            firstCardFocus = if (index == 0 && continueWatching.isEmpty()) firstContentFocus else null,
+            firstCardFocus = if (index == 0 && !hasContinueWatching) firstContentFocus else null,
             onItemClick = { item -> onItemClick(item.type, item.tmdbId) },
           )
         }
@@ -126,11 +160,16 @@ private val FocusLineBringIntoViewSpec = object : BringIntoViewSpec {
   }
 }
 
+/** True for the four D-pad arrows, which is all we need to detect deliberate navigation. */
+private fun Key.isDirectional(): Boolean =
+  this == Key.DirectionUp || this == Key.DirectionDown ||
+    this == Key.DirectionLeft || this == Key.DirectionRight
+
 @Composable
 private fun MediaRowFocusable(
   title: String,
   items: List<com.stremioshell.host.tv.data.tmdb.MediaItem>,
-  firstCardFocus: FocusRequester?,
+  firstCardFocus: InitialFocusTarget?,
   onItemClick: (com.stremioshell.host.tv.data.tmdb.MediaItem) -> Unit,
 ) {
   if (items.isEmpty()) return
@@ -149,11 +188,7 @@ private fun MediaRowFocusable(
         MediaCard(
           item = item,
           onClick = { onItemClick(item) },
-          modifier = if (index == 0 && firstCardFocus != null) {
-            Modifier.focusRequester(firstCardFocus)
-          } else {
-            Modifier
-          },
+          modifier = Modifier.initialFocusTarget(if (index == 0) firstCardFocus else null),
         )
       }
     }
@@ -164,7 +199,7 @@ private fun MediaRowFocusable(
 private fun ContinueWatchingRow(
   entries: List<WatchEntry>,
   onResumeClick: (WatchEntry) -> Unit,
-  firstCardFocus: FocusRequester,
+  firstCardFocus: InitialFocusTarget,
 ) {
   Column {
     Text(
@@ -183,7 +218,7 @@ private fun ContinueWatchingRow(
             onClick = { onResumeClick(entry) },
             scale = CardDefaults.scale(focusedScale = 1.08f),
             modifier = Modifier.width(140.dp).height(200.dp)
-              .then(if (index == 0) Modifier.focusRequester(firstCardFocus) else Modifier),
+              .initialFocusTarget(if (index == 0) firstCardFocus else null),
           ) {
             Box(modifier = Modifier.fillMaxSize()) {
               if (entry.posterUrl != null) {

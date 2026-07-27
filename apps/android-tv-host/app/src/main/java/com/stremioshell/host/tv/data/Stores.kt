@@ -4,6 +4,9 @@ import android.content.Context
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -12,6 +15,13 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 private val Context.tvDataStore by preferencesDataStore(name = "tv_app")
+
+/**
+ * Scope for writes that must outlive the screen that started them. Saving the
+ * resume position races `finish()`: a `lifecycleScope` write gets cancelled at
+ * onDestroy before DataStore reaches disk, so the position is silently lost.
+ */
+val persistenceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
 /** User configuration for the native TV app. */
 class SettingsStore(private val context: Context) {

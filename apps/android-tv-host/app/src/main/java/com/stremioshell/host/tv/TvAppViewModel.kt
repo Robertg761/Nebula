@@ -15,11 +15,13 @@ import com.stremioshell.host.tv.data.tmdb.MediaType
 import com.stremioshell.host.tv.data.tmdb.TmdbClient
 import com.stremioshell.host.tv.pairing.ConfigPairingServer
 import com.stremioshell.host.tv.pairing.findLanIpv4
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 data class HomeRail(val title: String, val items: List<MediaItem>)
@@ -58,6 +60,18 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   val streams: StateFlow<LoadState<List<AddonStream>>> = _streams
 
   private var railsLoadedForKey: String? = null
+  private var railsJob: Job? = null
+
+  // Every per-screen loader keeps its Job plus the key it was asked for, so a newer request can
+  // cancel the older one and a late response can be dropped instead of landing on the wrong screen.
+  private var searchJob: Job? = null
+  private var searchKey: String? = null
+  private var detailsJob: Job? = null
+  private var detailsKey: Pair<MediaType, Int>? = null
+  private var seasonJob: Job? = null
+  private var seasonKey: Pair<Int, Int>? = null
+  private var streamsJob: Job? = null
+  private var streamsKey: String? = null
 
   // Phone pairing.
   sealed interface PairingState {
@@ -87,7 +101,9 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
           settings.setTmdbApiKey(tmdbKey)
           settings.setAddonManifestUrl(addonUrl)
           _pairing.value = PairingState.Received
-          loadHomeRails(force = true)
+          // Use the just-received key: the exposed tmdbApiKey flow may not have
+          // caught up yet, and loadHomeRails would resolve the stale value.
+          if (tmdbKey.isNotBlank()) loadRails(tmdbKey, force = true)
         }
       }
       runCatching { server.start() }.fold(
@@ -116,11 +132,31 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
 
   fun loadHomeRails(force: Boolean = false) {
     val key = tmdbApiKey.value?.takeIf { it.isNotBlank() } ?: return
-    if (!force && railsLoadedForKey == key && _homeRails.value is LoadState.Ready) return
+    loadRails(key, force)
+  }
+
+  /**
+   * Loads the home rails for [key].
+   *
+   * Callers may ask more than once for the same key without racing: a load that is still in flight
+   * is reused rather than restarted, and a refresh of the key already on screen swaps the rails in
+   * place instead of blanking Home back to Loading (which would throw away the row the user is on
+   * plus their scroll position). Only an actual key change starts over from Loading.
+   */
+  private fun loadRails(key: String, force: Boolean) {
+    val sameKey = railsLoadedForKey == key
+    if (sameKey) {
+      // Whatever is already in flight for this key produces exactly the data a refresh would.
+      if (railsJob?.isActive == true) return
+      if (!force && _homeRails.value is LoadState.Ready) return
+    } else {
+      railsJob?.cancel()
+    }
     railsLoadedForKey = key
-    _homeRails.value = LoadState.Loading
-    viewModelScope.launch {
-      _homeRails.value = runCatching {
+    val refreshingInPlace = sameKey && _homeRails.value is LoadState.Ready
+    if (!refreshingInPlace) _homeRails.value = LoadState.Loading
+    railsJob = viewModelScope.launch {
+      val result = runCatching {
         val client = TmdbClient(key)
         LoadState.Ready(
           listOf(
@@ -131,53 +167,81 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
           )
         ) as LoadState<List<HomeRail>>
       }.getOrElse { LoadState.Failed(it.message ?: "TMDB request failed") }
+      if (!isActive || railsLoadedForKey != key) return@launch
+      // A failed in-place refresh keeps the rails that are already up; replacing a working Home
+      // with an error screen is worse than quietly serving slightly older catalogs.
+      if (result is LoadState.Failed && _homeRails.value is LoadState.Ready) return@launch
+      _homeRails.value = result
     }
   }
 
   fun search(query: String) {
     val client = tmdb() ?: return
+    // A newer query always wins; drop whatever is still in flight for the previous one.
+    searchJob?.cancel()
+    searchKey = query
     if (query.isBlank()) {
       _searchResults.value = LoadState.Ready(emptyList())
       return
     }
     _searchResults.value = LoadState.Loading
-    viewModelScope.launch {
-      _searchResults.value = runCatching {
+    searchJob = viewModelScope.launch {
+      val result = runCatching {
         LoadState.Ready(client.search(query)) as LoadState<List<MediaItem>>
       }.getOrElse { LoadState.Failed(it.message ?: "Search failed") }
+      if (isActive && searchKey == query) _searchResults.value = result
     }
   }
 
   fun loadDetails(type: MediaType, tmdbId: Int) {
     val client = tmdb() ?: return
+    val key = type to tmdbId
+    // Opening another title invalidates the details *and* the season list of the previous one.
+    detailsJob?.cancel()
+    seasonJob?.cancel()
+    detailsKey = key
+    seasonKey = null
     _details.value = LoadState.Loading
     _episodes.value = LoadState.Ready(emptyList())
-    viewModelScope.launch {
-      _details.value = runCatching {
+    detailsJob = viewModelScope.launch {
+      val result = runCatching {
         LoadState.Ready(client.details(type, tmdbId)) as LoadState<MediaDetails>
       }.getOrElse { LoadState.Failed(it.message ?: "Failed to load details") }
+      if (isActive && detailsKey == key) _details.value = result
     }
   }
 
   fun loadSeason(tmdbId: Int, seasonNumber: Int) {
     val client = tmdb() ?: return
+    // The details screen can ask for a season while it is still showing the previous title (its
+    // effects run before the new details land); that request is stale by definition.
+    val requestedDetails = detailsKey
+    if (requestedDetails != null && requestedDetails.second != tmdbId) return
+    val key = tmdbId to seasonNumber
+    seasonJob?.cancel()
+    seasonKey = key
     _episodes.value = LoadState.Loading
-    viewModelScope.launch {
-      _episodes.value = runCatching {
+    seasonJob = viewModelScope.launch {
+      val result = runCatching {
         LoadState.Ready(client.season(tmdbId, seasonNumber)) as LoadState<List<EpisodeItem>>
       }.getOrElse { LoadState.Failed(it.message ?: "Failed to load season") }
+      if (isActive && seasonKey == key) _episodes.value = result
     }
   }
 
   fun loadStreams(imdbId: String, season: Int?, episode: Int?) {
+    val key = "$imdbId/${season ?: "-"}/${episode ?: "-"}"
+    // Switching episodes must not let the previous episode's list render under the new header.
+    streamsJob?.cancel()
+    streamsKey = key
     val manifest = addonManifestUrl.value?.takeIf { it.isNotBlank() }
     if (manifest == null) {
       _streams.value = LoadState.Failed("No addon configured. Set your Comet manifest URL in Settings.")
       return
     }
     _streams.value = LoadState.Loading
-    viewModelScope.launch {
-      _streams.value = runCatching {
+    streamsJob = viewModelScope.launch {
+      val result = runCatching {
         val streams = if (season != null && episode != null) {
           addonClient.episodeStreams(manifest, imdbId, season, episode)
         } else {
@@ -185,6 +249,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
         }
         LoadState.Ready(streams) as LoadState<List<AddonStream>>
       }.getOrElse { LoadState.Failed(it.message ?: "Addon request failed") }
+      if (isActive && streamsKey == key) _streams.value = result
     }
   }
 
@@ -192,6 +257,12 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     viewModelScope.launch {
       settings.setTmdbApiKey(tmdbKey)
       settings.setAddonManifestUrl(addonUrl)
+      // Persisting the key is what makes Home load its rails, so start that load here, with the key
+      // we just wrote (the exposed flow has not caught up yet). loadRails de-dupes it against the
+      // load Home asks for when it next composes, so the save produces exactly one. The connection
+      // checks below can block for ~30s each, and a load kicked off after them would land long
+      // after Home had rendered and blank it back to "Loading catalogs..." mid-scroll.
+      if (tmdbKey.isNotBlank()) loadRails(tmdbKey, force = true)
       onStatus("Saved. Checking connections...")
 
       val tmdbStatus = if (tmdbKey.isBlank()) {
@@ -218,7 +289,6 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       }
 
       onStatus("$tmdbStatus   |   $addonStatus")
-      loadHomeRails(force = true)
     }
   }
 }

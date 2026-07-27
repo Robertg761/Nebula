@@ -5,9 +5,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -23,6 +25,7 @@ import kotlinx.coroutines.withContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.DisposableEffect
+import androidx.tv.material3.Button
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.stremioshell.host.tv.TvAppViewModel
@@ -39,12 +42,47 @@ fun PairScreen(viewModel: TvAppViewModel, onPaired: () -> Unit) {
     if (state is TvAppViewModel.PairingState.Received) onPaired()
   }
 
+  val goBack = rememberBackAction()
+  val cancelFocus = rememberInitialFocusTarget()
+
+  // The pairing screen had no focusable node at all, so the D-pad was dead until the phone
+  // posted its config. Cancel is always present and always takes the initial focus.
+  RequestInitialFocus(target = cancelFocus, key = Unit, label = "Pair cancel")
+
   Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-    when (val s = state) {
-      is TvAppViewModel.PairingState.Ready -> ReadyContent(s.url)
-      is TvAppViewModel.PairingState.Failed -> CenteredMessage(s.message)
-      else -> CenteredLoading("Starting pairing...")
+    Column(
+      horizontalAlignment = Alignment.CenterHorizontally,
+      verticalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+      when (val s = state) {
+        is TvAppViewModel.PairingState.Ready -> ReadyContent(s.url)
+        is TvAppViewModel.PairingState.Failed -> Text(
+          s.message,
+          style = MaterialTheme.typography.titleMedium,
+          textAlign = TextAlign.Center,
+        )
+        else -> PairingProgress()
+      }
+      Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Button(onClick = goBack, modifier = Modifier.initialFocusTarget(cancelFocus)) {
+          Text("Cancel")
+        }
+        if (state is TvAppViewModel.PairingState.Failed) {
+          Button(onClick = { viewModel.startPairing() }) { Text("Retry") }
+        }
+      }
     }
+  }
+}
+
+@Composable
+private fun PairingProgress() {
+  Column(
+    horizontalAlignment = Alignment.CenterHorizontally,
+    verticalArrangement = Arrangement.spacedBy(14.dp),
+  ) {
+    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+    Text("Starting pairing...", style = MaterialTheme.typography.bodyMedium)
   }
 }
 

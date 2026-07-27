@@ -15,7 +15,11 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -36,24 +40,67 @@ fun interface StreamLauncher {
   fun play(screen: Screen.Streams, stream: AddonStream)
 }
 
+/**
+ * Key under which a back-stack entry's UI state (scroll offsets, focus,
+ * rememberSaveable values) is stashed while the entry is not on screen. The
+ * stack index is part of the key so two visits to the same screen never share
+ * state.
+ */
+private fun stateKeyFor(index: Int, screen: Screen): String = "$index:$screen"
+
 @Composable
 fun TvApp(streamLauncher: StreamLauncher = StreamLauncher { _, _ -> }) {
   val viewModel: TvAppViewModel = viewModel()
-  val backstack = remember { mutableStateListOf<Screen>(Screen.Home) }
+  // Saveable: Screen is Parcelable, so the stack outlives activity recreation
+  // (display-mode switches behind the player, config changes, process death).
+  val backstack = rememberSaveable(
+    saver = listSaver<SnapshotStateList<Screen>, Screen>(
+      save = { it.toList() },
+      restore = { it.toMutableStateList() },
+    ),
+  ) { mutableStateListOf<Screen>(Screen.Home) }
+  // Keeps each screen's state alive while it waits on the back stack, instead
+  // of the bare `when` disposing it on every navigation.
+  val stateHolder = rememberSaveableStateHolder()
   val current = backstack.last()
 
   fun push(screen: Screen) = backstack.add(screen)
-  fun setRoot(screen: Screen) {
-    backstack.clear()
-    backstack.add(screen)
+
+  /** Truncates the stack to [size] entries, dropping the popped screens' state. */
+  fun popTo(size: Int) {
+    while (backstack.size > size) {
+      val index = backstack.lastIndex
+      val screen = backstack.removeAt(index)
+      stateHolder.removeState(stateKeyFor(index, screen))
+    }
   }
 
-  BackHandler(enabled = backstack.size > 1) { backstack.removeAt(backstack.lastIndex) }
+  /**
+   * Drawer-level navigation. Home stays at the bottom of the stack so BACK from
+   * Search or Settings returns Home and only Home exits to the launcher.
+   */
+  fun openRootDestination(screen: Screen) {
+    if (screen == Screen.Home) {
+      popTo(1)
+      return
+    }
+    if (backstack.size > 1 && backstack[1] == screen) {
+      // Already on this destination: keep its state, just drop anything above it.
+      popTo(2)
+      return
+    }
+    popTo(1)
+    push(screen)
+  }
+
+  BackHandler(enabled = backstack.size > 1) { popTo(backstack.size - 1) }
 
   val openDetails: (MediaType, Int) -> Unit = { type, id -> push(Screen.Details(type, id)) }
   val openResume: (WatchEntry) -> Unit = { entry ->
     val type = if (entry.mediaType == "show") MediaType.Show else MediaType.Movie
-    push(Screen.Details(type, entry.tmdbId))
+    // The stopped-at episode rides along: without it Details opens on season 1 with no hint of
+    // where the user was, which makes the Continue Watching card useless for shows.
+    push(Screen.Details(type, entry.tmdbId, entry.season, entry.episode))
   }
 
   Surface(modifier = Modifier.fillMaxSize()) {
@@ -69,50 +116,53 @@ fun TvApp(streamLauncher: StreamLauncher = StreamLauncher { _, _ -> }) {
           ) {
             NavigationDrawerItem(
               selected = current is Screen.Home,
-              onClick = { setRoot(Screen.Home) },
+              onClick = { openRootDestination(Screen.Home) },
               leadingContent = { Icon(Icons.Filled.Home, contentDescription = "Home") },
             ) { Text("Home") }
             NavigationDrawerItem(
               selected = current is Screen.Search,
-              onClick = { setRoot(Screen.Search) },
+              onClick = { openRootDestination(Screen.Search) },
               leadingContent = { Icon(Icons.Filled.Search, contentDescription = "Search") },
             ) { Text("Search") }
             NavigationDrawerItem(
               selected = current is Screen.Settings,
-              onClick = { setRoot(Screen.Settings) },
+              onClick = { openRootDestination(Screen.Settings) },
               leadingContent = { Icon(Icons.Filled.Settings, contentDescription = "Settings") },
             ) { Text("Settings") }
           }
         },
       ) {
         Box(modifier = Modifier.fillMaxSize()) {
-          when (val screen = current) {
-            is Screen.Home -> HomeScreen(
-              viewModel,
-              onItemClick = openDetails,
-              onResumeClick = openResume,
-              onPairWithPhone = { push(Screen.Pair) },
-              onOpenSettings = { setRoot(Screen.Settings) },
-            )
-            is Screen.Search -> SearchScreen(viewModel, onItemClick = openDetails)
-            is Screen.Settings -> SettingsScreen(viewModel, onPairWithPhone = { push(Screen.Pair) })
-            is Screen.Pair -> PairScreen(viewModel, onPaired = { setRoot(Screen.Home) })
-            is Screen.Details -> DetailsScreen(viewModel, screen.type, screen.tmdbId) { media, season, episode ->
-              val imdbId = media.imdbId ?: return@DetailsScreen
-              push(
-                Screen.Streams(
-                  imdbId = imdbId,
-                  title = media.item.title,
-                  tmdbId = media.item.tmdbId,
-                  mediaType = media.item.type,
-                  posterUrl = media.item.posterUrl,
-                  season = season,
-                  episode = episode,
-                )
+          stateHolder.SaveableStateProvider(stateKeyFor(backstack.lastIndex, current)) {
+            when (val screen = current) {
+              is Screen.Home -> HomeScreen(
+                viewModel,
+                onItemClick = openDetails,
+                onResumeClick = openResume,
+                onPairWithPhone = { push(Screen.Pair) },
+                // Pushed, not rooted, so BACK returns to the welcome screen.
+                onOpenSettings = { openRootDestination(Screen.Settings) },
               )
-            }
-            is Screen.Streams -> StreamsScreen(viewModel, screen) { stream ->
-              streamLauncher.play(screen, stream)
+              is Screen.Search -> SearchScreen(viewModel, onItemClick = openDetails)
+              is Screen.Settings -> SettingsScreen(viewModel, onPairWithPhone = { push(Screen.Pair) })
+              is Screen.Pair -> PairScreen(viewModel, onPaired = { popTo(1) })
+              is Screen.Details -> DetailsScreen(viewModel, screen) { media, season, episode ->
+                val imdbId = media.imdbId ?: return@DetailsScreen
+                push(
+                  Screen.Streams(
+                    imdbId = imdbId,
+                    title = media.item.title,
+                    tmdbId = media.item.tmdbId,
+                    mediaType = media.item.type,
+                    posterUrl = media.item.posterUrl,
+                    season = season,
+                    episode = episode,
+                  )
+                )
+              }
+              is Screen.Streams -> StreamsScreen(viewModel, screen) { stream ->
+                streamLauncher.play(screen, stream)
+              }
             }
           }
         }

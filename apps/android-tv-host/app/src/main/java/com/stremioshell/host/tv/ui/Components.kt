@@ -1,5 +1,7 @@
 package com.stremioshell.host.tv.ui
 
+import android.util.Log
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,9 +15,22 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Card
@@ -25,6 +40,116 @@ import androidx.tv.material3.Text
 import coil.compose.AsyncImage
 import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.tv.data.tmdb.MediaItem
+
+/** Tag for the focus-recovery logs the QA matrix expects in a diagnostics capture. */
+private const val FOCUS_TAG = "TvFocus"
+
+/** Frames to keep retrying an initial focus request before giving up (~0.5s at 60fps). */
+private const val FOCUS_MAX_FRAMES = 30
+
+/**
+ * The node a screen wants focused when it opens. Tracks placement and focus so
+ * [RequestInitialFocus] can wait for a real, laid-out node instead of firing a request at
+ * nothing.
+ */
+@Stable
+class InitialFocusTarget {
+  /** Exposed so screens that already route D-pad keys by requester can reuse this one. */
+  val requester = FocusRequester()
+  internal var placed by mutableStateOf(false)
+  internal var focused by mutableStateOf(false)
+}
+
+@Composable
+fun rememberInitialFocusTarget(): InitialFocusTarget = remember { InitialFocusTarget() }
+
+/**
+ * Marks this node as the screen's initial focus target. Pass `null` to leave the node alone,
+ * so a caller can move the target between siblings without branching on the modifier.
+ */
+fun Modifier.initialFocusTarget(target: InitialFocusTarget?): Modifier {
+  if (target == null) return this
+  return this.composed {
+    DisposableEffect(target) {
+      onDispose {
+        // The target migrates between nodes (Continue Watching taking over the first card,
+        // a season row replacing a Back button). Stale flags would make the next request
+        // look already satisfied.
+        target.placed = false
+        target.focused = false
+      }
+    }
+    Modifier
+      .onFocusChanged { target.focused = it.isFocused || it.hasFocus }
+      .onGloballyPositioned { target.placed = true }
+      .focusRequester(target.requester)
+  }
+}
+
+/**
+ * Requests focus for [target] once its node has actually been placed, retrying for a bounded
+ * number of frames and logging when focus never lands.
+ *
+ * A bare `requestFocus()` inside a `LaunchedEffect` runs in the same frame the node first
+ * composes - before placement - so on slower devices the request is silently dropped, the
+ * D-pad is dead and nothing in logcat says why.
+ *
+ * @param key re-aims the request when it changes; keep it stable while the user is browsing
+ *   so focus is never stolen back.
+ * @param enabled set false to suppress the request entirely (e.g. the user already navigated).
+ */
+@Composable
+fun RequestInitialFocus(
+  target: InitialFocusTarget,
+  key: Any?,
+  label: String,
+  enabled: Boolean = true,
+) {
+  LaunchedEffect(target, key, enabled) {
+    if (!enabled) return@LaunchedEffect
+    var frames = 0
+    var lastFailure: Throwable? = null
+    while (frames < FOCUS_MAX_FRAMES) {
+      // Resumes at the start of the next frame, by which point the pending composition has
+      // been laid out and the target node exists.
+      withFrameNanos { }
+      frames++
+      if (target.focused) {
+        if (frames > 2) {
+          Log.i(FOCUS_TAG, "focus recovery: $label took $frames frames to accept focus")
+        }
+        return@LaunchedEffect
+      }
+      if (target.placed) {
+        runCatching { target.requester.requestFocus() }.onFailure { lastFailure = it }
+      }
+    }
+    Log.w(
+      FOCUS_TAG,
+      "focus recovery failed: $label never took focus after $frames frames " +
+        "(placed=${target.placed}); D-pad may need a manual nudge",
+      lastFailure,
+    )
+  }
+}
+
+/**
+ * Pops the current screen through the activity back dispatcher, so a screen can offer a
+ * focusable Back affordance without threading a nav callback through every call site.
+ */
+@Composable
+fun rememberBackAction(): () -> Unit {
+  val dispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
+  return remember(dispatcher) {
+    {
+      if (dispatcher == null) {
+        Log.w(FOCUS_TAG, "back action invoked with no OnBackPressedDispatcher")
+      } else {
+        dispatcher.onBackPressed()
+      }
+    }
+  }
+}
 
 @Composable
 fun MediaCard(item: MediaItem, onClick: () -> Unit, modifier: Modifier = Modifier) {

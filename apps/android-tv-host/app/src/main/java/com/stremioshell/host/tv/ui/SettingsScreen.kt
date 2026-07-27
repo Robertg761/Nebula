@@ -42,7 +42,8 @@ fun SettingsScreen(viewModel: TvAppViewModel, onPairWithPhone: () -> Unit = {}) 
   var status by rememberSaveable { mutableStateOf("") }
   var seeded by rememberSaveable { mutableStateOf(false) }
 
-  val tmdbFocus = remember { FocusRequester() }
+  val tmdbInitialFocus = rememberInitialFocusTarget()
+  val tmdbFocus = tmdbInitialFocus.requester
   val addonFocus = remember { FocusRequester() }
   val saveFocus = remember { FocusRequester() }
 
@@ -54,7 +55,11 @@ fun SettingsScreen(viewModel: TvAppViewModel, onPairWithPhone: () -> Unit = {}) 
     }
   }
 
-  LaunchedEffect(Unit) { runCatching { tmdbFocus.requestFocus() } }
+  RequestInitialFocus(
+    target = tmdbInitialFocus,
+    key = Unit,
+    label = "Settings TMDB key field",
+  )
 
   Column(
     modifier = Modifier
@@ -78,7 +83,7 @@ fun SettingsScreen(viewModel: TvAppViewModel, onPairWithPhone: () -> Unit = {}) 
       colors = settingsFieldColors(),
       modifier = Modifier
         .fillMaxWidth(0.8f)
-        .focusRequester(tmdbFocus)
+        .initialFocusTarget(tmdbInitialFocus)
         // A material3 text field traps the D-pad on TV, so move focus
         // between fields explicitly before it consumes the key.
         .verticalFieldNav(down = addonFocus, up = null),

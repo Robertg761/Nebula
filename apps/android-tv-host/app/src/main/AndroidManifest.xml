@@ -31,16 +31,34 @@
       android:theme="@style/Theme.StremioShell.NoActionBar" />
 
     <!-- Native Compose TV app; becomes the launcher target once it reaches
-         parity with the WebView shell for the Comet/Real-Debrid flow. -->
+         parity with the WebView shell for the Comet/Real-Debrid flow.
+         Handles its own config changes for the same reason MpvPlayerActivity
+         does: the player's refresh-rate matching can switch display mode
+         mid-playback, and HDR10 content flips the panel into HDR/wide-gamut
+         mode (colorMode), either of which otherwise recreates this activity
+         behind it. The Compose back stack is saveable regardless, this just
+         avoids the needless teardown of the whole UI (and its network
+         state). -->
     <activity
       android:name=".tv.TvAppActivity"
+      android:configChanges="colorMode|orientation|screenSize|smallestScreenSize|screenLayout|density|keyboardHidden|navigation|uiMode"
       android:exported="true"
       android:launchMode="singleTask"
       android:theme="@style/Theme.StremioShell.NoActionBar" />
 
+    <!-- Handles its own config changes: matching the display refresh rate to the
+         content frame rate can switch display mode mid-playback, and mpv's
+         target-colorspace-hint puts the panel into HDR/wide-gamut mode a few
+         seconds into HDR10 content (colorMode). Letting either recreate the
+         activity would tear down mpv and restart the stream, and the color-mode
+         flip can oscillate as the mode reverts on teardown.
+         singleTop because MPVLib is a process-global native singleton: a second
+         instance would call create() twice and libmpv exits the process. -->
     <activity
       android:name=".tv.player.MpvPlayerActivity"
+      android:configChanges="colorMode|orientation|screenSize|smallestScreenSize|screenLayout|density|keyboardHidden|navigation|uiMode"
       android:exported="false"
+      android:launchMode="singleTop"
       android:screenOrientation="landscape"
       android:supportsPictureInPicture="false"
       android:theme="@style/Theme.StremioShell.NoActionBar" />

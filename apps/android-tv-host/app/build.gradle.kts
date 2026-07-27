@@ -5,6 +5,9 @@ plugins {
   id("com.android.application")
   id("org.jetbrains.kotlin.android")
   id("org.jetbrains.kotlin.plugin.serialization")
+  // @Parcelize on the TV back-stack Screen types so navigation survives
+  // activity recreation.
+  id("org.jetbrains.kotlin.plugin.parcelize")
 }
 
 // Optional CI signing. If these env vars are present, `assemble...Release` will produce signed APKs.
@@ -47,8 +50,8 @@ android {
     applicationId = "com.stremioshell.host.tv"
     minSdk = 26
     targetSdk = 34
-    versionCode = 13
-    versionName = "0.3.9"
+    versionCode = 14
+    versionName = "0.4.0"
     resValue("string", "app_name", "Stremio Shell TV")
     buildConfigField("String", "GITHUB_RELEASE_OWNER", "\"$githubReleaseOwner\"")
     buildConfigField("String", "GITHUB_RELEASE_REPO", "\"$githubReleaseRepo\"")

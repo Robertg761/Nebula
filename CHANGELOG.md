@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.0] - 2026-07-27
+Playback and navigation overhaul: fifteen fixes from a deep audit of the player and Compose navigation, validated by unit tests, instrumentation, and an emulator QA drive.
+
+- Fixed the app being killed by pressing OK twice on a stream: the second press launched a second player over the first, and creating libmpv twice aborts the process. Stream launches are now single-flight and the player is single-top.
+- Fixed fast navigation playing the wrong content or saving resume progress under the wrong title: screen loads are now cancelled and keyed per request, so stale responses can't overwrite the current screen.
+- Dead or unreachable streams now show "Playback failed" with the mpv error and a "Press BACK to try another stream" hint (with a 60s load watchdog) instead of an infinite spinner.
+- Seeking: rapid LEFT/RIGHT presses coalesce into one seek with an instant OSD preview, presses are never dropped, and exiting mid-seek saves the seek target instead of the stale position.
+- Resume entries are no longer wrongly deleted: only actually reaching the end of a known duration (~98%) marks a title watched. Truncated downloads, seeking past the end, or pausing near the end all keep your place.
+- Navigation state now survives: the back stack, scroll positions, and selected season persist across screen changes and activity recreation (an HDR display-mode switch no longer resets the app), and BACK from the nav drawer returns to content instead of exiting.
+- Continue Watching now resumes shows at the correct episode, and the details screen highlights the resume episode with its progress.
+- The search field no longer traps the D-pad: DOWN moves into results when there are any, and focus lands on the first result.
+- Proper audio focus and a MediaSession: playback pauses for phone-cast audio or the assistant, ducks during transient interruptions, and remote play/pause/stop and media keys work.
+- Every screen guarantees a focus target (with retry across frames), so focus can no longer silently die leaving the remote unresponsive.
+- Watch progress is now also saved every 30 seconds during playback, so a power cut or force-stop keeps your place; the currently playing title stays on top of Continue Watching.
+- Fixed a crash opening a stream list where two streams shared the same URL.
+- Blocking mpv property reads moved off the main thread (worker thread + debounced track info), removing OSD-driven frame hitches.
+- Saving Settings no longer blanks the Home screen while it re-verifies: rails refresh in place, and pairing from a phone applies the new key immediately.
+
 ## [0.3.9] - 2026-07-20
 - Smooth video playback: the player now detects each title's frame rate and switches the TV's display refresh rate to match it (e.g. 24Hz for 23.976/24fps film, 25/50Hz for PAL, 30/60Hz for 30fps), so motion plays with even cadence instead of the uneven 3:2-pulldown judder you get forcing 24fps film onto a fixed 60Hz panel. The display returns to its normal refresh rate when you leave the player. The current frame rate is shown in the on-screen info.
 

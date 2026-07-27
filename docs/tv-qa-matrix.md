@@ -30,8 +30,21 @@
    - playback speed
    - video mode
    - back from player
-7. Native fallback route behavior does not loop.
-8. Diagnostics export contains:
+7. Playback survives the surface being torn down and rebuilt:
+   - Home, then return to the player: video comes back (not audio over black).
+   - Returning does not restart the stream from the beginning.
+   - Film content (23.976fps) that triggers a display-mode switch keeps playing.
+8. Seek feel:
+   - Holding LEFT/RIGHT scrubs smoothly; the OSD time tracks the remote and one
+     seek is issued when the key is released, not one per repeat.
+   - The spinner shows while a seek is in flight.
+   - Holding RIGHT into the end of the file stops short instead of exiting.
+9. Resume:
+   - Back out mid-playback, reopen: resumes at that position, first frame is
+     already at the resume point (no play-from-0:00 then jump).
+   - Continue Watching shows the position after a Back press (not the stale one).
+10. Native fallback route behavior does not loop.
+11. Diagnostics export contains:
    - recent host events
    - back decision records
    - focus recovery logs
