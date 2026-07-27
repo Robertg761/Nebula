@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.5.0] - 2026-07-27
+Feature release from a deep audit against established TV media players: Home, Details, Search, playback, and Settings all grew, and the legacy WebView shell is fully gone - the release APK drops from 116 MB to 50 MB.
+
+- Home: a hero billboard for the top trending title, five genre rails, and infinite row paging (up to 100 items per rail). Rails paint as they arrive instead of waiting for the slowest one.
+- My List: save any title from its Details screen; a My List rail on Home renders offline like Continue Watching, with long-press removal.
+- Watch Next: Continue Watching now publishes to the Android TV home screen's Watch Next row, and pressing a row there opens the title's Details at the right episode.
+- Details enriched: cast row with headshots, "More like this", a fuller metadata line (years, rating, runtime, score, genres), per-episode air dates with unaired episodes dimmed, Specials listed last, and expandable overviews.
+- Instant back navigation: details and episode lists are cached in memory, so returning to a title you just left paints immediately (stale copies refresh in place; a changed TMDB key flushes everything).
+- Search: All/Movies/Shows filter chips, year and type captions on results, exact-title matches ranked first, and honest searching / no-results / failed states with a Retry.
+- Multiple stream addons: up to eight in your priority order, queried in parallel with a 20s per-addon budget, merged into one quality-sorted list with cross-addon duplicate removal, source badges, and an inline notice naming any addon that failed. Existing single-addon installs migrate automatically, and binge autoplay asks every addon too.
+- Binge loop: an up-next card with a 15s countdown autoplays the next episode on the same release, watched history is durable (ticks on episode lists, Watch again / Start over), and your last-used stream pick per series is remembered and preselected.
+- In-player track menu: MENU opens an Audio / Subtitles / Options panel with persistent preferred languages, subtitle size, playback speed, and audio/subtitle delay.
+- External subtitles: a "Get subtitles" section fetches community OpenSubtitles for the current title, grouped by language with your preferred language first.
+- Audio passthrough option (AC3/E-AC3/DTS/TrueHD) for AVR owners, and a one-line notice when a Dolby Vision profile-5 file plays on a display without DV (the green/purple-cast case).
+- Playback hardening: a 45s stall watchdog with an in-place Retry, demuxer cache scaled to device RAM, pause when audio output disconnects, an OLED screen-on guard, and remaining-time plus end-of-film clock on the OSD.
+- Focus and accessibility: every row remembers the card you left and returns focus to it, long episode lists compose lazily (no more season-switch jank), and cards, the hero, episodes, and buttons carry proper TalkBack labels.
+- Settings hardening: saving with a blank field keeps the stored value and says so (explicit Clear buttons do the deliberate thing), addon list management with inline validation, a configurable subtitles addon URL under Advanced, and several D-pad focus traps fixed.
+- Pairing security: the phone pairing page is gated by a one-time token from the QR code and no longer echoes your stored TMDB key or debrid URL; the form is write-only.
+- Privacy and resilience: the TMDB key is scrubbed from every error message and log line, catalog requests are served from a disk cache for up to 7 days when the network fails, and Continue Watching renders offline.
+- The auto-updater now runs in the native app, with an Install prompt when a verified newer APK is ready; downloads verify their size and are refused on metered or roaming connections.
+- Artwork polish: tonal placeholders and title-text fallbacks for posters that fail to load, and the Details backdrop no longer shows gradient banding.
+- Removed the legacy WebView shell and its entire web workspace; the launcher entry is unchanged, so the app keeps its place on TV home screens.
+
 ## [0.4.0] - 2026-07-27
 Playback and navigation overhaul: fifteen fixes from a deep audit of the player and Compose navigation, validated by unit tests, instrumentation, and an emulator QA drive.
 
