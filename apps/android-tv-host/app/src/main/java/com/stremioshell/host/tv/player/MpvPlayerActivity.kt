@@ -1,7 +1,10 @@
 package com.stremioshell.host.tv.player
 
+import android.app.ActivityManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -32,18 +35,24 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.tv.material3.Button
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.stremioshell.host.tv.data.WatchEntry
@@ -55,6 +64,7 @@ import com.stremioshell.host.tv.ui.theme.StremioTvTheme
 import dev.jdtech.mpv.MPVLib
 import kotlinx.coroutines.launch
 import org.json.JSONArray
+import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -173,6 +183,10 @@ class MpvPlayerActivity : ComponentActivity() {
   private val seeking = mutableStateOf(false)
   private val timePosSec = mutableDoubleStateOf(0.0)
   private val durationSec = mutableDoubleStateOf(0.0)
+
+  /** mpv's playback speed, so the OSD's countdown and end time follow it. */
+  private val playbackSpeed = mutableDoubleStateOf(1.0)
+
   private val osdVisible = mutableStateOf(true)
   private val trackInfo = mutableStateOf("")
   private var osdHideAtMs = 0L
@@ -191,6 +205,54 @@ class MpvPlayerActivity : ComponentActivity() {
   private val loadFailedRunnable = Runnable {
     if (!playbackStarted) showPlaybackError(lastErrorMessage ?: DEFAULT_LOAD_ERROR)
   }
+
+  /**
+   * Fires when a stream that did start playing has been waiting on its cache for
+   * [STALL_TIMEOUT_MS] without a byte arriving. mpv's own recovery cannot reach
+   * this one: `reconnect` needs the connection to actually drop, and a debrid
+   * host that keeps the socket open and simply stops sending never drops it, so
+   * the load watchdog having disarmed at FILE_LOADED used to leave the spinner
+   * turning for the rest of the evening.
+   */
+  private val stallRunnable = Runnable {
+    if (!buffering.value || playbackError.value != null) return@Runnable
+    // The viewer stopped where the data did; the same save a dropped stream gets.
+    saveWatchState(SaveReason.Stopped)
+    showPlaybackError(STALL_ERROR)
+  }
+
+  /**
+   * Clears [WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON] once nothing has been
+   * moving for [IDLE_SCREEN_ON_MS]. Holding it for the whole session is right
+   * while a film plays and wrong the moment one is paused and forgotten: a static
+   * frame pinned on an OLED overnight is burn-in, and the screensaver the panel
+   * would otherwise run is exactly the protection being suppressed.
+   */
+  private val releaseScreenOnRunnable = Runnable {
+    screenOnReleaseArmed = false
+    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+  }
+
+  private var screenOnReleaseArmed = false
+
+  /**
+   * Unplugging headphones (or a Bluetooth headset going out of range) must not
+   * dump the soundtrack out of the TV's speakers at whatever volume the room was
+   * not expecting. Registered only while playing, because that is the only state
+   * this has anything to do.
+   */
+  private val becomingNoisyReceiver = object : BroadcastReceiver() {
+    override fun onReceive(context: Context?, intent: Intent?) {
+      if (intent?.action != AudioManager.ACTION_AUDIO_BECOMING_NOISY) return
+      if (!transportAllowed() || paused.value) return
+      // Not a focus-loss pause: nothing is coming back to hand the audio route
+      // over, so this must never resume on its own.
+      pausePlayback()
+      showOsd()
+    }
+  }
+
+  private var noisyReceiverRegistered = false
 
   /**
    * Writes the resume position while the film is running, then re-arms itself.
@@ -241,6 +303,7 @@ class MpvPlayerActivity : ComponentActivity() {
           durationSec.doubleValue = value
           publishMediaMetadata()
         }
+        "speed" -> mainHandler.post { playbackSpeed.doubleValue = value }
       }
     }
 
@@ -255,9 +318,14 @@ class MpvPlayerActivity : ComponentActivity() {
             paused.value = value
             publishPlaybackState()
             scheduleProgressSave()
+            // A stall nobody is waiting on is not a stall: a viewer who pauses
+            // mid-buffer must not come back to a failure they never saw happen.
+            if (value) cancelStallWatchdog() else if (buffering.value) armStallWatchdog()
+            syncPlayingState()
           }
           "paused-for-cache" -> {
             buffering.value = value
+            if (value && !paused.value) armStallWatchdog() else cancelStallWatchdog()
             publishPlaybackState()
           }
           "seeking" -> {
@@ -288,6 +356,7 @@ class MpvPlayerActivity : ComponentActivity() {
           // later as the reason a mid-stream failure happened.
           lastErrorMessage = null
           buffering.value = false
+          cancelStallWatchdog()
           refreshTrackInfo()
           matchDisplayToContentFrameRate()
           // The stream is about to make noise, so take the speakers now. Denied
@@ -298,6 +367,7 @@ class MpvPlayerActivity : ComponentActivity() {
           publishPlaybackState()
           // Playback is genuinely under way, so start recording where it gets to.
           scheduleProgressSave()
+          syncPlayingState()
         }
         // Nothing else notices a dead stream: `keep-open=yes` leaves mpv idling
         // on a black frame, so without this a failed load or a fatal mid-stream
@@ -441,6 +511,7 @@ class MpvPlayerActivity : ComponentActivity() {
     MPVLib.observeProperty("paused-for-cache", MPVLib.MPV_FORMAT_FLAG)
     MPVLib.observeProperty("seeking", MPVLib.MPV_FORMAT_FLAG)
     MPVLib.observeProperty("eof-reached", MPVLib.MPV_FORMAT_FLAG)
+    MPVLib.observeProperty("speed", MPVLib.MPV_FORMAT_DOUBLE)
 
     createMediaSession()
 
@@ -450,6 +521,9 @@ class MpvPlayerActivity : ComponentActivity() {
       }
     }
     showOsd()
+    // Arms the idle screen-on release: a stream that never opens leaves a
+    // "Playback failed" panel that must not hold the panel awake either.
+    syncPlayingState()
   }
 
   /**
@@ -461,16 +535,29 @@ class MpvPlayerActivity : ComponentActivity() {
     MPVLib.setOptionString("cache", "yes")
     MPVLib.setOptionString("cache-secs", "120")
     MPVLib.setOptionString("demuxer-readahead-secs", "20")
-    // Byte caps, not preallocation: cache-secs decides the normal working set.
-    // Kept modest because low-RAM TV boxes get killed for holding too much.
-    MPVLib.setOptionString("demuxer-max-bytes", "100663296") // 96 MiB
-    MPVLib.setOptionString("demuxer-max-back-bytes", "33554432") // 32 MiB
+    // Byte caps, not preallocation: cache-secs decides the normal working set,
+    // except on high-bitrate remuxes where the cap is what actually binds — see
+    // [DemuxerCacheSizing] for why it has to follow the device's RAM.
+    val cache = DemuxerCacheSizing.forDeviceRam(totalDeviceRamBytes())
+    MPVLib.setOptionString("demuxer-max-bytes", cache.forwardBytes.toString())
+    MPVLib.setOptionString("demuxer-max-back-bytes", cache.backBytes.toString())
     MPVLib.setOptionString("network-timeout", "30")
     MPVLib.setOptionString(
       "stream-lavf-o",
       "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=10",
     )
   }
+
+  /**
+   * Physical RAM, not the Java heap limit: the demuxer cache is native memory,
+   * so `Runtime.maxMemory` (a couple of hundred MiB on a TV box regardless of
+   * the hardware) says nothing about how much of it the device can carry.
+   */
+  private fun totalDeviceRamBytes(): Long = runCatching {
+    val info = ActivityManager.MemoryInfo()
+    getSystemService(ActivityManager::class.java).getMemoryInfo(info)
+    info.totalMem
+  }.getOrDefault(0L)
 
   /**
    * Decides what the end of playback means. Reached from both ends mpv reports:
@@ -531,6 +618,21 @@ class MpvPlayerActivity : ComponentActivity() {
   }
 
   /**
+   * Starts the clock on a cache stall. Only meaningful once the stream has
+   * played: before that the load watchdog owns the same failure, and arming both
+   * would race to report it.
+   */
+  private fun armStallWatchdog() {
+    mainHandler.removeCallbacks(stallRunnable)
+    if (!playbackStarted || !transportAllowed()) return
+    mainHandler.postDelayed(stallRunnable, STALL_TIMEOUT_MS)
+  }
+
+  private fun cancelStallWatchdog() {
+    mainHandler.removeCallbacks(stallRunnable)
+  }
+
+  /**
    * Swaps the spinner for a readable failure. Deliberately does not finish the
    * activity: an instant bounce back to the stream list looks like a dropped
    * button press, so the reason stays on screen until the viewer leaves.
@@ -539,6 +641,7 @@ class MpvPlayerActivity : ComponentActivity() {
     if (finishing || playbackError.value != null) return
     mainHandler.removeCallbacks(loadFailedRunnable)
     mainHandler.removeCallbacks(seekRunnable)
+    cancelStallWatchdog()
     // The position stops moving here, and [onPlaybackEnded] has already saved it.
     mainHandler.removeCallbacks(progressSaveRunnable)
     buffering.value = false
@@ -547,6 +650,92 @@ class MpvPlayerActivity : ComponentActivity() {
     // keep-open leaves mpv paused on a dead stream, which would otherwise be
     // published as a pause a client could offer to resume.
     publishPlaybackState()
+    syncPlayingState()
+  }
+
+  /**
+   * Loads the same URL again from where playback got to. Most of what kills a
+   * debrid stream mid-film — a stalled cache, a host dropping the connection, a
+   * link that expired between the list and the first frame — is over by the time
+   * the viewer reads the panel, and the alternative was backing out to the stream
+   * list and starting the whole pick again from 0:00.
+   */
+  private fun retryPlayback() {
+    if (!mpvCreated || finishing || playbackError.value == null) return
+
+    // Where to come back in. Below the resume threshold the `start` option set at
+    // load time still holds, which is the position this session was asked for:
+    // exactly right for a stream that died before it ever produced a frame.
+    val restartSec = resumePositionSec().takeIf { it * 1000 > MIN_RESUME_MS }
+    if (restartSec != null) MPVLib.setPropertyString("start", restartSec.toString())
+
+    // A seek issued against the file that just died cannot settle against the one
+    // replacing it; `start` carries its target instead (see [resumePositionSec]).
+    seeker.reset()
+    seekPreviewSec.doubleValue = NO_SEEK
+    lastPostedSecond = Long.MIN_VALUE
+
+    playbackError.value = null
+    lastErrorMessage = null
+    playbackStarted = false
+    buffering.value = true
+    seeking.value = false
+
+    MPVLib.command(arrayOf("loadfile", url, "replace"))
+    // `keep-open=yes` left mpv paused on the dead file, and that pause survives
+    // the reload; this is also where audio focus is taken back.
+    playPlayback()
+    armLoadWatchdog(LOAD_TIMEOUT_MS)
+    publishPlaybackState()
+    syncPlayingState()
+    showOsd()
+  }
+
+  /**
+   * Applies everything that is only true while pictures are actually moving: the
+   * headphone-disconnect receiver is registered, and the screen is kept awake.
+   * Idempotent, so every state change that might have started or stopped
+   * playback can just call it.
+   */
+  private fun syncPlayingState() {
+    val playing = mpvCreated && !finishing && playbackError.value == null &&
+      playbackStarted && !paused.value
+    syncNoisyReceiver(playing)
+    syncScreenOn(playing)
+  }
+
+  private fun syncNoisyReceiver(playing: Boolean) {
+    if (playing == noisyReceiverRegistered) return
+    noisyReceiverRegistered = playing
+    if (playing) {
+      // NOT_EXPORTED is right even though the sender is the system: only the
+      // platform broadcasts this action, and it is exempt from the restriction.
+      ContextCompat.registerReceiver(
+        this,
+        becomingNoisyReceiver,
+        IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
+        ContextCompat.RECEIVER_NOT_EXPORTED,
+      )
+    } else {
+      runCatching { unregisterReceiver(becomingNoisyReceiver) }
+    }
+  }
+
+  /**
+   * Note the asymmetry: playing re-adds the flag every time, while the release is
+   * armed once and left to run. Re-arming on each call would let a state that
+   * changes more often than [IDLE_SCREEN_ON_MS] — a paused film whose
+   * MediaSession clients keep poking it — hold the screen on forever.
+   */
+  private fun syncScreenOn(playing: Boolean) {
+    if (playing) {
+      mainHandler.removeCallbacks(releaseScreenOnRunnable)
+      screenOnReleaseArmed = false
+      window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    } else if (!screenOnReleaseArmed) {
+      screenOnReleaseArmed = true
+      mainHandler.postDelayed(releaseScreenOnRunnable, IDLE_SCREEN_ON_MS)
+    }
   }
 
   @Composable
@@ -580,6 +769,7 @@ class MpvPlayerActivity : ComponentActivity() {
   private fun BoxScope.PlaybackErrorPanel() {
     val reason by playbackError
     val message = reason ?: return
+    val retryFocus = remember { FocusRequester() }
 
     Column(
       modifier = Modifier
@@ -597,13 +787,24 @@ class MpvPlayerActivity : ComponentActivity() {
         style = MaterialTheme.typography.bodyMedium,
         textAlign = TextAlign.Center,
       )
+      Button(
+        onClick = { retryPlayback() },
+        modifier = Modifier.padding(top = 20.dp).focusRequester(retryFocus),
+      ) {
+        Text("Retry")
+      }
       Text(
-        "Press BACK to try another stream",
+        "OK retries from where it stopped   |   BACK tries another stream",
         modifier = Modifier.padding(top = 18.dp),
         color = Color(0x99FFFFFF),
         style = MaterialTheme.typography.bodySmall,
       )
     }
+
+    // The only focusable thing the player ever shows, so nothing else can hand
+    // focus to it. A failed request is not worth reacting to: OK still reaches
+    // [onKeyDown], which retries from there.
+    LaunchedEffect(Unit) { runCatching { retryFocus.requestFocus() } }
   }
 
   @Composable
@@ -646,7 +847,11 @@ class MpvPlayerActivity : ComponentActivity() {
     val actual by timePosSec
     val preview by seekPreviewSec
     val duration by durationSec
+    val speed by playbackSpeed
     val position = if (preview >= 0) preview else actual
+    // Recomposed once a second by [position], which is also what keeps the end
+    // time below current without a clock of its own.
+    val remaining = PlaybackTimeline.remainingSec(position, duration, speed)
     Row(
       modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
       verticalAlignment = Alignment.CenterVertically,
@@ -669,6 +874,24 @@ class MpvPlayerActivity : ComponentActivity() {
       }
       Text(formatTime(duration), color = Color.White, style = MaterialTheme.typography.bodyMedium)
     }
+    if (remaining != null) {
+      val endsAt = PlaybackTimeline.endsAtEpochMs(System.currentTimeMillis(), remaining)
+      Text(
+        "-${formatTime(remaining)}   |   Ends at ${formatClockTime(endsAt)}",
+        modifier = Modifier.padding(top = 4.dp),
+        color = Color(0xCCFFFFFF),
+        style = MaterialTheme.typography.bodySmall,
+      )
+    }
+  }
+
+  /** The device's own 12/24-hour setting decides the shape of this. */
+  @Composable
+  private fun formatClockTime(epochMs: Long): String {
+    val format = remember {
+      android.text.format.DateFormat.getTimeFormat(this@MpvPlayerActivity)
+    }
+    return format.format(Date(epochMs))
   }
 
   private fun createSurfaceView(context: Context): SurfaceView {
@@ -713,10 +936,17 @@ class MpvPlayerActivity : ComponentActivity() {
 
   override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
     if (!mpvCreated) return super.onKeyDown(keyCode, event)
-    // On a dead stream the only useful keys are the ones that leave.
+    // On a dead stream the only useful keys are the ones that retry or leave.
     if (playbackError.value != null) {
       if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_MEDIA_STOP) {
         finishPlayback(markFinished = false)
+        return true
+      }
+      // The panel's Retry button normally has focus and handles OK itself; this
+      // is the fallback for when the focus request did not land, and for the
+      // media keys, which never reach a button.
+      if (event.repeatCount == 0 && keyCode in RETRY_KEYS) {
+        retryPlayback()
         return true
       }
       // Transport keys are consumed, not passed on: the coalescer has no duration
@@ -1190,6 +1420,7 @@ class MpvPlayerActivity : ComponentActivity() {
     // Before the verdict below: a periodic upsert must not land after a Finished
     // removal and resurrect the entry it just dropped.
     mainHandler.removeCallbacks(progressSaveRunnable)
+    syncPlayingState()
     val finished = markFinished || reachedEndOfFile()
     saveWatchState(if (finished) SaveReason.Finished else SaveReason.Stopped)
     finish()
@@ -1312,6 +1543,8 @@ class MpvPlayerActivity : ComponentActivity() {
     // save paths (finishPlayback and onPause) run before this point.
     if (!finishing && seeker.hasPendingPress) saveWatchState(SaveReason.Paused)
     mainHandler.removeCallbacksAndMessages(null)
+    // Before mpvCreated goes false, which is what [syncPlayingState] reads.
+    syncNoisyReceiver(playing = false)
     releaseMediaSession()
     // Before mpv goes: whatever was playing before this film is waiting on it.
     abandonAudioFocus()
@@ -1389,10 +1622,30 @@ class MpvPlayerActivity : ComponentActivity() {
      */
     private const val END_FILE_GRACE_MS = 1_500L
 
+    /**
+     * How long playback may sit waiting on its cache before the stream is called
+     * dead. Well clear of the worst honest rebuffer on a slow debrid host, and
+     * far short of the forever the spinner used to turn for. Not shortened for
+     * being "obviously" stuck: a torrent re-seeking to a rare piece can take a
+     * good half minute to produce the next byte, and killing that would be worse
+     * than the wait.
+     */
+    private const val STALL_TIMEOUT_MS = 45_000L
+
+    /**
+     * How long the player may show a still frame before it stops keeping the
+     * screen awake — a paused film, or the failure panel. Long enough to survive
+     * a trip to the kitchen, short enough to leave the panel's own screensaver
+     * and burn-in protection a chance to run.
+     */
+    private const val IDLE_SCREEN_ON_MS = 5 * 60_000L
+
     /** An mpv error line can carry a whole signed URL; the panel needs the gist. */
     private const val MAX_ERROR_CHARS = 160
     private const val DEFAULT_LOAD_ERROR = "The stream could not be opened."
     private const val DEFAULT_PLAYBACK_ERROR = "The stream stopped unexpectedly."
+    private val STALL_ERROR =
+      "The stream stalled: no data for ${STALL_TIMEOUT_MS / 1000} seconds."
     private const val NO_SEEK = -1.0
 
     /**
@@ -1427,6 +1680,14 @@ class MpvPlayerActivity : ComponentActivity() {
       KeyEvent.KEYCODE_DPAD_DOWN,
       KeyEvent.KEYCODE_MEDIA_REWIND,
       KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
+    )
+
+    /** What asks a dead stream to be tried again, when the panel is up. */
+    private val RETRY_KEYS = setOf(
+      KeyEvent.KEYCODE_DPAD_CENTER,
+      KeyEvent.KEYCODE_ENTER,
+      KeyEvent.KEYCODE_MEDIA_PLAY,
+      KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
     )
 
     /**

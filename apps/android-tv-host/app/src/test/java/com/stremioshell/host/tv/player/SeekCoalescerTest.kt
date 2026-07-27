@@ -274,4 +274,39 @@ class SeekCoalescerTest {
 
     assertEquals(120.0, target!!, 0.001)
   }
+
+  @Test
+  fun `reset drops an unflushed press so a reload is not seeked afterwards`() {
+    val seeker = coalescer()
+    seeker.press(4_200.0, positionSec = 600.0, durationSec = 7_200.0, isRepeat = false, nowMs = 0L)
+
+    seeker.reset()
+
+    assertFalse(seeker.hasPendingPress)
+    assertNull(seeker.previewSec)
+    assertNull(seeker.consumePending())
+  }
+
+  @Test
+  fun `reset drops an in-flight seek that can never settle`() {
+    val seeker = coalescer()
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 0L)
+    seeker.consumePending()
+
+    seeker.reset()
+
+    assertNull(seeker.previewSec)
+    assertFalse("the restart from the reload belongs to no seek of ours", seeker.settle())
+  }
+
+  @Test
+  fun `after a reset the next press starts from mpv's position`() {
+    val seeker = coalescer()
+    seeker.press(600.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 0L)
+    seeker.reset()
+
+    val target = seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 500L)
+
+    assertEquals(110.0, target!!, 0.001)
+  }
 }

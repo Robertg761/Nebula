@@ -109,6 +109,18 @@ class SeekCoalescer(
     return true
   }
 
+  /**
+   * Drops everything outstanding, for a reload that starts the stream again from
+   * a known position: the target of a seek issued against the file that just
+   * died means nothing to the one replacing it, and left in place it would pin
+   * the OSD and every saved resume position to a seek that can never settle.
+   */
+  fun reset() {
+    target = NO_TARGET
+    pending = false
+    inFlight = false
+  }
+
   private companion object {
     const val NO_TARGET = -1.0
   }
