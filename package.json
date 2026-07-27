@@ -2,25 +2,9 @@
   "name": "stremio-shell-tv",
   "private": true,
   "version": "0.3.8",
-  "description": "Android/Google TV shell for stremio-core in a dedicated TV-focused repo.",
-  "packageManager": "pnpm@10.15.0",
+  "description": "Android/Google TV app for Stremio: native Jetpack Compose UI, TMDB metadata, Stremio stream addons, libmpv playback.",
   "scripts": {
-    "build": "turbo run build",
-    "dev": "turbo run dev --parallel",
-    "typecheck": "turbo run typecheck",
-    "lint": "turbo run lint",
-    "test:contracts": "pnpm --filter @stremio-shell/core-bridge build && node --test \"packages/core-bridge/test/*.test.mjs\"",
-    "test:tv-smoke": "pnpm --filter @stremio-shell/web test:tv-smoke",
-    "test:web": "pnpm --filter @stremio-shell/web test",
-    "upstream:sync": "node scripts/sync-upstream-stremio-web.mjs",
-    "android:web-build": "pnpm --filter @stremio-shell/web build",
     "android:tv:assemble": "node scripts/run-gradle.mjs :app:assembleDebug",
-    "android:tv:test": "node scripts/run-gradle.mjs :app:testDebugUnitTest",
-    "core:use-npm": "pnpm --filter @stremio-shell/core-bridge add @stremio/stremio-core-web@0.52.0",
-    "core:use-local": "node scripts/use-local-core.mjs"
-  },
-  "devDependencies": {
-    "turbo": "^2.5.6",
-    "typescript": "^5.9.2"
+    "android:tv:test": "node scripts/run-gradle.mjs :app:testDebugUnitTest"
   }
 }

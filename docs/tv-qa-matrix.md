@@ -16,13 +16,19 @@
 1. Cold launch reaches usable UI (no black screen).
 2. Initial focus appears on primary route control.
 3. D-pad reaches all primary interactive controls on:
-   - Board/Home
-   - Discover
-   - Meta Details / Streams
-   - Settings
+   - Home rails
+   - Details
+   - Streams
    - Search
+   - Settings (including phone pairing)
 4. Back policy follows: modal close -> route back -> app exit.
-5. Deep link opens expected route and focus is recovered.
+5. Watch Next deep link opens the right title at the right episode and
+   resume position, and focus is recovered:
+
+   ```bash
+   adb shell am start -a android.intent.action.VIEW \
+     -d "stremio-tv://watch-next?type=show&tmdb=1396&season=1&episode=2&position=60000"
+   ```
 6. Playback starts and remote controls work:
    - play/pause
    - seek forward/back
@@ -43,47 +49,43 @@
    - Back out mid-playback, reopen: resumes at that position, first frame is
      already at the resume point (no play-from-0:00 then jump).
    - Continue Watching shows the position after a Back press (not the stale one).
-10. Native fallback route behavior does not loop.
-11. Diagnostics export contains:
-   - recent host events
-   - back decision records
-   - focus recovery logs
+10. Settings round-trip:
+   - Saving with a field left blank keeps the stored value and says so; the
+     per-value Clear button still clears.
+   - Phone pairing QR opens the form, submits, and the values land on the TV.
+11. Logcat capture is clean: no focus-recovery give-ups (`TvFocus` tag), no
+   unhandled exceptions during the run.
 
 ## Automated checks
 
 Run before manual device signoff:
 
 ```bash
-pnpm typecheck
-pnpm lint
-pnpm build
-pnpm test:contracts
-pnpm test:tv-smoke
+source scripts/android-env.sh
 cd apps/android-tv-host
-./gradlew :app:testDebugUnitTest
-./gradlew :app:connectedDebugAndroidTest
+./gradlew :app:testDebugUnitTest :app:assembleDebug
 ```
 
-The instrumentation matrix must include API 26 and API 34 TV emulators before a
-release candidate is marked ready. Physical-device signoff still requires at
-least one Google TV class device and one non-Google Android TV/OEM device when
-available.
+That is the whole automated gate, and it is what CI runs. There is no
+instrumentation suite in the repo: the androidTest sources went with the
+WebView shell, so everything below the JVM tests is manual.
 
-Note: the CI instrumentation jobs are currently non-blocking because emulator
-36.6.11 on GitHub runner images crashes with every headless renderer. Until
-that is fixed upstream, run the instrumentation gate on a local TV emulator:
+Run the manual checklist on a local TV emulator plus hardware. The emulator
+needs `-gpu host` on Linux; headless software renderers crash emulator 36.x.
 
 ```bash
-source scripts/android-env.sh
 emulator -avd stremio_tv_34 -no-window -no-audio -no-boot-anim -gpu host -no-snapshot &
-node scripts/run-gradle.mjs :app:connectedDebugAndroidTest
+node scripts/run-gradle.mjs :app:installDebug
 ```
+
+Physical-device signoff requires at least one Google TV class device and one
+non-Google Android TV/OEM device when available.
 
 ## Artifact policy
 
 Attach screenshots, logcat captures, and APKs to CI runs, GitHub Releases, or an
 external QA storage location. Do not commit generated QA artifacts under
-`artifacts/`, generated Android web assets, or release APK files.
+`artifacts/`, build output, or release APK files.
 
 ## Signoff template
 

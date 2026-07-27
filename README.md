@@ -1,117 +1,93 @@
 # stremio-shell-tv
 
-TV-focused monorepo for building a custom Stremio client with an Android/Google TV-first strategy.
+A native Android/Google TV client for Stremio content. Jetpack Compose for TV
+UI, TMDB for catalog and metadata, Stremio stream addons (Comet and friends)
+for stream links, and libmpv for playback. There is no WebView and no bundled
+web bundle: the Compose app is the whole product.
 
 ## Repo layout
 
-- `apps/web`: Staged upstream `stremio-web` bootstrap with shell patch overlays under `apps/web/src/patches/{shared,tv}`.
-- `packages/core-bridge`: Typed wrapper around `@stremio/stremio-core-web` runtime APIs.
-- `apps/android-tv-host`: Android/Google TV host integration code.
-- `docs`: Contracts and quality gate docs.
+- `apps/android-tv-host`: the Android app (the only build in this repo).
+- `scripts`: JDK/SDK env helper, Gradle wrapper runner, release version and
+  changelog helpers used by CI.
+- `docs`: quality gates and the manual TV QA matrix.
 
-## Quick start
+## Build and run
 
-```bash
-pnpm install
-pnpm dev
-```
-
-Open the web shell at `http://localhost:5173`.
-
-## Android TV builds
-
-Android builds require JDK 17. The repo includes `.java-version` for version
-managers that support it; verify `java -version` before invoking Gradle.
-
-Set JDK 17 and Android SDK paths for the current shell (Linux/macOS):
+Requires JDK 17 and an Android SDK. `.java-version` pins 17 for version
+managers that read it.
 
 ```bash
-source scripts/android-env.sh
+source scripts/android-env.sh   # sets JAVA_HOME / ANDROID_HOME if unset
+cd apps/android-tv-host
+./gradlew :app:assembleDebug    # or :app:installDebug
 ```
 
-Then build:
+From the repo root, `npm run android:tv:assemble` and `npm run android:tv:test`
+are the same thing through `scripts/run-gradle.mjs` (plain Node, no install
+step - the repo has no JS dependencies). Debug APK lands in
+`apps/android-tv-host/app/build/outputs/apk/debug/`.
 
-```bash
-pnpm android:web-build
-pnpm android:tv:assemble
-```
+Unit tests: `./gradlew :app:testDebugUnitTest`. There is no instrumentation
+suite in the repo right now; device coverage is the manual matrix in
+`docs/tv-qa-matrix.md`.
 
-Install artifact:
+## First-run configuration
 
-- `apps/android-tv-host/app/build/outputs/apk/debug/app-debug.apk`
+Everything the app needs is entered on its Settings screen, on device:
 
-The Android build packages generated web assets from
-`apps/android-tv-host/app/build/generated/assets/main/web`. Do not commit
-generated files under `apps/android-tv-host/app/src/main/assets/web`.
+- **TMDB API key** - from themoviedb.org > Settings > API. Without it no rails
+  or search results load.
+- **Stream addons** - one or more Stremio addon manifest URLs, in priority
+  order (the first addon offering a release wins; the rest are merged in and
+  sorted by quality). A Comet instance configured with your own Real-Debrid key
+  is the usual first entry. Up to 8 addons.
+- **Advanced > Subtitles addon URL** - blank uses the built-in OpenSubtitles v3
+  addon.
 
-## GitHub release updates
+Typing URLs on a remote is miserable, so **Settings > Set up with phone** shows
+a QR code for a one-shot LAN web form: the phone submits the TMDB key and addon
+URL from its own keyboard. That form is plain HTTP on your local network,
+guarded by a single-use token shown only in the QR code, write-only (it never
+renders the stored values back), and it dies when you leave the pairing screen.
 
-This repo includes `.github/workflows/release.yml` for TV-only releases.
+### Addon URLs and cleartext
 
-How it works:
+Use `https://` addon URLs. A bare host you type gets `https://` prefixed
+automatically, but an explicit `http://` URL is sent in cleartext: the manifest
+and stream requests, including anything embedded in the addon path, travel
+unencrypted and are readable by anything on the network path. That matters here
+because a Comet manifest URL typically embeds your Real-Debrid token in the
+path. Release builds set `usesCleartextTraffic=false`, so `http://` addons fail
+outright there; debug builds allow cleartext for local testing.
 
-1. Trigger on `main` pushes when release files change, or run manually via `workflow_dispatch`.
-2. Read app version from `apps/android-tv-host/app/build.gradle.kts`.
-3. Build web assets (`pnpm android:web-build`).
-4. Build Android release APK for `tv`.
-5. Create GitHub Release `v<version>` and upload `StremioShell-tv-<version>.apk`.
+## Releases and in-app updates
 
-In-app updater behavior:
+`.github/workflows/release.yml` builds and publishes TV releases:
 
-- Android host performs silent GitHub Releases checks on startup and via hourly background work in release builds.
-- If a newer release exists, it auto-downloads the TV APK in the background.
-- Debug builds do not perform automatic update checks.
-- Update source defaults in `apps/android-tv-host/app/build.gradle.kts`:
-  - `githubReleaseOwner` (default: `Robertg761`)
-  - `githubReleaseRepo` (default: `stremio-shell-tv`)
-- Override at build time if needed:
-  - `-PgithubReleaseOwner=<owner> -PgithubReleaseRepo=<repo>`
+1. Triggers on `main` pushes touching release files, or `workflow_dispatch`.
+2. Reads the version from `apps/android-tv-host/app/build.gradle.kts`.
+3. Builds and signs `:app:assembleRelease`, verifies the signature with
+   `apksigner`.
+4. Creates GitHub Release `v<version>` with `StremioShell-tv-<version>.apk`.
+
+The in-app updater polls GitHub Releases on startup and hourly in the
+background (release builds only), matches the `-tv-` named asset, and
+downloads it in the background. Update source defaults live in
+`app/build.gradle.kts` (`githubReleaseOwner`, `githubReleaseRepo`) and can be
+overridden with `-PgithubReleaseOwner=... -PgithubReleaseRepo=...`.
 
 Before pushing a release:
 
-1. Bump `versionCode` and `versionName` in `apps/android-tv-host/app/build.gradle.kts`.
-2. Add a matching version section in `CHANGELOG.md`:
-   - `## [x.y.z] - YYYY-MM-DD`
-3. Confirm release signing secrets are configured:
-   - `SS_SIGNING_STORE_BASE64`
-   - `SS_SIGNING_STORE_PASSWORD`
-   - `SS_SIGNING_KEY_ALIAS`
-   - `SS_SIGNING_KEY_PASSWORD`
-   - optional `SS_SIGNING_STORE_TYPE`
-4. Push to `main` (or run workflow manually).
+1. Bump `versionCode` and `versionName` in
+   `apps/android-tv-host/app/build.gradle.kts`.
+2. Add the matching `## [x.y.z] - YYYY-MM-DD` section to `CHANGELOG.md`.
+3. Confirm signing secrets exist: `SS_SIGNING_STORE_BASE64`,
+   `SS_SIGNING_STORE_PASSWORD`, `SS_SIGNING_KEY_ALIAS`,
+   `SS_SIGNING_KEY_PASSWORD`, optional `SS_SIGNING_STORE_TYPE`.
 
-## Upstream stremio-web sync
+## Further reading
 
-```bash
-pnpm upstream:sync
-```
-
-This syncs pinned upstream source into `vendor/stremio-web/source` and updates `vendor/stremio-web/VENDOR_METADATA.json`.
-
-## Using your local stremio-core fork
-
-This repo is designed to consume either:
-
-1. `@stremio/stremio-core-web` from npm, or
-2. a tarball packed from your local `stremio-core/stremio-core-web` fork.
-
-To switch to local fork output:
-
-```bash
-pnpm core:use-local /path/to/stremio-core
-```
-
-The script packs your local fork and installs that package into `packages/core-bridge`.
-
-## Delivery model
-
-- Primary target: Android + Google TV (`apps/android-tv-host`).
-- Shared runtime contract: `packages/core-bridge`.
-
-Read these documents for execution governance:
-
-- `docs/contracts/core-bridge.md`
-- `docs/contracts/host-bridge.md`
-- `docs/quality-gates.md`
-- `docs/tv-qa-matrix.md`
-- `docs/upstream-sync.md`
+- `apps/android-tv-host/README.md` - module layout, TV-only manifest, ABIs.
+- `docs/quality-gates.md` - what has to pass before a release.
+- `docs/tv-qa-matrix.md` - manual device/remote QA checklist.

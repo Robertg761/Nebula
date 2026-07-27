@@ -45,19 +45,12 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.15.0
-
+      # Node only runs the two dependency-free release scripts below (version
+      # read, changelog extract); there is no JS workspace to install.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-
-      - name: Install
-        run: pnpm install --frozen-lockfile
 
       - name: Read Version
         id: ver
@@ -104,14 +97,6 @@ jobs:
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Build Web Assets
-        if: steps.exists.outputs.skip != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          pnpm --filter @stremio-shell/core-bridge build
-          pnpm android:web-build
 
       - name: Prepare Release Signing
         if: steps.exists.outputs.skip != 'true'

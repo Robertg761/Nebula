@@ -1,79 +1,40 @@
 # Quality Gates
 
-## How to use this document
+Pass/fail, not advisory. Everything here is about one artifact: the Android TV
+APK built from `apps/android-tv-host`.
 
-Each milestone must pass all listed gates before the next milestone starts. A gate is pass/fail, not advisory.
+## Every change
 
-## Global gates (apply to all milestones)
+- JVM unit tests pass on JDK 17:
+  `cd apps/android-tv-host && ./gradlew :app:testDebugUnitTest`
+- Debug APK assembles: `./gradlew :app:assembleDebug`
+- CI (`.github/workflows/ci.yml`) is green - it runs exactly those two.
+- Docs updated when behavior or configuration changes.
+- No generated output committed: `build/`, `dist/`, `artifacts/`, APKs.
 
-- CI health:
-  - `pnpm typecheck` passes.
-  - `pnpm lint` passes.
-  - `pnpm build` passes.
-  - `pnpm test:contracts` passes.
-  - Android JVM tests pass with JDK 17:
-    - `cd apps/android-tv-host && ./gradlew :app:testDebugUnitTest`
-- Generated build outputs and QA captures are not committed:
-  - `apps/android-tv-host/app/src/main/assets/web/`
-  - `artifacts/`
-  - release/debug APKs
-- No open P0 issues.
-- Documentation updated for any contract or behavior changes.
+## Before a release candidate
 
-## Milestone 0 gates
+- Manual TV QA matrix in `docs/tv-qa-matrix.md` passes on at least one Google
+  TV class device; a second non-Google Android TV/OEM device when available.
+- Cold launch reaches a usable UI with focus on a real control, no black
+  screen.
+- D-pad reaches every interactive control on Home, Details, Streams, Search and
+  Settings, with a visible focus indicator.
+- Back policy holds: modal close, then route back, then app exit.
+- Playback runs for at least 30 seconds, survives a surface teardown and
+  rebuild, and resumes at the stored position rather than 0:00.
+- Settings survives a save with empty fields (the save guard keeps stored
+  values) and a deliberate Clear still clears.
+- No open P0 issues; every P1/P2 has an owner.
 
-- Roadmap, contract, and quality docs exist and are linked from `README.md`.
-- `core-bridge` type exports are documented and versioned.
+## Release
 
-## Milestone 1 gates
-
-- Android host launches on emulator and physical Android TV.
-- D-pad can reach every interactive control with visible focus indicator.
-- Back handling follows policy:
-  - modal close
-  - route back
-  - app exit
-- Host lifecycle/network events are visible in web event stream.
-- TV smoke checks pass:
-  - `pnpm test:tv-smoke`
-  - Android JVM test suite (`:app:testDebugUnitTest`)
-  - Android instrumentation smoke suite (`:app:connectedDebugAndroidTest` in CI/device lab)
-  - Manual matrix in `docs/tv-qa-matrix.md`
-
-## Milestone 2 gates
-
-- Playback starts and runs for at least 30 seconds.
-- Pause/resume/stop are reflected in host and web shell.
-- Failures emit typed telemetry with stable error code taxonomy.
-- Smoke script covers start/pause/resume/stop/failure.
-
-## Milestone 3 gates
-
-- Login persists across restart.
-- Library sync SLA target met under normal network (<10s).
-- Watch progress sync confirmed after stop and restart.
-- Deep link and add-on install flow validated.
-
-## Milestone 4 gates
-
-- Crash reporting visible in monitoring stack.
-- Diagnostics export includes session, device, and recent bridge events.
-- Fault injection checks pass:
-  - offline
-  - timeout
-  - malformed payload
-- No unhandled promise rejection in smoke suite.
-
-## Milestone 5 gates
-
-- Signed internal build distributed to test cohort.
-- Release workflow verifies APK signatures before upload.
-- E2E smoke matrix pass rate >= 95%.
-- Crash-free session rate >= 98%.
-- All P1/P2 issues have owner + ETA.
-
-## Milestone 6 gates
-
-- Desktop host decision recorded in ADR.
-- Weighted matrix includes delivery, runtime, and maintenance criteria.
-- Post-beta desktop backlog and sequencing documented.
+- `versionCode` and `versionName` bumped in
+  `apps/android-tv-host/app/build.gradle.kts`, with a matching `CHANGELOG.md`
+  section.
+- Release workflow verifies the APK signature with `apksigner` before upload
+  (it does; do not remove that step).
+- The published asset is a single `StremioShell-tv-<version>.apk` - the in-app
+  updater matches on that name, so ABI splits or a rename break self-update.
+- Installing the new APK over the previous one keeps the app on TV home
+  screens (launcher alias name unchanged).

@@ -4,10 +4,7 @@ This folder contains the Android TV app for Stremio Shell TV: a native Jetpack
 Compose (TV) app talking to TMDB for catalog metadata, a Stremio addon (Comet)
 for streams, and libmpv for playback. There is no WebView shell any more - it
 was deleted in favour of the native app, along with the JS host bridge, the
-bundled `apps/web/dist` assets and the JsSandbox core runtime.
-
-`apps/android-tv-host/host-bridge-contract.json` is retained only as the mirror
-of the web-side contract in `apps/web`; nothing in this module reads it.
+bundled web assets and the JsSandbox core runtime.
 
 ## What is implemented
 
@@ -36,9 +33,9 @@ cd apps/android-tv-host
 ./gradlew :app:assembleDebug
 ```
 
-On Windows use `.\gradlew.bat` instead, or run `pnpm android:tv:assemble` from
-the repo root on any platform. No Node/pnpm step is needed: the Android build
-no longer consumes any JS bundle.
+On Windows use `.\gradlew.bat` instead, or run `npm run android:tv:assemble`
+from the repo root on any platform. No JS install step is needed: the Android
+build no longer consumes any JS bundle.
 
 Install to connected device/emulator:
 

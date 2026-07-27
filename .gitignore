@@ -1,18 +1,9 @@
-node_modules
-.pnpm-store
-.turbo
 .gradle
 local.properties
-dist
 build
-apps/web/.upstream-build
-apps/android-tv-host/app/src/main/assets/core-runtime/
-apps/android-tv-host/app/src/main/assets/web/
+# The release workflow stages the APK and release notes here.
+dist
 artifacts/
-docs/ui-compare/*.apk
-docs/ui-compare/*.apk.sig
-docs/ui-compare/*.apk.idsig
-coverage
 *.log
 .DS_Store
 Thumbs.db
