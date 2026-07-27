@@ -9,6 +9,9 @@ import kotlinx.serialization.json.Json
 /**
  * Client for the open Stremio addon protocol, as implemented by Comet and
  * other debrid resolvers: `<base>/manifest.json`, `<base>/stream/{type}/{id}.json`.
+ *
+ * Uses plain [HttpFetcher.get] (default cache semantics, no stale fallback): debrid stream URLs
+ * are short-lived, and replaying a cached one hands the player a dead link.
  */
 class AddonClient(
   private val fetcher: HttpFetcher = OkHttpFetcher,

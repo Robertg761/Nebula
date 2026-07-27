@@ -3,7 +3,10 @@ package com.stremioshell.host.tv
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.stremioshell.host.tv.data.NetworkErrorMessage
+import com.stremioshell.host.tv.data.NetworkSource
 import com.stremioshell.host.tv.data.SettingsStore
+import com.stremioshell.host.tv.data.StalenessPolicy
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.WatchStateStore
 import com.stremioshell.host.tv.data.addon.AddonClient
@@ -19,9 +22,12 @@ import com.stremioshell.host.tv.pairing.ConfigPairingServer
 import com.stremioshell.host.tv.pairing.PairingSubmission
 import com.stremioshell.host.tv.pairing.PairingTokenGenerator
 import com.stremioshell.host.tv.pairing.findLanIpv4
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -32,6 +38,30 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 data class HomeRail(val title: String, val items: List<MediaItem>)
+
+/**
+ * Assembles Home's rails from a load where individual endpoints may have failed.
+ *
+ * Split out of the ViewModel so the partial-success rule is unit-testable: rails keep their
+ * declared order, a rail that failed falls back to the copy already on screen (a refresh must
+ * never make a row vanish under the user), and only a rail with no data at all counts as a gap
+ * worth reporting.
+ */
+object HomeRailAssembly {
+  data class Assembled(val rails: List<HomeRail>, val missingTitles: List<String>)
+
+  fun merge(order: List<String>, fresh: List<HomeRail>, previous: List<HomeRail>): Assembled {
+    val freshByTitle = fresh.associateBy { it.title }
+    val previousByTitle = previous.associateBy { it.title }
+    val rails = mutableListOf<HomeRail>()
+    val missing = mutableListOf<String>()
+    for (title in order) {
+      val rail = freshByTitle[title] ?: previousByTitle[title]
+      if (rail == null) missing += title else rails += rail
+    }
+    return Assembled(rails, missing)
+  }
+}
 
 sealed interface LoadState<out T> {
   data object Loading : LoadState<Nothing>
@@ -54,6 +84,13 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   private val _homeRails = MutableStateFlow<LoadState<List<HomeRail>>>(LoadState.Loading)
   val homeRails: StateFlow<LoadState<List<HomeRail>>> = _homeRails
 
+  /**
+   * Set when Home has usable rails but part of the load did not make it: a compact retry notice
+   * belongs under the rails that did load, not over them.
+   */
+  private val _railsNotice = MutableStateFlow<String?>(null)
+  val railsNotice: StateFlow<String?> = _railsNotice
+
   private val _searchResults = MutableStateFlow<LoadState<List<MediaItem>>>(LoadState.Ready(emptyList()))
   val searchResults: StateFlow<LoadState<List<MediaItem>>> = _searchResults
 
@@ -68,6 +105,10 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
 
   private var railsLoadedForKey: String? = null
   private var railsJob: Job? = null
+
+  /** When the rails last loaded completely; null until they have, so a partial load retries. */
+  private var railsLoadedAtMillis: Long? = null
+  private val railsStaleness = StalenessPolicy()
 
   // Every per-screen loader keeps its Job plus the key it was asked for, so a newer request can
   // cancel the older one and a late response can be dropped instead of landing on the wrong screen.
@@ -208,9 +249,23 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
 
   private fun tmdb(): TmdbClient? = tmdbApiKey.value?.takeIf { it.isNotBlank() }?.let { TmdbClient(it) }
 
+  /** The rails Home shows, in order. Each one is an independent TMDB endpoint. */
+  private class RailSpec(val title: String, val load: suspend (TmdbClient) -> List<MediaItem>)
+
+  private val railSpecs = listOf(
+    RailSpec("Trending Movies") { it.trending(MediaType.Movie) },
+    RailSpec("Trending Shows") { it.trending(MediaType.Show) },
+    RailSpec("Popular Movies") { it.popular(MediaType.Movie) },
+    RailSpec("Popular Shows") { it.popular(MediaType.Show) },
+  )
+
   fun loadHomeRails(force: Boolean = false) {
     val key = tmdbApiKey.value?.takeIf { it.isNotBlank() } ?: return
-    loadRails(key, force)
+    // Catalogs change far less often than Home is revisited, so they are kept across visits - but
+    // this morning's "trending" should not still be up tonight. Aging out triggers an in-place
+    // refresh; the user keeps their rails and scroll position while it runs.
+    val stale = railsStaleness.isStale(railsLoadedAtMillis, System.currentTimeMillis())
+    loadRails(key, force = force || stale)
   }
 
   /**
@@ -220,6 +275,10 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    * is reused rather than restarted, and a refresh of the key already on screen swaps the rails in
    * place instead of blanking Home back to Loading (which would throw away the row the user is on
    * plus their scroll position). Only an actual key change starts over from Loading.
+   *
+   * The four endpoints are fetched concurrently (awaiting them in turn made cold Home latency the
+   * sum of four round trips) and scored independently: one rail failing shows the other three with
+   * a retry notice underneath, rather than blanking the ones that worked.
    */
   private fun loadRails(key: String, force: Boolean) {
     val sameKey = railsLoadedForKey == key
@@ -229,29 +288,56 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       if (!force && _homeRails.value is LoadState.Ready) return
     } else {
       railsJob?.cancel()
+      railsLoadedAtMillis = null
     }
     railsLoadedForKey = key
     val refreshingInPlace = sameKey && _homeRails.value is LoadState.Ready
-    if (!refreshingInPlace) _homeRails.value = LoadState.Loading
+    if (!refreshingInPlace) {
+      _homeRails.value = LoadState.Loading
+      _railsNotice.value = null
+    }
     railsJob = viewModelScope.launch {
-      val result = runCatching {
-        val client = TmdbClient(key)
-        LoadState.Ready(
-          listOf(
-            HomeRail("Trending Movies", client.trending(MediaType.Movie)),
-            HomeRail("Trending Shows", client.trending(MediaType.Show)),
-            HomeRail("Popular Movies", client.popular(MediaType.Movie)),
-            HomeRail("Popular Shows", client.popular(MediaType.Show)),
-          )
-        ) as LoadState<List<HomeRail>>
-      }.getOrElse { LoadState.Failed(it.message ?: "TMDB request failed") }
+      val client = TmdbClient(key)
+      val results = railSpecs
+        .map { spec -> async { spec.title to catchingFailure { spec.load(client) } } }
+        .awaitAll()
       if (!isActive || railsLoadedForKey != key) return@launch
-      // A failed in-place refresh keeps the rails that are already up; replacing a working Home
-      // with an error screen is worse than quietly serving slightly older catalogs.
-      if (result is LoadState.Failed && _homeRails.value is LoadState.Ready) return@launch
-      _homeRails.value = result
+      val assembled = HomeRailAssembly.merge(
+        order = railSpecs.map { it.title },
+        fresh = results.mapNotNull { (title, result) ->
+          result.getOrNull()?.let { items -> HomeRail(title, items) }
+        },
+        previous = (_homeRails.value as? LoadState.Ready)?.value.orEmpty(),
+      )
+      val failure = results.firstNotNullOfOrNull { it.second.exceptionOrNull() }
+      val message = failure?.let { NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, it) }
+      if (assembled.rails.isEmpty()) {
+        // Nothing loaded and nothing to fall back on: the one case Home reports as an outright
+        // failure.
+        _homeRails.value = LoadState.Failed(message ?: "Couldn't load catalogs from TMDB.")
+        return@launch
+      }
+      _homeRails.value = LoadState.Ready(assembled.rails)
+      // Only mention a failure that actually left a gap; a rail still covered by the copy already
+      // on screen needs no notice, just a retry on the next visit.
+      _railsNotice.value = if (assembled.missingTitles.isEmpty()) null else message
+      // Only a complete load counts as fresh, so a partial one is retried on the next visit.
+      railsLoadedAtMillis = if (failure == null) System.currentTimeMillis() else null
     }
   }
+
+  /**
+   * [runCatching] would swallow CancellationException too, letting a cancelled rail look like a
+   * failed one - and leaving its error message on a Home that has already moved on.
+   */
+  private suspend fun <T> catchingFailure(block: suspend () -> T): Result<T> =
+    try {
+      Result.success(block())
+    } catch (cancellation: CancellationException) {
+      throw cancellation
+    } catch (error: Throwable) {
+      Result.failure(error)
+    }
 
   fun search(query: String) {
     val client = tmdb() ?: return
@@ -266,7 +352,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     searchJob = viewModelScope.launch {
       val result = runCatching {
         LoadState.Ready(client.search(query)) as LoadState<List<MediaItem>>
-      }.getOrElse { LoadState.Failed(it.message ?: "Search failed") }
+      }.getOrElse { LoadState.Failed(NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, it)) }
       if (isActive && searchKey == query) _searchResults.value = result
     }
   }
@@ -284,7 +370,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     detailsJob = viewModelScope.launch {
       val result = runCatching {
         LoadState.Ready(client.details(type, tmdbId)) as LoadState<MediaDetails>
-      }.getOrElse { LoadState.Failed(it.message ?: "Failed to load details") }
+      }.getOrElse { LoadState.Failed(NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, it)) }
       if (isActive && detailsKey == key) _details.value = result
     }
   }
@@ -302,7 +388,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     seasonJob = viewModelScope.launch {
       val result = runCatching {
         LoadState.Ready(client.season(tmdbId, seasonNumber)) as LoadState<List<EpisodeItem>>
-      }.getOrElse { LoadState.Failed(it.message ?: "Failed to load season") }
+      }.getOrElse { LoadState.Failed(NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, it)) }
       if (isActive && seasonKey == key) _episodes.value = result
     }
   }
@@ -326,7 +412,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
           addonClient.movieStreams(manifest, imdbId)
         }
         LoadState.Ready(streams) as LoadState<List<AddonStream>>
-      }.getOrElse { LoadState.Failed(it.message ?: "Addon request failed") }
+      }.getOrElse { LoadState.Failed(NetworkErrorMessage.forThrowable(NetworkSource.Addon, it)) }
       if (isActive && streamsKey == key) _streams.value = result
     }
   }

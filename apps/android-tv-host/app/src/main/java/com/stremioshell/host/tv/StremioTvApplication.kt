@@ -4,6 +4,7 @@ import android.app.Application
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.memory.MemoryCache
+import com.stremioshell.host.tv.data.SharedHttpClient
 
 /**
  * Tunes Coil for a low-RAM TV: RGB_565 halves poster memory (posters are
@@ -11,6 +12,13 @@ import coil.memory.MemoryCache
  * and crossfade is off so focus moves stay cheap.
  */
 class StremioTvApplication : Application(), ImageLoaderFactory {
+  override fun onCreate() {
+    super.onCreate()
+    // The shared OkHttp client's disk cache needs a Context, and this is the first point in the
+    // process where one exists - well before any screen can ask for data.
+    SharedHttpClient.init(this)
+  }
+
   override fun newImageLoader(): ImageLoader {
     return ImageLoader.Builder(this)
       .allowRgb565(true)

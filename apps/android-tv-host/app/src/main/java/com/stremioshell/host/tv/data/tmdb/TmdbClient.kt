@@ -5,6 +5,13 @@ import com.stremioshell.host.tv.data.OkHttpFetcher
 import java.net.URLEncoder
 import kotlinx.serialization.json.Json
 
+/**
+ * TMDB read-only client.
+ *
+ * Every GET goes through [HttpFetcher.getAllowingStale]: catalogs and metadata stay useful when
+ * they are a little old, so a cold start with no network paints the last known Home instead of an
+ * error screen.
+ */
 class TmdbClient(
   private val apiKey: String,
   private val fetcher: HttpFetcher = OkHttpFetcher,
@@ -24,7 +31,7 @@ class TmdbClient(
 
   suspend fun search(query: String): List<MediaItem> {
     val encoded = URLEncoder.encode(query, Charsets.UTF_8.name())
-    val body = fetcher.get(url("search/multi", "query=$encoded&include_adult=false"))
+    val body = fetcher.getAllowingStale(url("search/multi", "query=$encoded&include_adult=false"))
     return json.decodeFromString<TmdbPagedResults>(body).results.mapNotNull { entry ->
       when (entry.mediaType) {
         "movie" -> entry.toItem(MediaType.Movie)
@@ -36,7 +43,7 @@ class TmdbClient(
 
   suspend fun details(type: MediaType, tmdbId: Int): MediaDetails {
     val path = if (type == MediaType.Movie) "movie/$tmdbId" else "tv/$tmdbId"
-    val body = fetcher.get(url(path, "append_to_response=external_ids"))
+    val body = fetcher.getAllowingStale(url(path, "append_to_response=external_ids"))
     val details = json.decodeFromString<TmdbDetailsResponse>(body)
     return MediaDetails(
       item = MediaItem(
@@ -59,7 +66,7 @@ class TmdbClient(
   }
 
   suspend fun season(tmdbId: Int, seasonNumber: Int): List<EpisodeItem> {
-    val body = fetcher.get(url("tv/$tmdbId/season/$seasonNumber"))
+    val body = fetcher.getAllowingStale(url("tv/$tmdbId/season/$seasonNumber"))
     return json.decodeFromString<TmdbSeasonResponse>(body).episodes.map { episode ->
       EpisodeItem(
         seasonNumber = episode.seasonNumber,
@@ -73,7 +80,7 @@ class TmdbClient(
   }
 
   private suspend fun pagedItems(path: String, type: MediaType): List<MediaItem> {
-    val body = fetcher.get(url(path, null))
+    val body = fetcher.getAllowingStale(url(path, null))
     return json.decodeFromString<TmdbPagedResults>(body).results.map { it.toItem(type) }
   }
 

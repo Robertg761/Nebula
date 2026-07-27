@@ -44,6 +44,29 @@ class AddonClientTest {
   }
 
   @Test
+  fun `stream requests never accept a stale cached response`() = runBlocking {
+    // Debrid stream URLs expire; replaying a cached one hands the player a dead link.
+    var stale = 0
+    var plain = 0
+    val client = AddonClient(fetcher = object : HttpFetcher {
+      override suspend fun get(url: String): String {
+        plain++
+        return """{"streams":[{"name":"Good","url":"https://rd.example/v.mp4"}]}"""
+      }
+
+      override suspend fun getAllowingStale(url: String): String {
+        stale++
+        return """{"streams":[]}"""
+      }
+    })
+
+    client.movieStreams("https://comet.example/cfg/manifest.json", "tt1")
+
+    assertEquals(1, plain)
+    assertEquals(0, stale)
+  }
+
+  @Test
   fun `manifest url without manifest json is rejected`() {
     assertThrows(IllegalArgumentException::class.java) {
       AddonClient.streamUrl("https://comet.example/abc123", "movie", "tt1")

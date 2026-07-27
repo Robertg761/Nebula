@@ -82,6 +82,33 @@ class TmdbClientTest {
   }
 
   @Test
+  fun `catalog gets take the cache-tolerant path`() = runBlocking {
+    // Metadata stays useful when it is a little old, and that is what lets a cold start with no
+    // network paint the last known Home instead of an error screen.
+    var stale = 0
+    var plain = 0
+    val fetcher = object : HttpFetcher {
+      override suspend fun get(url: String): String {
+        plain++
+        return """{"results":[]}"""
+      }
+
+      override suspend fun getAllowingStale(url: String): String {
+        stale++
+        return """{"results":[]}"""
+      }
+    }
+
+    val client = TmdbClient(apiKey = "test-key", fetcher = fetcher)
+    client.trending(MediaType.Movie)
+    client.popular(MediaType.Show)
+    client.search("q")
+
+    assertEquals(3, stale)
+    assertEquals(0, plain)
+  }
+
+  @Test
   fun `season parses episodes with stills`() = runBlocking {
     val episodes = client(
       """

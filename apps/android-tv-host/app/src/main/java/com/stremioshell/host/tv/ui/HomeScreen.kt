@@ -53,6 +53,7 @@ fun HomeScreen(
   onOpenSettings: () -> Unit,
 ) {
   val rails by viewModel.homeRails.collectAsState()
+  val railsNotice by viewModel.railsNotice.collectAsState()
   val continueWatching by viewModel.continueWatching.collectAsState()
   val apiKey by viewModel.tmdbApiKey.collectAsState()
   val firstContentFocus = rememberInitialFocusTarget()
@@ -79,12 +80,14 @@ fun HomeScreen(
     if (firstContentFocus.focused && !needsSetup) landedFocus = true
   }
 
-  // Land focus on content (not the nav rail) once something focusable exists.
+  // Land focus on content (not the nav rail) once something focusable exists. Continue Watching
+  // counts: it renders from local storage, so offline it is the only focusable content there is.
   RequestInitialFocus(
     target = firstContentFocus,
     key = if (needsSetup) "setup" else "content:$hasContinueWatching",
     label = "Home first content card",
-    enabled = !userNavigated && (needsSetup || (!landedFocus && rails is LoadState.Ready)),
+    enabled = !userNavigated &&
+      (needsSetup || (!landedFocus && (rails is LoadState.Ready || hasContinueWatching))),
   )
 
   if (needsSetup) {
@@ -110,41 +113,74 @@ fun HomeScreen(
     return
   }
 
-  LoadStateContent(
-    rails,
-    loadingText = "Loading catalogs...",
-    onRetry = { viewModel.loadHomeRails(force = true) },
-  ) { railList ->
-    // One smooth scroll that settles the focused row at a stable "focus line"
-    // ~18% down, so up/down is consistent instead of jamming rows at the edge.
-    CompositionLocalProvider(LocalBringIntoViewSpec provides FocusLineBringIntoViewSpec) {
-      LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(28.dp),
-        contentPadding = PaddingValues(top = 32.dp, bottom = 48.dp),
-        modifier = Modifier
-          .fillMaxSize()
-          // Notes that the user is driving focus themselves; observed only, never consumed.
-          .onPreviewKeyEvent { event ->
-            if (event.type == KeyEventType.KeyDown && event.key.isDirectional()) {
-              userNavigated = true
-            }
-            false
-          },
-      ) {
-        if (hasContinueWatching) {
-          item(key = "continue") {
-            ContinueWatchingRow(continueWatching, onResumeClick, firstContentFocus)
+  // Continue Watching comes from local storage, so a TMDB outage must not take it down with the
+  // rails. Only when there is nothing local to show does the rails' state own the whole screen;
+  // otherwise it is reported inline, under the row the user can still use.
+  if (!hasContinueWatching && rails !is LoadState.Ready) {
+    LoadStateContent(
+      rails,
+      loadingText = "Loading catalogs...",
+      onRetry = { viewModel.loadHomeRails(force = true) },
+    ) {}
+    return
+  }
+
+  val railList = (rails as? LoadState.Ready)?.value.orEmpty()
+  // A failed load with Continue Watching up degrades to the same inline notice a partial load uses.
+  val inlineNotice = railsNotice ?: (rails as? LoadState.Failed)?.message
+
+  // One smooth scroll that settles the focused row at a stable "focus line"
+  // ~18% down, so up/down is consistent instead of jamming rows at the edge.
+  CompositionLocalProvider(LocalBringIntoViewSpec provides FocusLineBringIntoViewSpec) {
+    LazyColumn(
+      verticalArrangement = Arrangement.spacedBy(28.dp),
+      contentPadding = PaddingValues(top = 32.dp, bottom = 48.dp),
+      modifier = Modifier
+        .fillMaxSize()
+        // Notes that the user is driving focus themselves; observed only, never consumed.
+        .onPreviewKeyEvent { event ->
+          if (event.type == KeyEventType.KeyDown && event.key.isDirectional()) {
+            userNavigated = true
           }
+          false
+        },
+    ) {
+      if (hasContinueWatching) {
+        item(key = "continue") {
+          ContinueWatchingRow(continueWatching, onResumeClick, firstContentFocus)
         }
-        items(railList.size, key = { railList[it].title }) { index ->
-          val rail = railList[index]
-          MediaRowFocusable(
-            title = rail.title,
-            items = rail.items,
-            firstCardFocus = if (index == 0 && !hasContinueWatching) firstContentFocus else null,
-            onItemClick = { item -> onItemClick(item.type, item.tmdbId) },
-          )
+      }
+      items(railList.size, key = { railList[it].title }) { index ->
+        val rail = railList[index]
+        MediaRowFocusable(
+          title = rail.title,
+          items = rail.items,
+          firstCardFocus = if (index == 0 && !hasContinueWatching) firstContentFocus else null,
+          onItemClick = { item -> onItemClick(item.type, item.tmdbId) },
+        )
+      }
+      if (rails is LoadState.Loading) {
+        item(key = "rails-status") { RailsStatusRow("Loading catalogs...", onRetry = null) }
+      } else if (inlineNotice != null) {
+        item(key = "rails-status") {
+          RailsStatusRow(inlineNotice, onRetry = { viewModel.loadHomeRails(force = true) })
         }
+      }
+    }
+  }
+}
+
+/**
+ * Compact status line for the rails, shown below content that is already usable (Continue
+ * Watching, or the rails that did load) so a partial failure never blanks what worked.
+ */
+@Composable
+private fun RailsStatusRow(message: String, onRetry: (() -> Unit)?) {
+  Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 48.dp)) {
+    Text(message, style = MaterialTheme.typography.bodyLarge)
+    if (onRetry != null) {
+      Button(onClick = onRetry, modifier = Modifier.padding(top = 12.dp)) {
+        Text("Retry")
       }
     }
   }
