@@ -63,9 +63,9 @@ import com.stremioshell.host.tv.data.SettingsStore
 import com.stremioshell.host.tv.data.StreamPickStore
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.WatchStateStore
-import com.stremioshell.host.tv.data.addon.AddonClient
 import com.stremioshell.host.tv.data.addon.AddonStream
 import com.stremioshell.host.tv.data.addon.StreamAutoPick
+import com.stremioshell.host.tv.data.addon.StreamCatalog
 import com.stremioshell.host.tv.data.persistenceScope
 import com.stremioshell.host.tv.data.subtitles.SubtitlesClient
 import com.stremioshell.host.tv.data.tmdb.EpisodeItem
@@ -90,7 +90,7 @@ class MpvPlayerActivity : ComponentActivity() {
   // for in it, and the key TMDB is asked for it with.
   private lateinit var settingsStore: SettingsStore
   private lateinit var streamPickStore: StreamPickStore
-  private val addonClient = AddonClient()
+  private val streamCatalog = StreamCatalog()
   // Reads Settings at request time, not construction: settingsStore is only bound
   // in onCreate, and the search this feeds runs long after.
   private val subtitlesClient = SubtitlesClient(baseUrl = { settingsStore.subtitlesBaseUrl.first() })
@@ -1098,12 +1098,22 @@ class MpvPlayerActivity : ComponentActivity() {
     }
   }
 
-  /** Called off the main thread; throws on a failed addon request. */
+  /**
+   * Called off the main thread.
+   *
+   * Every configured addon, through the same merge the picker uses, not just the
+   * first one: an episode whose release only addon #2 carries used to look to the
+   * binge loop like an episode nothing had, and got handed to the picker for the
+   * viewer to pick the release they had already picked. An addon that fails or
+   * runs out of time is absorbed by [StreamCatalog]; if they all do, the empty
+   * list picks nothing and the caller falls back to the picker as before.
+   */
   private suspend fun resolveNextStream(target: UpNextTarget): AddonStream? {
     val imdb = imdbId?.takeIf { it.isNotBlank() } ?: return null
-    val manifest = settingsStore.addonManifestUrl.first().takeIf { it.isNotBlank() } ?: return null
-    val streams = addonClient.episodeStreams(manifest, imdb, target.season, target.episode)
-    return StreamAutoPick.pick(streams, bingeGroup, streamPickStore.get(imdb))
+    val addons = settingsStore.addonManifestUrls.first()
+    if (addons.isEmpty()) return null
+    val fetch = streamCatalog.fetch(addons, imdb, target.season, target.episode)
+    return StreamAutoPick.pick(fetch.streams, bingeGroup, streamPickStore.get(imdb))
   }
 
   /**

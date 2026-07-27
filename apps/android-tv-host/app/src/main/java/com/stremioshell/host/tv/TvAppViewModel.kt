@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.stremioshell.host.tv.data.AddonProbe
+import com.stremioshell.host.tv.data.MetadataCache
 import com.stremioshell.host.tv.data.NetworkErrorMessage
 import com.stremioshell.host.tv.data.NetworkSource
 import com.stremioshell.host.tv.data.SettingsDraft
@@ -18,10 +19,9 @@ import com.stremioshell.host.tv.data.WatchStateStore
 import com.stremioshell.host.tv.data.WatchlistEntry
 import com.stremioshell.host.tv.data.WatchlistStore
 import com.stremioshell.host.tv.data.addon.AddonClient
-import com.stremioshell.host.tv.data.addon.AddonFetch
 import com.stremioshell.host.tv.data.addon.AddonList
 import com.stremioshell.host.tv.data.addon.AddonStream
-import com.stremioshell.host.tv.data.addon.StreamMerge
+import com.stremioshell.host.tv.data.addon.StreamCatalog
 import com.stremioshell.host.tv.data.addon.StreamQuality
 import com.stremioshell.host.tv.data.addon.StreamSelection
 import com.stremioshell.host.tv.data.persistenceScope
@@ -40,7 +40,6 @@ import com.stremioshell.host.tv.pairing.ConfigPairingServer
 import com.stremioshell.host.tv.pairing.PairingSubmission
 import com.stremioshell.host.tv.pairing.PairingTokenGenerator
 import com.stremioshell.host.tv.pairing.findLanIpv4
-import java.net.SocketTimeoutException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -56,7 +55,6 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 
 data class HomeRail(val title: String, val items: List<MediaItem>)
 
@@ -120,6 +118,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   val watchlist = WatchlistStore(application)
   val streamPicks = StreamPickStore(application)
   private val addonClient = AddonClient()
+  private val streamCatalog = StreamCatalog(addonClient)
 
   val tmdbApiKey: StateFlow<String?> = settings.tmdbApiKey
     .stateIn(viewModelScope, SharingStarted.Eagerly, null)
@@ -224,6 +223,16 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   private var seasonKey: Pair<Int, Int>? = null
   private var streamsJob: Job? = null
   private var streamsKey: String? = null
+
+  // What Details and its episode lists have already shown, so BACK into a title the viewer just
+  // left paints it rather than spinning at them. Sized for a browsing session, not for a library:
+  // ten titles covers going back up a row of similar-to and down another, and twenty seasons
+  // covers tabbing across every season of the longest show that exists plus the shows around it.
+  private val detailsCache = MetadataCache<Pair<MediaType, Int>, MediaDetails>(maxEntries = 10)
+  private val seasonCache = MetadataCache<Pair<Int, Int>, List<EpisodeItem>>(maxEntries = 20)
+
+  /** Which TMDB key the two caches above hold data for; see [metadataClient]. */
+  private var metadataCacheKey: String? = null
 
   // Phone pairing.
   sealed interface PairingState {
@@ -352,6 +361,21 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   private fun tmdb(): TmdbClient? = tmdbApiKey.value?.takeIf { it.isNotBlank() }?.let { TmdbClient(it) }
+
+  /**
+   * [tmdb], for the two callers that cache what they load. Cached metadata belongs to the key that
+   * fetched it, so a changed key empties both caches before it is used for anything: a viewer who
+   * swapped keys must not be served the previous account's payloads.
+   */
+  private fun metadataClient(): TmdbClient? {
+    val key = tmdbApiKey.value?.takeIf { it.isNotBlank() } ?: return null
+    if (metadataCacheKey != key) {
+      metadataCacheKey = key
+      detailsCache.clear()
+      seasonCache.clear()
+    }
+    return TmdbClient(key)
+  }
 
   private suspend fun TmdbClient.load(query: CatalogQuery, page: Int): MediaPage = when (query) {
     is CatalogQuery.Trending -> trending(query.type, page)
@@ -559,26 +583,48 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
+  /**
+   * Loads a title's details, serving the copy from [detailsCache] first when there is one.
+   *
+   * Home -> Details -> BACK -> the same Details is the commonest move on this app, and it used to
+   * cost a full round trip with a spinner over content the viewer had been reading a second
+   * earlier. A hit paints immediately; an aged-out hit still paints immediately and refreshes
+   * underneath, exactly as the rails do. A refresh that fails leaves the cached copy on screen,
+   * because a revisit must never be worse than not caching at all.
+   */
   fun loadDetails(type: MediaType, tmdbId: Int) {
-    val client = tmdb() ?: return
+    val client = metadataClient() ?: return
     val key = type to tmdbId
     // Opening another title invalidates the details *and* the season list of the previous one.
     detailsJob?.cancel()
     seasonJob?.cancel()
     detailsKey = key
     seasonKey = null
-    _details.value = LoadState.Loading
+    val cached = detailsCache.get(key, System.currentTimeMillis())
+    _details.value = if (cached == null) LoadState.Loading else LoadState.Ready(cached.value)
     _episodes.value = LoadState.Ready(emptyList())
+    if (cached != null && !cached.stale) return
     detailsJob = viewModelScope.launch {
-      val result = runCatching {
-        LoadState.Ready(client.details(type, tmdbId)) as LoadState<MediaDetails>
-      }.getOrElse { LoadState.Failed(NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, it)) }
-      if (isActive && detailsKey == key) _details.value = result
+      val result = catchingFailure { client.details(type, tmdbId) }
+      if (!isActive || detailsKey != key) return@launch
+      val loaded = result.getOrNull()
+      if (loaded != null) {
+        detailsCache.put(key, loaded, System.currentTimeMillis())
+        _details.value = LoadState.Ready(loaded)
+        return@launch
+      }
+      // Nothing to fall back on is the only case the screen reports as a failure; a stale copy is
+      // still the right thing to be looking at.
+      if (cached != null) return@launch
+      _details.value = LoadState.Failed(
+        NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, result.exceptionOrNull()),
+      )
     }
   }
 
+  /** An episode list, on the same terms as [loadDetails]: cached copy first, refresh in place. */
   fun loadSeason(tmdbId: Int, seasonNumber: Int) {
-    val client = tmdb() ?: return
+    val client = metadataClient() ?: return
     // The details screen can ask for a season while it is still showing the previous title (its
     // effects run before the new details land); that request is stale by definition.
     val requestedDetails = detailsKey
@@ -586,24 +632,29 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     val key = tmdbId to seasonNumber
     seasonJob?.cancel()
     seasonKey = key
-    _episodes.value = LoadState.Loading
+    val cached = seasonCache.get(key, System.currentTimeMillis())
+    _episodes.value = if (cached == null) LoadState.Loading else LoadState.Ready(cached.value)
+    if (cached != null && !cached.stale) return
     seasonJob = viewModelScope.launch {
-      val result = runCatching {
-        LoadState.Ready(client.season(tmdbId, seasonNumber)) as LoadState<List<EpisodeItem>>
-      }.getOrElse { LoadState.Failed(NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, it)) }
-      if (isActive && seasonKey == key) _episodes.value = result
+      val result = catchingFailure { client.season(tmdbId, seasonNumber) }
+      if (!isActive || seasonKey != key) return@launch
+      val loaded = result.getOrNull()
+      if (loaded != null) {
+        seasonCache.put(key, loaded, System.currentTimeMillis())
+        _episodes.value = LoadState.Ready(loaded)
+        return@launch
+      }
+      if (cached != null) return@launch
+      _episodes.value = LoadState.Failed(
+        NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, result.exceptionOrNull()),
+      )
     }
   }
 
   /**
-   * Asks every configured addon for this title at once and shows one merged list.
-   *
-   * Parallel with a per-addon budget, because the list is only as fast as its
-   * slowest member otherwise: one addon whose debrid backend is wedged would hold
-   * the picker on "Asking..." for OkHttp's full 40s call timeout while three
-   * healthy ones sat finished. A partial answer beats a complete one that arrives
-   * after the viewer has given up, so a timed-out addon is reported as a failure
-   * alongside the rows that did land.
+   * Asks every configured addon for this title at once (see [StreamCatalog]) and shows one merged
+   * list. Never cached: a debrid stream URL is signed and short-lived, and replaying one hands the
+   * player a dead link.
    */
   fun loadStreams(imdbId: String, season: Int?, episode: Int?) {
     val key = "$imdbId/${season ?: "-"}/${episode ?: "-"}"
@@ -622,45 +673,18 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
         _streams.value = LoadState.Failed("No addon configured. Add a stream addon in Settings.")
         return@launch
       }
-      val labels = AddonList.labels(addons)
-      val failures = mutableListOf<Throwable>()
-      val fetches = addons.mapIndexed { index, url ->
-        async {
-          // withTimeoutOrNull around the catch, not inside it: the timeout arrives as a
-          // CancellationException, which catchingFailure deliberately rethrows.
-          val outcome = withTimeoutOrNull(ADDON_STREAM_TIMEOUT_MS) {
-            catchingFailure {
-              if (season != null && episode != null) {
-                addonClient.episodeStreams(url, imdbId, season, episode)
-              } else {
-                addonClient.movieStreams(url, imdbId)
-              }
-            }
-          }
-          // Named by label, never by URL: an addon's configured path can carry a
-          // debrid key, and exception messages get logged.
-          // Collected on the ViewModel's own (main) dispatcher, so no locking.
-          val error = if (outcome == null) {
-            SocketTimeoutException("${labels[index]} timed out")
-          } else {
-            outcome.exceptionOrNull()
-          }
-          error?.let { failures += it }
-          AddonFetch(labels[index], outcome?.getOrNull())
-        }
-      }.awaitAll()
+      val fetch = streamCatalog.fetch(addons, imdbId, season, episode)
       if (!isActive || streamsKey != key) return@launch
-      val merged = StreamMerge.merge(fetches)
-      if (merged.allFailed) {
+      if (fetch.merged.allFailed) {
         // Every addon down is the same dead end a single addon's failure always was,
         // so it keeps that screen: one message and a Retry, not an empty list.
         _streams.value = LoadState.Failed(
-          NetworkErrorMessage.forThrowable(NetworkSource.Addon, failures.firstOrNull()),
+          NetworkErrorMessage.forThrowable(NetworkSource.Addon, fetch.failures.firstOrNull()),
         )
         return@launch
       }
-      _streamsNotice.value = merged.notice
-      _streams.value = LoadState.Ready(merged.streams)
+      _streamsNotice.value = fetch.merged.notice
+      _streams.value = LoadState.Ready(fetch.streams)
     }
   }
 
@@ -779,13 +803,5 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
         "   |   " + SettingsStatus.addonStatus(probes)
       onStatus(listOfNotNull(kept, status).joinToString("  "))
     }
-  }
-
-  private companion object {
-    /**
-     * Per-addon budget for a stream request. Well under OkHttp's 40s call timeout,
-     * because that ceiling is for one request and this is a race between several.
-     */
-    const val ADDON_STREAM_TIMEOUT_MS = 20_000L
   }
 }
