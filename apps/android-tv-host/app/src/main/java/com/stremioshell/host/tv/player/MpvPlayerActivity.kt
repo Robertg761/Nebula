@@ -55,6 +55,8 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.tv.material3.Button
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.stremioshell.host.tv.data.PlayerPrefs
+import com.stremioshell.host.tv.data.PlayerPrefsStore
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.WatchStateStore
 import com.stremioshell.host.tv.data.addon.AddonStream
@@ -63,14 +65,13 @@ import com.stremioshell.host.tv.ui.Screen
 import com.stremioshell.host.tv.ui.theme.StremioTvTheme
 import dev.jdtech.mpv.MPVLib
 import kotlinx.coroutines.launch
-import org.json.JSONArray
 import java.util.Date
-import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MpvPlayerActivity : ComponentActivity() {
   private var mpvCreated = false
   private lateinit var watchStore: WatchStateStore
+  private lateinit var playerPrefsStore: PlayerPrefsStore
   private val mainHandler = Handler(Looper.getMainLooper())
 
   /**
@@ -121,6 +122,35 @@ class MpvPlayerActivity : ComponentActivity() {
    * `surfaceCreated` would restart the stream from scratch each time.
    */
   private var fileLoaded = false
+
+  /**
+   * Whether there is a surface to render into. Together with [prefsApplied] this
+   * gates [maybeLoadFile]: `alang`/`slang` are read when the file is opened, so
+   * a `loadfile` issued before the stored languages reach mpv gets the
+   * container's default tracks and the preference silently does nothing.
+   */
+  private var surfaceReady = false
+
+  /** Whether the stored player preferences have reached mpv (or timed out). */
+  private var prefsApplied = false
+
+  /**
+   * Stops a preference read that never completes from holding the stream
+   * hostage. Starting with the container defaults is a small loss; not starting
+   * at all is the session.
+   */
+  private val prefsTimeoutRunnable = Runnable {
+    if (prefsApplied) return@Runnable
+    prefsApplied = true
+    maybeLoadFile()
+  }
+
+  /**
+   * The stored preferences as last read or written, kept so an explicit track
+   * pick can be judged against them (turning subtitles on while the stored
+   * preference says "off" has to clear it) without another read.
+   */
+  private var playerPrefs = PlayerPrefs()
 
   /**
    * Whether mpv ever reported the stream as playable (MPV_EVENT_FILE_LOADED).
@@ -190,6 +220,31 @@ class MpvPlayerActivity : ComponentActivity() {
   private val osdVisible = mutableStateOf(true)
   private val trackInfo = mutableStateOf("")
   private var osdHideAtMs = 0L
+
+  /** mpv's track list as last read, backing both the OSD line and the menu. */
+  private val tracks = mutableStateOf<List<MpvTrack>>(emptyList())
+
+  // The in-player menu: which section is showing, and the option values it edits.
+  private val menuVisible = mutableStateOf(false)
+  private val menuTab = mutableStateOf(PlayerMenuTab.Audio)
+  private val subtitleSize = mutableStateOf(SubtitleSize.DEFAULT)
+  private val audioDelaySec = mutableDoubleStateOf(0.0)
+  private val subtitleDelaySec = mutableDoubleStateOf(0.0)
+
+  /**
+   * Whether the next track list to arrive is the result of the audio-cycle key,
+   * and should therefore update the stored language preference the same way a
+   * pick from the menu does. Nothing else may: the list is also read at
+   * FILE_LOADED, and learning a preference from whatever the container happened
+   * to default to would overwrite the viewer's own choice.
+   */
+  private var audioCyclePending = false
+
+  /**
+   * Down time of the BACK press that closed the menu, so its own repeats cannot
+   * be read as a second press asking to leave the player.
+   */
+  private var menuCloseBackDownTime = Long.MIN_VALUE
 
   /**
    * Non-null once the stream is known to be dead: replaces the spinner with a
@@ -357,7 +412,7 @@ class MpvPlayerActivity : ComponentActivity() {
           lastErrorMessage = null
           buffering.value = false
           cancelStallWatchdog()
-          refreshTrackInfo()
+          refreshTracks()
           matchDisplayToContentFrameRate()
           // The stream is about to make noise, so take the speakers now. Denied
           // means another app owns them, and playing anyway would talk over it —
@@ -449,6 +504,7 @@ class MpvPlayerActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     watchStore = WatchStateStore(applicationContext)
+    playerPrefsStore = PlayerPrefsStore(applicationContext)
 
     url = intent.getStringExtra(EXTRA_URL).orEmpty()
     title = intent.getStringExtra(EXTRA_TITLE).orEmpty()
@@ -494,7 +550,9 @@ class MpvPlayerActivity : ComponentActivity() {
     // the real signal instead of mpv tone-mapping it down to SDR.
     MPVLib.setOptionString("target-colorspace-hint", "yes")
     applyNetworkOptions()
-    MPVLib.setOptionString("sub-font-size", "44")
+    // The starting size, replaced by the stored one a moment later. Medium is 44,
+    // which is the size the player used to give everyone.
+    MPVLib.setOptionString("sub-font-size", SubtitleSize.DEFAULT.fontSize.toString())
     MPVLib.setOptionString("keep-open", "yes")
     MPVLib.setOptionString("force-window", "no")
     // Seek before the first frame instead of playing from 0:00 and jumping,
@@ -513,6 +571,7 @@ class MpvPlayerActivity : ComponentActivity() {
     MPVLib.observeProperty("eof-reached", MPVLib.MPV_FORMAT_FLAG)
     MPVLib.observeProperty("speed", MPVLib.MPV_FORMAT_DOUBLE)
 
+    loadPlayerPrefs()
     createMediaSession()
 
     setContent {
@@ -558,6 +617,65 @@ class MpvPlayerActivity : ComponentActivity() {
     getSystemService(ActivityManager::class.java).getMemoryInfo(info)
     info.totalMem
   }.getOrDefault(0L)
+
+  /**
+   * Reads the stored audio/subtitle languages and subtitle size, and hands them
+   * to mpv before the file is opened.
+   *
+   * The read is asynchronous and `loadfile` cannot run ahead of it — mpv reads
+   * `alang`/`slang` when it opens a file, so applying them afterwards would do
+   * nothing until the next episode — hence the gate in [maybeLoadFile] and the
+   * timeout that opens it regardless.
+   */
+  private fun loadPlayerPrefs() {
+    mainHandler.postDelayed(prefsTimeoutRunnable, PREFS_READ_TIMEOUT_MS)
+    val store = playerPrefsStore
+    persistenceScope.launch {
+      val prefs = runCatching { store.get() }.getOrDefault(PlayerPrefs())
+      mainHandler.post { applyPlayerPrefs(prefs) }
+    }
+  }
+
+  private fun applyPlayerPrefs(prefs: PlayerPrefs) {
+    mainHandler.removeCallbacks(prefsTimeoutRunnable)
+    playerPrefs = prefs
+    val size = SubtitleSize.fromStorage(prefs.subtitleSize)
+    subtitleSize.value = size
+    if (mpvCreated && !finishing) {
+      // Options are properties once mpv is initialised, and these are read at
+      // file open, so setting them here still lands ahead of `loadfile`.
+      TrackPreferences.alangValue(prefs.audioLanguage)?.let {
+        MPVLib.setPropertyString("alang", it)
+      }
+      TrackPreferences.slangValue(prefs.subtitleLanguage)?.let {
+        MPVLib.setPropertyString("slang", it)
+      }
+      // `slang` has no way to say "none", so switched-off subtitles are carried
+      // as a disabled track instead.
+      if (TrackPreferences.subtitlesOff(prefs.subtitleLanguage)) {
+        MPVLib.setPropertyString("sid", "no")
+      }
+      MPVLib.setPropertyString("sub-font-size", size.fontSize.toString())
+    }
+    if (prefsApplied) return
+    prefsApplied = true
+    maybeLoadFile()
+  }
+
+  /**
+   * Opens the stream, once there is both a surface to draw it on and a set of
+   * preferences for mpv to open it with. Called from both, and idempotent: the
+   * one that arrives second is the one that loads.
+   */
+  private fun maybeLoadFile() {
+    if (fileLoaded || !mpvCreated || finishing) return
+    if (!surfaceReady || !prefsApplied) return
+    fileLoaded = true
+    MPVLib.command(arrayOf("loadfile", url))
+    // Some dead hosts accept the connection and then say nothing at all, so
+    // there is no error to react to — only the absence of a first frame.
+    armLoadWatchdog(LOAD_TIMEOUT_MS)
+  }
 
   /**
    * Decides what the end of playback means. Reached from both ends mpv reports:
@@ -644,6 +762,9 @@ class MpvPlayerActivity : ComponentActivity() {
     cancelStallWatchdog()
     // The position stops moving here, and [onPlaybackEnded] has already saved it.
     mainHandler.removeCallbacks(progressSaveRunnable)
+    // Nothing left to pick a track from, and the failure panel needs the remote:
+    // leaving the menu up would put a focus trap in front of Retry.
+    menuVisible.value = false
     buffering.value = false
     seeking.value = false
     playbackError.value = reason
@@ -745,7 +866,44 @@ class MpvPlayerActivity : ComponentActivity() {
       BusyIndicator()
       PlaybackErrorPanel()
       Osd()
+      // Last, so the panel sits over the OSD rather than under it.
+      PlayerMenuHost()
     }
+  }
+
+  /**
+   * Bridges the activity's playback state into the stateless [PlayerMenu]. Its own
+   * composable so the per-selection state it reads recomposes the menu alone,
+   * leaving the surface and the OSD out of it.
+   */
+  @Composable
+  private fun BoxScope.PlayerMenuHost() {
+    val visible by menuVisible
+    val error by playbackError
+    // A dead stream has nothing to choose between, and the failure panel owns the
+    // remote from that point on.
+    if (!visible || error != null) return
+    val state = PlayerMenuState(
+      tab = menuTab.value,
+      audioRows = MpvTracks.audioRows(tracks.value),
+      subtitleRows = MpvTracks.subtitleRows(tracks.value),
+      speed = playbackSpeed.doubleValue,
+      subtitleSize = subtitleSize.value,
+      audioDelaySec = audioDelaySec.doubleValue,
+      subtitleDelaySec = subtitleDelaySec.doubleValue,
+    )
+    val actions = remember {
+      PlayerMenuActions(
+        onTab = { menuTab.value = it },
+        onSelectAudio = ::selectAudioTrack,
+        onSelectSubtitle = ::selectSubtitleTrack,
+        onSpeedStep = ::stepPlaybackSpeed,
+        onSubtitleSizeStep = ::stepSubtitleSize,
+        onAudioDelayStep = ::stepAudioDelay,
+        onSubtitleDelayStep = ::stepSubtitleDelay,
+      )
+    }
+    PlayerMenu(state, actions)
   }
 
   @Composable
@@ -835,7 +993,7 @@ class MpvPlayerActivity : ComponentActivity() {
       }
       Text(
         (if (isPaused) "Paused   -   " else "") +
-          "OK play/pause   |   LEFT/RIGHT 10s   |   UP/DOWN 60s   |   MENU subtitles",
+          "OK play/pause   |   LEFT/RIGHT 10s   |   UP/DOWN 60s   |   MENU audio & subtitles",
         color = Color(0x99FFFFFF),
         style = MaterialTheme.typography.bodySmall,
       )
@@ -900,6 +1058,7 @@ class MpvPlayerActivity : ComponentActivity() {
       override fun surfaceCreated(holder: SurfaceHolder) {
         if (!mpvCreated) return
         playbackSurface = holder.surface
+        surfaceReady = true
         MPVLib.attachSurface(holder.surface)
         MPVLib.setOptionString("force-window", "yes")
         if (fileLoaded) {
@@ -907,11 +1066,7 @@ class MpvPlayerActivity : ComponentActivity() {
           // surfaceDestroyed switched off, or playback continues blind.
           MPVLib.setPropertyString("vo", "gpu")
         } else {
-          fileLoaded = true
-          MPVLib.command(arrayOf("loadfile", url))
-          // Some dead hosts accept the connection and then say nothing at all, so
-          // there is no error to react to — only the absence of a first frame.
-          armLoadWatchdog(LOAD_TIMEOUT_MS)
+          maybeLoadFile()
         }
       }
 
@@ -927,6 +1082,9 @@ class MpvPlayerActivity : ComponentActivity() {
       override fun surfaceDestroyed(holder: SurfaceHolder) {
         if (!mpvCreated) return
         playbackSurface = null
+        // Nothing to render into, so a load still waiting on preferences waits
+        // for the next surface rather than opening the file blind.
+        surfaceReady = false
         MPVLib.setPropertyString("vo", "null")
         MPVLib.detachSurface()
       }
@@ -956,6 +1114,53 @@ class MpvPlayerActivity : ComponentActivity() {
       if (keyCode in TRANSPORT_KEYS) return true
       return super.onKeyDown(keyCode, event)
     }
+    // With the menu open the D-pad belongs to it. Compose consumes the presses
+    // that move focus or activate a row before they ever reach here, so what
+    // arrives is what it could not use — an UP at the top of the list, an OK on
+    // nothing — and letting those through would scrub the film behind the menu.
+    if (menuVisible.value) {
+      if (event.repeatCount == 0) {
+        when (keyCode) {
+          // BACK closes the menu instead of leaving the player: the one thing a
+          // viewer who opened it by accident will press.
+          KeyEvent.KEYCODE_BACK,
+          KeyEvent.KEYCODE_MENU,
+          KeyEvent.KEYCODE_CAPTIONS -> {
+            if (keyCode == KeyEvent.KEYCODE_BACK) menuCloseBackDownTime = event.downTime
+            closeMenu()
+            return true
+          }
+          // Transport that cannot be confused with driving the menu still works,
+          // so a lip-sync adjustment can be made against a paused frame.
+          KeyEvent.KEYCODE_MEDIA_PLAY -> {
+            playPlayback(); return true
+          }
+          KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+            pausePlayback(); return true
+          }
+          KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+            togglePause(); return true
+          }
+          KeyEvent.KEYCODE_MEDIA_AUDIO_TRACK -> {
+            cycleAudioTrack(); return true
+          }
+          // Stop means stop, menu or no menu.
+          KeyEvent.KEYCODE_MEDIA_STOP -> {
+            finishPlayback(markFinished = false)
+            return true
+          }
+        }
+      }
+      // Everything else the player would otherwise act on is swallowed, media
+      // keys included: an unhandled one falls through to the MediaSession.
+      if (keyCode in TRANSPORT_KEYS) return true
+      return super.onKeyDown(keyCode, event)
+    }
+    // One press, one action: BACK held long enough to repeat used to close the
+    // menu and then, on the repeats that arrived after it had closed, leave the
+    // film as well. Repeats of a press carry its original down time, so the press
+    // that closed the menu can be recognised and ignored for the rest of its life.
+    if (keyCode == KeyEvent.KEYCODE_BACK && event.downTime == menuCloseBackDownTime) return true
     // A held key repeats around twenty times a second. Only the seek keys have
     // anything to do with that — [requestSeek] folds repeats into the coalescer —
     // and for the rest a repeat is meaningless: resting a thumb on OK toggled
@@ -984,16 +1189,17 @@ class MpvPlayerActivity : ComponentActivity() {
         return requestSeek(10.0, event.repeatCount > 0)
       KeyEvent.KEYCODE_DPAD_UP -> return requestSeek(60.0, event.repeatCount > 0)
       KeyEvent.KEYCODE_DPAD_DOWN -> return requestSeek(-60.0, event.repeatCount > 0)
+      // Was `cycle sub`, which on a fifteen-track remux meant pressing MENU up to
+      // sixteen times to get back to the subtitles you started with, and left
+      // audio tracks reachable only from a key most TV remotes do not have.
       KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_CAPTIONS -> {
-        MPVLib.command(arrayOf("cycle", "sub"))
-        refreshTrackInfo()
-        showOsd()
+        openMenu()
         return true
       }
+      // Kept for the remotes that do have it: one press, one audio track on, no
+      // menu in the way.
       KeyEvent.KEYCODE_MEDIA_AUDIO_TRACK -> {
-        MPVLib.command(arrayOf("cycle", "audio"))
-        refreshTrackInfo()
-        showOsd()
+        cycleAudioTrack()
         return true
       }
       // MEDIA_STOP is what a TV remote's stop button and Assistant's "stop" send;
@@ -1267,52 +1473,166 @@ class MpvPlayerActivity : ComponentActivity() {
   }
 
   /**
-   * Refreshes the OSD's track line off the main thread, coalescing a burst of
-   * presses into one read. Deliberately delayed: `cycle sub` has to reach mpv
-   * before the list is worth reading, and a viewer stepping through tracks gets
-   * one fetch-and-parse for the whole run rather than one per press.
+   * Refreshes the track list off the main thread, coalescing a burst of presses
+   * into one read. Deliberately delayed: a selection has to reach mpv before the
+   * list is worth reading, and a viewer stepping through tracks gets one
+   * fetch-and-parse for the whole run rather than one per press.
+   *
+   * `track-list` is a whole JSON document that has to be fetched across JNI and
+   * then parsed, which is far too much to do between two remote presses — so the
+   * parse happens out here on the worker too, and only the finished model goes
+   * back to the main thread.
    */
-  private fun refreshTrackInfo() {
+  private fun refreshTracks() {
     if (!mpvCreated) return
     val worker = mpvWorkerHandler ?: return
     if (!trackInfoPending.compareAndSet(false, true)) return
     worker.postDelayed({
       trackInfoPending.set(false)
-      val line = readWhileAlive(::readTrackInfoLine) ?: return@postDelayed
-      mainHandler.post { trackInfo.value = line }
+      val json = readWhileAlive { MPVLib.getPropertyString("track-list") } ?: return@postDelayed
+      val parsed = MpvTracks.parse(json)
+      mainHandler.post { if (mpvCreated && !finishing) applyTracks(parsed) }
     }, TRACK_INFO_DEBOUNCE_MS)
   }
 
   /**
-   * Reads mpv's track list and selection into the OSD line, e.g.
-   * "Audio: English (TrueHD)  |  Subtitles: off". Called on the worker thread:
-   * `track-list` is a whole JSON document that has to be fetched across JNI and
-   * then parsed, which is far too much to do between two remote presses.
+   * Publishes a freshly read track list: the OSD's summary line, and the lists
+   * the menu is showing.
    */
-  private fun readTrackInfoLine(): String {
-    val tracks = JSONArray(MPVLib.getPropertyString("track-list") ?: "[]")
-    var audio = "none"
-    var sub = "off"
-    for (i in 0 until tracks.length()) {
-      val track = tracks.getJSONObject(i)
-      if (!track.optBoolean("selected")) continue
-      val label = listOfNotNull(
-        track.optString("lang").takeIf { it.isNotBlank() },
-        track.optString("title").takeIf { it.isNotBlank() },
-        track.optString("codec").takeIf { it.isNotBlank() }?.uppercase(),
-      ).distinct().joinToString(" ").ifBlank { "track ${track.optInt("id")}" }
-      when (track.optString("type")) {
-        "audio" -> audio = label
-        "sub" -> sub = label
+  private fun applyTracks(parsed: List<MpvTrack>) {
+    tracks.value = parsed
+    trackInfo.value = MpvTracks.osdLine(parsed, contentFps)
+    // Only ever set by the audio-cycle key, so this cannot learn a preference
+    // from the track mpv chose on its own at file open.
+    if (audioCyclePending) {
+      audioCyclePending = false
+      MpvTracks.selected(parsed, TrackKind.Audio)?.let {
+        applyPreferenceUpdate(TrackPreferences.audioUpdate(it), audio = true)
       }
     }
-    val fps = contentFps
-    val fpsNote = if (fps > 0f) {
-      "   |   ${String.format(Locale.ROOT, "%.3f", fps).trimEnd('0').trimEnd('.')} fps"
-    } else {
-      ""
+  }
+
+  /** The quick audio cycle, for remotes with a dedicated audio-track key. */
+  private fun cycleAudioTrack() {
+    if (!mpvCreated) return
+    MPVLib.command(arrayOf("cycle", "audio"))
+    // The chosen track is only known once the list has been read back, and the
+    // choice is as explicit as one made from the menu, so it carries the same way.
+    audioCyclePending = true
+    refreshTracks()
+    showOsd()
+  }
+
+  private fun openMenu() {
+    if (!transportAllowed()) return
+    menuTab.value = PlayerMenuTab.Audio
+    menuVisible.value = true
+    // The list may be stale (or empty, if the menu is opened before the first
+    // frame), and the OSD stays up for as long as the menu does.
+    refreshTracks()
+    showOsd()
+  }
+
+  private fun closeMenu() {
+    if (!menuVisible.value) return
+    menuVisible.value = false
+    // The auto-hide was suppressed while the menu was open, so it needs re-arming
+    // or the OSD would sit there for the rest of the film.
+    showOsd()
+  }
+
+  private fun selectAudioTrack(trackId: Int) {
+    if (!mpvCreated) return
+    MPVLib.setPropertyString("aid", trackId.toString())
+    val picked = tracks.value.firstOrNull { it.kind == TrackKind.Audio && it.id == trackId }
+    // Optimistic, so the menu's marker moves with the press rather than with the
+    // debounced read that follows it.
+    markSelected(TrackKind.Audio, trackId)
+    if (picked != null) applyPreferenceUpdate(TrackPreferences.audioUpdate(picked), audio = true)
+    refreshTracks()
+    showOsd()
+  }
+
+  /** [trackId] null is the "Off" row, which is `sid=no`. */
+  private fun selectSubtitleTrack(trackId: Int?) {
+    if (!mpvCreated) return
+    MPVLib.setPropertyString("sid", trackId?.toString() ?: "no")
+    val picked = trackId?.let { id ->
+      tracks.value.firstOrNull { it.kind == TrackKind.Subtitle && it.id == id }
     }
-    return "Audio: $audio   |   Subtitles: $sub$fpsNote"
+    markSelected(TrackKind.Subtitle, trackId)
+    // A track the viewer asked for but that carries no language tag still has to
+    // be judged against the stored preference — see [TrackPreferences.subtitleUpdate].
+    if (trackId == null || picked != null) {
+      applyPreferenceUpdate(
+        TrackPreferences.subtitleUpdate(picked, playerPrefs.subtitleLanguage),
+        audio = false,
+      )
+    }
+    refreshTracks()
+    showOsd()
+  }
+
+  /** Moves the selection marker locally, ahead of mpv reporting it back. */
+  private fun markSelected(kind: TrackKind, trackId: Int?) {
+    tracks.value = tracks.value.map { track ->
+      if (track.kind != kind) track else track.copy(selected = track.id == trackId)
+    }
+  }
+
+  /**
+   * Writes a learned language preference, which is how a choice carries to the
+   * next episode. [TrackPreferences.Update.Unchanged] deliberately writes
+   * nothing: an untagged track says nothing about what to prefer next time.
+   */
+  private fun applyPreferenceUpdate(update: TrackPreferences.Update, audio: Boolean) {
+    val value = (update as? TrackPreferences.Update.Set)?.value ?: return
+    playerPrefs = if (audio) {
+      playerPrefs.copy(audioLanguage = value)
+    } else {
+      playerPrefs.copy(subtitleLanguage = value)
+    }
+    val store = playerPrefsStore
+    persistenceScope.launch {
+      runCatching {
+        if (audio) store.setAudioLanguage(value) else store.setSubtitleLanguage(value)
+      }
+    }
+  }
+
+  private fun stepPlaybackSpeed(steps: Int) {
+    if (!mpvCreated) return
+    val next = PlaybackSpeeds.stepped(playbackSpeed.doubleValue, steps)
+    // Not persisted on purpose: a speed set for one film is rarely wanted for the
+    // next. mpv's `speed` observer is what moves the OSD and the menu's label.
+    MPVLib.setPropertyDouble("speed", next)
+    playbackSpeed.doubleValue = next
+    showOsd()
+  }
+
+  private fun stepSubtitleSize(steps: Int) {
+    if (!mpvCreated) return
+    val next = SubtitleSize.stepped(subtitleSize.value, steps)
+    if (next == subtitleSize.value) return
+    subtitleSize.value = next
+    MPVLib.setPropertyString("sub-font-size", next.fontSize.toString())
+    playerPrefs = playerPrefs.copy(subtitleSize = next.storageName)
+    val store = playerPrefsStore
+    persistenceScope.launch { runCatching { store.setSubtitleSize(next.storageName) } }
+  }
+
+  private fun stepAudioDelay(steps: Int) {
+    if (!mpvCreated) return
+    val next = DelaySteps.stepped(audioDelaySec.doubleValue, steps)
+    audioDelaySec.doubleValue = next
+    MPVLib.setPropertyDouble("audio-delay", next)
+  }
+
+  private fun stepSubtitleDelay(steps: Int) {
+    if (!mpvCreated) return
+    val next = DelaySteps.stepped(subtitleDelaySec.doubleValue, steps)
+    subtitleDelaySec.doubleValue = next
+    MPVLib.setPropertyDouble("sub-delay", next)
   }
 
   /**
@@ -1329,7 +1649,7 @@ class MpvPlayerActivity : ComponentActivity() {
     readOffMain({ readContentFps().takeIf { it > 0f } }) { fps ->
       contentFps = fps
       applyDisplayFrameRate(fps)
-      refreshTrackInfo()
+      refreshTracks()
     }
   }
 
@@ -1402,7 +1722,10 @@ class MpvPlayerActivity : ComponentActivity() {
     val hideAt = SystemClock.uptimeMillis() + OSD_TIMEOUT_MS
     osdHideAtMs = hideAt
     mainHandler.postDelayed({
-      if (osdHideAtMs == hideAt && !paused.value) {
+      // The menu is a deliberate stop in the middle of a film, and the OSD's
+      // position is part of what makes a track choice make sense, so the
+      // auto-hide waits for the menu to close — [closeMenu] re-arms it.
+      if (osdHideAtMs == hideAt && !paused.value && !menuVisible.value) {
         osdVisible.value = false
       }
     }, OSD_TIMEOUT_MS)
@@ -1654,6 +1977,15 @@ class MpvPlayerActivity : ComponentActivity() {
      * press. Short enough that the OSD line still lands with the press.
      */
     private const val TRACK_INFO_DEBOUNCE_MS = 150L
+
+    /**
+     * How long the stream waits for the stored audio/subtitle preferences before
+     * opening without them. A DataStore read of three strings is a few
+     * milliseconds and normally lands well before the surface does, so this only
+     * exists so that a read that somehow never completes costs the viewer their
+     * preferred language rather than the whole session.
+     */
+    private const val PREFS_READ_TIMEOUT_MS = 1_500L
 
     /** How far mpv's volume drops for a duckable focus loss. */
     private const val DUCK_VOLUME_FRACTION = 0.3
