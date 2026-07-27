@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
@@ -51,6 +52,8 @@ data class PlayerMenuState(
   val subtitleSize: SubtitleSize,
   val audioDelaySec: Double,
   val subtitleDelaySec: Double,
+  /** What a subtitles addon has for this file; see [ExternalSubtitlesState]. */
+  val externalSubtitles: ExternalSubtitlesState = ExternalSubtitlesState.Unavailable,
 )
 
 /**
@@ -68,6 +71,9 @@ class PlayerMenuActions(
   val onSubtitleSizeStep: (Int) -> Unit,
   val onAudioDelayStep: (Int) -> Unit,
   val onSubtitleDelayStep: (Int) -> Unit,
+  /** Ask the subtitles addon what it has, or ask again after a failure. */
+  val onFetchExternalSubtitles: () -> Unit = {},
+  val onSelectExternalSubtitle: (ExternalSubtitleOption) -> Unit = {},
 )
 
 /**
@@ -129,11 +135,13 @@ fun BoxScope.PlayerMenu(state: PlayerMenuState, actions: PlayerMenuActions) {
           focusRequester = contentFocus,
           onSelect = { row -> row.trackId?.let(actions.onSelectAudio) },
         )
-        PlayerMenuTab.Subtitles -> TrackSection(
+        PlayerMenuTab.Subtitles -> SubtitleSection(
           rows = state.subtitleRows,
-          emptyMessage = "This file has no subtitle tracks.",
+          external = state.externalSubtitles,
           focusRequester = contentFocus,
           onSelect = { row -> actions.onSelectSubtitle(row.trackId) },
+          onFetch = actions.onFetchExternalSubtitles,
+          onSelectExternal = actions.onSelectExternalSubtitle,
         )
         PlayerMenuTab.Options -> OptionsSection(
           state = state,
@@ -233,29 +241,113 @@ private fun TrackSection(
   val listState = rememberLazyListState(initialFirstVisibleItemIndex = focusIndex)
   LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(6.dp)) {
     itemsIndexed(rows, key = { _, row -> row.trackId ?: OFF_ROW_KEY }) { index, row ->
-      MenuRow(
+      LabelledRow(
+        label = row.label,
+        detail = row.detail,
+        selected = row.selected,
         onClick = { onSelect(row) },
         modifier = if (index == focusIndex) Modifier.focusRequester(focusRequester) else Modifier,
-      ) { focused ->
-        SelectionMarker(row.selected)
-        Column(modifier = Modifier.weight(1f)) {
-          Text(
-            row.label,
-            color = Color.White,
-            style = MaterialTheme.typography.titleSmall,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-          )
-          if (row.detail.isNotBlank()) {
-            Text(
-              row.detail,
-              color = if (focused) Color(0xE6FFFFFF) else Color(0x99FFFFFF),
-              style = MaterialTheme.typography.bodySmall,
-              maxLines = 1,
-              overflow = TextOverflow.Ellipsis,
-            )
-          }
-        }
+      )
+    }
+  }
+}
+
+/**
+ * The Subtitles section: the file's own tracks, then what a subtitles addon has
+ * for it.
+ *
+ * One list rather than two panels because the two halves are the same decision —
+ * many releases carry no subtitle track at all, and a viewer who wants subtitles
+ * should not have to know whether they came muxed in or over the network to find
+ * them. An added external file appears in the upper half like any other track,
+ * which is also where it is switched back off.
+ */
+@Composable
+private fun SubtitleSection(
+  rows: List<TrackRow>,
+  external: ExternalSubtitlesState,
+  focusRequester: FocusRequester,
+  onSelect: (TrackRow) -> Unit,
+  onFetch: () -> Unit,
+  onSelectExternal: (ExternalSubtitleOption) -> Unit,
+) {
+  val focusIndex = MpvTracks.initialFocusIndex(rows)
+  // As in [TrackSection]: the row the focus request aims at has to have been
+  // composed, and a lazy list only composes what is visible.
+  val listState = rememberLazyListState(initialFirstVisibleItemIndex = focusIndex)
+  LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    itemsIndexed(rows, key = { _, row -> "track:${row.trackId ?: OFF_ROW_KEY}" }) { index, row ->
+      LabelledRow(
+        label = row.label,
+        detail = row.detail,
+        selected = row.selected,
+        onClick = { onSelect(row) },
+        modifier = if (index == focusIndex) Modifier.focusRequester(focusRequester) else Modifier,
+      )
+    }
+    // Null means there is no id to ask an addon with, and offering a search that
+    // cannot run is worse than not offering one.
+    val action = ExternalSubtitles.action(external) ?: return@LazyColumn
+    item(key = "external:header") { SectionHeader("Get subtitles") }
+    // One item, one key, whatever the state: the row focus is on when the search
+    // starts is the row it is still on when the results arrive below it.
+    item(key = "external:action") {
+      LabelledRow(
+        label = action.label,
+        detail = action.detail,
+        selected = false,
+        onClick = { if (action.enabled) onFetch() },
+      )
+    }
+    val options = (external as? ExternalSubtitlesState.Ready)?.options ?: return@LazyColumn
+    items(options, key = { "external:${it.url}" }) { option ->
+      LabelledRow(
+        label = option.label,
+        detail = option.detail,
+        selected = false,
+        onClick = { onSelectExternal(option) },
+      )
+    }
+  }
+}
+
+@Composable
+private fun SectionHeader(text: String) {
+  Text(
+    text,
+    modifier = Modifier.padding(top = 10.dp, bottom = 2.dp),
+    color = Color(0x99FFFFFF),
+    style = MaterialTheme.typography.labelLarge,
+  )
+}
+
+/** The two-line focusable row both halves of the track lists are made of. */
+@Composable
+private fun LabelledRow(
+  label: String,
+  detail: String,
+  selected: Boolean,
+  onClick: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  MenuRow(onClick = onClick, modifier = modifier) { focused ->
+    SelectionMarker(selected)
+    Column(modifier = Modifier.weight(1f)) {
+      Text(
+        label,
+        color = Color.White,
+        style = MaterialTheme.typography.titleSmall,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+      if (detail.isNotBlank()) {
+        Text(
+          detail,
+          color = if (focused) Color(0xE6FFFFFF) else Color(0x99FFFFFF),
+          style = MaterialTheme.typography.bodySmall,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
       }
     }
   }

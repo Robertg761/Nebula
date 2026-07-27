@@ -130,6 +130,32 @@ class TrackPreferencesTest {
   }
 
   @Test
+  fun `adding an external subtitle counts as choosing its language`() {
+    // Same verdict an embedded track in that language gets: the addon's own tag is
+    // all there is to go on before mpv has fetched the file.
+    assertEquals(
+      TrackPreferences.Update.Set("spa"),
+      TrackPreferences.subtitleLanguageUpdate("es", "eng"),
+    )
+    assertEquals(
+      TrackPreferences.Update.Set("eng"),
+      TrackPreferences.subtitleLanguageUpdate("eng", TrackPreferences.SUBTITLES_OFF),
+    )
+  }
+
+  @Test
+  fun `adding an untagged external subtitle still clears a stored off`() {
+    assertEquals(
+      TrackPreferences.Update.Set(""),
+      TrackPreferences.subtitleLanguageUpdate("", TrackPreferences.SUBTITLES_OFF),
+    )
+    assertEquals(
+      TrackPreferences.Update.Unchanged,
+      TrackPreferences.subtitleLanguageUpdate(null, "eng"),
+    )
+  }
+
+  @Test
   fun `language names are what a viewer would call them`() {
     assertEquals("English", LanguageNames.display("eng"))
     assertEquals("Japanese", LanguageNames.display("ja"))

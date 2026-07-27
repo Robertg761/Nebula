@@ -186,7 +186,17 @@ object TrackPreferences {
    */
   fun subtitleUpdate(picked: MpvTrack?, stored: String?): Update {
     if (picked == null) return Update.Set(SUBTITLES_OFF)
-    val code = LanguageCodes.normalize(picked.lang)
+    return subtitleLanguageUpdate(picked.lang, stored)
+  }
+
+  /**
+   * The same verdict from a language alone, for a subtitle the viewer picked out
+   * of a subtitles addon: an addon's file is as explicit a choice as a track in
+   * the container, but there is no track to read a tag off until mpv has fetched
+   * it, and the addon's own tag is all there is to go on.
+   */
+  fun subtitleLanguageUpdate(lang: String?, stored: String?): Update {
+    val code = LanguageCodes.normalize(lang)
     if (code.isNotBlank()) return Update.Set(code)
     return if (subtitlesOff(stored)) Update.Set("") else Update.Unchanged
   }

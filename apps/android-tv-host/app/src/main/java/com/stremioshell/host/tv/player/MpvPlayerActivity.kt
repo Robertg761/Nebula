@@ -66,6 +66,7 @@ import com.stremioshell.host.tv.data.addon.AddonClient
 import com.stremioshell.host.tv.data.addon.AddonStream
 import com.stremioshell.host.tv.data.addon.StreamAutoPick
 import com.stremioshell.host.tv.data.persistenceScope
+import com.stremioshell.host.tv.data.subtitles.SubtitlesClient
 import com.stremioshell.host.tv.data.tmdb.EpisodeItem
 import com.stremioshell.host.tv.data.tmdb.MediaType
 import com.stremioshell.host.tv.data.tmdb.TmdbClient
@@ -89,6 +90,7 @@ class MpvPlayerActivity : ComponentActivity() {
   private lateinit var settingsStore: SettingsStore
   private lateinit var streamPickStore: StreamPickStore
   private val addonClient = AddonClient()
+  private val subtitlesClient = SubtitlesClient()
   private val mainHandler = Handler(Looper.getMainLooper())
 
   /**
@@ -286,6 +288,14 @@ class MpvPlayerActivity : ComponentActivity() {
   private val trackInfo = mutableStateOf("")
   private var osdHideAtMs = 0L
 
+  /**
+   * A transient line under the OSD's track summary: a subtitle that has just been
+   * added, or one that could not be. Separate from [trackInfo] because that line
+   * is derived from the track list and is rewritten every time it is read.
+   */
+  private val osdMessage = mutableStateOf("")
+  private var osdMessageAtMs = 0L
+
   /** mpv's track list as last read, backing both the OSD line and the menu. */
   private val tracks = mutableStateOf<List<MpvTrack>>(emptyList())
 
@@ -295,6 +305,21 @@ class MpvPlayerActivity : ComponentActivity() {
   private val subtitleSize = mutableStateOf(SubtitleSize.DEFAULT)
   private val audioDelaySec = mutableDoubleStateOf(0.0)
   private val subtitleDelaySec = mutableDoubleStateOf(0.0)
+
+  /**
+   * What a subtitles addon has for the playing file, and whether it has been asked
+   * yet. Per file, like everything else about external subtitles: mpv drops them on
+   * `loadfile ... replace`, so the next episode of a binge starts from [Idle] again.
+   */
+  private val externalSubtitles = mutableStateOf<ExternalSubtitlesState>(
+    ExternalSubtitlesState.Idle,
+  )
+
+  /**
+   * Whether a `sub-add` is still fetching its file. Stops a viewer who presses OK
+   * twice from spending two downloads on the same subtitle.
+   */
+  private var externalSubAdding = false
 
   /**
    * Whether the next track list to arrive is the result of the audio-cycle key,
@@ -605,6 +630,9 @@ class MpvPlayerActivity : ComponentActivity() {
     episode = intent.getIntExtra(EXTRA_EPISODE, -1).takeIf { it >= 0 }
     imdbId = intent.getStringExtra(EXTRA_IMDB_ID)
     bingeGroup = intent.getStringExtra(EXTRA_BINGE_GROUP)
+    // A subtitles addon is asked by IMDb id and nothing else, so without one the
+    // section is not offered at all rather than offered and unable to answer.
+    if (imdbId.isNullOrBlank()) externalSubtitles.value = ExternalSubtitlesState.Unavailable
     // Prefer the live position over the intent's: if the activity is recreated
     // mid-playback, the intent still points at where this session started.
     resumeMs = savedInstanceState?.getLong(STATE_POSITION_MS, 0L)
@@ -1094,6 +1122,13 @@ class MpvPlayerActivity : ComponentActivity() {
     seekPreviewSec.doubleValue = NO_SEEK
     tracks.value = emptyList()
     trackInfo.value = ""
+    osdMessage.value = ""
+    // External subtitles are per file: `loadfile ... replace` drops the tracks mpv
+    // had fetched, and the previous episode's list is the wrong list to offer for
+    // this one anyway.
+    externalSubtitles.value =
+      if (imdbId.isNullOrBlank()) ExternalSubtitlesState.Unavailable else ExternalSubtitlesState.Idle
+    externalSubAdding = false
     // The previous episode's resume point is still in `start`, and applying it to a
     // fresh episode would open it half an hour in.
     MPVLib.setPropertyString("start", "0")
@@ -1221,6 +1256,7 @@ class MpvPlayerActivity : ComponentActivity() {
       subtitleSize = subtitleSize.value,
       audioDelaySec = audioDelaySec.doubleValue,
       subtitleDelaySec = subtitleDelaySec.doubleValue,
+      externalSubtitles = externalSubtitles.value,
     )
     val actions = remember {
       PlayerMenuActions(
@@ -1231,6 +1267,8 @@ class MpvPlayerActivity : ComponentActivity() {
         onSubtitleSizeStep = ::stepSubtitleSize,
         onAudioDelayStep = ::stepAudioDelay,
         onSubtitleDelayStep = ::stepSubtitleDelay,
+        onFetchExternalSubtitles = ::fetchExternalSubtitles,
+        onSelectExternalSubtitle = ::addExternalSubtitle,
       )
     }
     PlayerMenu(state, actions)
@@ -1324,6 +1362,14 @@ class MpvPlayerActivity : ComponentActivity() {
       val info = trackInfo.value
       if (info.isNotBlank()) {
         Text(info, color = Color(0xCCFFFFFF), style = MaterialTheme.typography.bodySmall)
+      }
+      val message = osdMessage.value
+      if (message.isNotBlank()) {
+        Text(
+          message,
+          color = MaterialTheme.colorScheme.primary,
+          style = MaterialTheme.typography.bodySmall,
+        )
       }
       Text(
         (if (isPaused) "Paused   -   " else "") +
@@ -1946,6 +1992,100 @@ class MpvPlayerActivity : ComponentActivity() {
     showOsd()
   }
 
+  /**
+   * Asks a subtitles addon what it has for this file.
+   *
+   * On the viewer's press rather than automatically at file open: it is a request
+   * to a third party for something most files do not need, and the answer is only
+   * worth having in front of someone who is looking at the list. Nothing about a
+   * failure is load-bearing - the file's own tracks are all still there.
+   */
+  private fun fetchExternalSubtitles() {
+    val imdb = imdbId?.takeIf { it.isNotBlank() } ?: return
+    if (externalSubtitles.value == ExternalSubtitlesState.Loading) return
+    externalSubtitles.value = ExternalSubtitlesState.Loading
+    // Captured, so a response that lands after a binge has moved on can be
+    // recognised as belonging to the episode before this one.
+    val forSeason = season
+    val forEpisode = episode
+    val preferred = playerPrefs.subtitleLanguage
+    lifecycleScope.launch {
+      val found = runCatching {
+        withContext(Dispatchers.IO) {
+          if (forSeason != null && forEpisode != null) {
+            subtitlesClient.episodeSubtitles(imdb, forSeason, forEpisode)
+          } else {
+            subtitlesClient.movieSubtitles(imdb)
+          }
+        }
+      }.getOrNull()
+      if (finishing || season != forSeason || episode != forEpisode) return@launch
+      if (found == null) {
+        externalSubtitles.value = ExternalSubtitlesState.Failed
+        showOsdMessage(SUBTITLE_FETCH_ERROR)
+        return@launch
+      }
+      externalSubtitles.value =
+        ExternalSubtitlesState.Ready(ExternalSubtitles.options(found, preferred))
+    }
+  }
+
+  /**
+   * Hands mpv an external subtitle file. Only ever from an explicit pick: the
+   * fetched list is offered, never applied, so a file's own tracks and the
+   * `alang`/`slang` preferences keep deciding what playback starts with.
+   *
+   * On the mpv worker thread, because `sub-add` downloads and demuxes the file
+   * inside the call - seconds over a slow link, and an ANR on the main thread.
+   */
+  private fun addExternalSubtitle(option: ExternalSubtitleOption) {
+    if (!mpvCreated || externalSubAdding) return
+    val worker = mpvWorkerHandler ?: return
+    externalSubAdding = true
+    showOsdMessage("Loading ${option.label} subtitles...")
+    worker.post {
+      // `cached` selects the track it loads, and re-selects rather than downloads
+      // again a file that has already been added once this session.
+      val json = readWhileAlive {
+        MPVLib.command(arrayOf("sub-add", option.url, "cached", option.trackTitle, option.lang))
+        MPVLib.getPropertyString("track-list")
+      }
+      val parsed = MpvTracks.parse(json)
+      mainHandler.post {
+        if (!mpvCreated || finishing) return@post
+        externalSubAdding = false
+        onExternalSubtitleAdded(option, parsed)
+      }
+    }
+  }
+
+  /**
+   * Reports what became of a `sub-add`. The track list is the only evidence there
+   * is: this binding hands back nothing from a command, so a URL that 404s or a
+   * file mpv cannot demux leaves the list exactly as it was and the viewer with a
+   * subtitle they asked for that never appeared.
+   */
+  private fun onExternalSubtitleAdded(option: ExternalSubtitleOption, parsed: List<MpvTrack>) {
+    applyTracks(parsed)
+    // The title is the part mpv carries through verbatim from the command, so it is
+    // what says the selected external track is this pick rather than an earlier one.
+    val loaded = parsed.any {
+      it.kind == TrackKind.Subtitle && it.external && it.selected &&
+        it.title == option.trackTitle
+    }
+    if (!loaded) {
+      showOsdMessage(SUBTITLE_ADD_ERROR)
+      return
+    }
+    // Exactly what picking an embedded track does: the language the viewer chose is
+    // the one the next episode should start looking for.
+    applyPreferenceUpdate(
+      TrackPreferences.subtitleLanguageUpdate(option.lang, playerPrefs.subtitleLanguage),
+      audio = false,
+    )
+    showOsdMessage("${option.label} subtitles added")
+  }
+
   /** Moves the selection marker locally, ahead of mpv reporting it back. */
   private fun markSelected(kind: TrackKind, trackId: Int?) {
     tracks.value = tracks.value.map { track ->
@@ -2088,6 +2228,21 @@ class MpvPlayerActivity : ComponentActivity() {
       }
     }
     return best
+  }
+
+  /**
+   * Puts a one-off line in the OSD and brings the OSD up to carry it. Cleared on a
+   * timer rather than left up: it reports something that has already happened, and
+   * a stale "added" under a track list that says otherwise is worse than nothing.
+   */
+  private fun showOsdMessage(text: String) {
+    osdMessage.value = text
+    val shownAt = SystemClock.uptimeMillis()
+    osdMessageAtMs = shownAt
+    mainHandler.postDelayed({
+      if (osdMessageAtMs == shownAt) osdMessage.value = ""
+    }, OSD_MESSAGE_MS)
+    showOsd()
   }
 
   private fun showOsd() {
@@ -2362,6 +2517,12 @@ class MpvPlayerActivity : ComponentActivity() {
      * press. Short enough that the OSD line still lands with the press.
      */
     private const val TRACK_INFO_DEBOUNCE_MS = 150L
+
+    /** How long a one-off OSD line stays up; see [showOsdMessage]. */
+    private const val OSD_MESSAGE_MS = 5_000L
+
+    private const val SUBTITLE_FETCH_ERROR = "Couldn't load subtitles."
+    private const val SUBTITLE_ADD_ERROR = "Couldn't load subtitle."
 
     /**
      * How long the stream waits for the stored audio/subtitle preferences before
