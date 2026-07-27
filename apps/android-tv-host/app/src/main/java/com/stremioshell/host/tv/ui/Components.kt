@@ -2,8 +2,10 @@ package com.stremioshell.host.tv.ui
 
 import android.util.Log
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,6 +31,7 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.painter.ColorPainter
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.style.TextOverflow
@@ -151,6 +154,39 @@ fun rememberBackAction(): () -> Unit {
   }
 }
 
+/**
+ * Network artwork that fills [modifier]'s bounds, with a tonal placeholder while it decodes and
+ * [fallback] whenever there is nothing to show - no URL, or a load that failed. Without the
+ * failure branch a dead poster URL leaves a permanently blank card.
+ *
+ * Failure arrives through Coil's `onError` callback rather than SubcomposeAsyncImage: a row holds
+ * a dozen of these at once and per-image subcomposition is too expensive on low-RAM TVs.
+ */
+@Composable
+fun ArtworkImage(
+  url: String?,
+  contentDescription: String?,
+  modifier: Modifier = Modifier,
+  fallback: @Composable BoxScope.() -> Unit = {},
+) {
+  val tone = MaterialTheme.colorScheme.surfaceVariant
+  var failed by remember(url) { mutableStateOf(false) }
+  if (url == null || failed) {
+    Box(modifier = modifier.background(tone), contentAlignment = Alignment.Center, content = fallback)
+  } else {
+    AsyncImage(
+      model = url,
+      contentDescription = contentDescription,
+      contentScale = ContentScale.Crop,
+      // Solid tonal fill instead of the bare theme background, so a card does not pop from an
+      // empty rectangle to a full poster mid-scroll.
+      placeholder = remember(tone) { ColorPainter(tone) },
+      onError = { failed = true },
+      modifier = modifier,
+    )
+  }
+}
+
 @Composable
 fun MediaCard(item: MediaItem, onClick: () -> Unit, modifier: Modifier = Modifier) {
   Column(modifier = modifier.width(140.dp)) {
@@ -160,17 +196,12 @@ fun MediaCard(item: MediaItem, onClick: () -> Unit, modifier: Modifier = Modifie
       scale = CardDefaults.scale(focusedScale = 1.08f),
       modifier = Modifier.width(140.dp).height(200.dp),
     ) {
-      if (item.posterUrl != null) {
-        AsyncImage(
-          model = item.posterUrl,
-          contentDescription = item.title,
-          contentScale = ContentScale.Crop,
-          modifier = Modifier.fillMaxSize(),
-        )
-      } else {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-          Text(item.title, maxLines = 3, style = MaterialTheme.typography.bodyMedium)
-        }
+      ArtworkImage(
+        url = item.posterUrl,
+        contentDescription = item.title,
+        modifier = Modifier.fillMaxSize(),
+      ) {
+        Text(item.title, maxLines = 3, style = MaterialTheme.typography.bodyMedium)
       }
     }
     Text(

@@ -31,7 +31,6 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Button
@@ -39,7 +38,6 @@ import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
-import coil.compose.AsyncImage
 import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.data.WatchEntry
@@ -221,15 +219,12 @@ private fun ContinueWatchingRow(
               .initialFocusTarget(if (index == 0) firstCardFocus else null),
           ) {
             Box(modifier = Modifier.fillMaxSize()) {
-              if (entry.posterUrl != null) {
-                AsyncImage(
-                  model = entry.posterUrl,
-                  contentDescription = entry.title,
-                  contentScale = ContentScale.Crop,
-                  modifier = Modifier.fillMaxSize(),
-                )
-              } else {
-                Text(entry.title, modifier = Modifier.padding(8.dp))
+              ArtworkImage(
+                url = entry.posterUrl,
+                contentDescription = entry.title,
+                modifier = Modifier.fillMaxSize(),
+              ) {
+                Text(entry.title, maxLines = 3, modifier = Modifier.padding(8.dp))
               }
               // Watched-progress bar pinned to the card bottom.
               Box(

@@ -1,5 +1,6 @@
 package com.stremioshell.host.tv.ui
 
+import android.graphics.Bitmap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Button
@@ -33,6 +35,7 @@ import androidx.tv.material3.Card
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.data.WatchEntry
@@ -153,8 +156,19 @@ fun DetailsScreen(
 
     Box(modifier = Modifier.fillMaxSize()) {
       if (media.item.backdropUrl != null) {
+        val context = LocalContext.current
         AsyncImage(
-          model = media.item.backdropUrl,
+          // The backdrop is one large, dimmed panel, where the app-wide RGB_565 decode shows as
+          // banding steps across its gradients. allowRgb565 is the load-bearing override: the
+          // decoder downgrades an ARGB_8888 request back to 565 for JPEGs while that flag is on.
+          // Only this image opts out - posters stay 565, which is what keeps rows cheap.
+          model = remember(context, media.item.backdropUrl) {
+            ImageRequest.Builder(context)
+              .data(media.item.backdropUrl)
+              .bitmapConfig(Bitmap.Config.ARGB_8888)
+              .allowRgb565(false)
+              .build()
+          },
           contentDescription = null,
           contentScale = ContentScale.Crop,
           modifier = Modifier.fillMaxSize().alpha(0.25f),
@@ -279,11 +293,12 @@ fun DetailsScreen(
                             .background(MaterialTheme.colorScheme.primary),
                         )
                       }
+                      // Null keeps its no-op: an absent still should not reserve an empty slot
+                      // next to the episode text, while a failed one holds its tonal block.
                       if (episode.stillUrl != null) {
-                        AsyncImage(
-                          model = episode.stillUrl,
+                        ArtworkImage(
+                          url = episode.stillUrl,
                           contentDescription = null,
-                          contentScale = ContentScale.Crop,
                           modifier = Modifier.width(160.dp).height(90.dp),
                         )
                       }
