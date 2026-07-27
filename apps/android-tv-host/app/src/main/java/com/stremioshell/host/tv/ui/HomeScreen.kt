@@ -54,6 +54,7 @@ import androidx.tv.material3.Text
 import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.data.WatchEntry
+import com.stremioshell.host.tv.data.WatchlistEntry
 import com.stremioshell.host.tv.data.tmdb.DetailsMetadata
 import com.stremioshell.host.tv.data.tmdb.HeroPick
 import com.stremioshell.host.tv.data.tmdb.MediaItem
@@ -72,6 +73,7 @@ fun HomeScreen(
   val railsNotice by viewModel.railsNotice.collectAsState()
   val railPaging by viewModel.railPaging.collectAsState()
   val continueWatching by viewModel.continueWatching.collectAsState()
+  val watchlist by viewModel.watchlistEntries.collectAsState()
   val apiKey by viewModel.tmdbApiKey.collectAsState()
   val firstContentFocus = rememberInitialFocusTarget()
 
@@ -86,8 +88,10 @@ fun HomeScreen(
 
   // The card a long press opened the options for, and a counter that re-aims focus after
   // one of those options removes it: the focused node disappearing leaves the D-pad dead
-  // until something asks for focus again.
+  // until something asks for focus again. One slot per row, because the two rows hold
+  // different records and only ever have one dialog open between them.
   var options by remember { mutableStateOf<WatchEntry?>(null) }
+  var watchlistOptions by remember { mutableStateOf<WatchlistEntry?>(null) }
   var rowEditTick by remember { mutableStateOf(0) }
 
   LaunchedEffect(apiKey) { viewModel.loadHomeRails() }
@@ -95,7 +99,9 @@ fun HomeScreen(
   val needsSetup = apiKey != null && apiKey!!.isBlank()
   // Continue Watching resolves asynchronously and takes over the first-card slot, so the
   // target is only known once both it and the rails have settled; re-aim when it appears.
+  // My List reads from the same store and behaves the same way.
   val hasContinueWatching = continueWatching.isNotEmpty()
+  val hasWatchlist = watchlist.isNotEmpty()
 
   val railList = (rails as? LoadState.Ready)?.value.orEmpty()
   // Recomputed only when the rail list changes identity, which a page append does - but the pick
@@ -117,13 +123,17 @@ fun HomeScreen(
   }
 
   // Land focus on content (not the nav rail) once something focusable exists. Continue Watching
-  // counts: it renders from local storage, so offline it is the only focusable content there is.
+  // and My List count: they render from local storage, so offline they are the only focusable
+  // content there is.
   RequestInitialFocus(
     target = firstContentFocus,
-    key = if (needsSetup) "setup" else "content:$hasHero:$hasContinueWatching",
+    key = if (needsSetup) "setup" else "content:$hasHero:$hasContinueWatching:$hasWatchlist",
     label = "Home first content card",
     enabled = !userNavigated &&
-      (needsSetup || (!landedFocus && (rails is LoadState.Ready || hasContinueWatching))),
+      (
+        needsSetup ||
+          (!landedFocus && (rails is LoadState.Ready || hasContinueWatching || hasWatchlist))
+        ),
   )
 
   // Separate request, because the one above is deliberately dead once the user has driven
@@ -132,7 +142,7 @@ fun HomeScreen(
     target = firstContentFocus,
     key = "row-edit:$rowEditTick",
     label = "Home first content card after row edit",
-    enabled = rowEditTick > 0 && options == null,
+    enabled = rowEditTick > 0 && options == null && watchlistOptions == null,
   )
 
   if (needsSetup) {
@@ -158,10 +168,10 @@ fun HomeScreen(
     return
   }
 
-  // Continue Watching comes from local storage, so a TMDB outage must not take it down with the
-  // rails. Only when there is nothing local to show does the rails' state own the whole screen;
-  // otherwise it is reported inline, under the row the user can still use.
-  if (!hasContinueWatching && rails !is LoadState.Ready) {
+  // Continue Watching and My List come from local storage, so a TMDB outage must not take them
+  // down with the rails. Only when there is nothing local to show does the rails' state own the
+  // whole screen; otherwise it is reported inline, under the rows the user can still use.
+  if (!hasContinueWatching && !hasWatchlist && rails !is LoadState.Ready) {
     LoadStateContent(
       rails,
       loadingText = "Loading catalogs...",
@@ -208,12 +218,28 @@ fun HomeScreen(
           )
         }
       }
+      // Between the row about what you were doing and the rows about what exists: a saved
+      // title is something the viewer already decided on, so it outranks any catalog.
+      if (hasWatchlist) {
+        item(key = "watchlist") {
+          WatchlistRow(
+            entries = watchlist,
+            onItemClick = { entry -> onItemClick(entry.type, entry.tmdbId) },
+            onOptions = { watchlistOptions = it },
+            firstCardFocus = if (hasHero || hasContinueWatching) null else firstContentFocus,
+          )
+        }
+      }
       items(railList.size, key = { railList[it].title }) { index ->
         val rail = railList[index]
         MediaRowFocusable(
           title = rail.title,
           items = rail.items,
-          firstCardFocus = if (index == 0 && !hasHero && !hasContinueWatching) firstContentFocus else null,
+          firstCardFocus = if (index == 0 && !hasHero && !hasContinueWatching && !hasWatchlist) {
+            firstContentFocus
+          } else {
+            null
+          },
           loadingMore = railPaging[rail.title]?.loading == true,
           onLastVisibleIndex = { last -> paginateRail(rail.title, last) },
           onItemClick = { item -> onItemClick(item.type, item.tmdbId) },
@@ -230,63 +256,89 @@ fun HomeScreen(
   }
 
   options?.let { entry ->
-    ContinueWatchingOptions(
-      entry = entry,
+    val suffix = if (entry.season != null) " S${entry.season}E${entry.episode}" else ""
+    CardOptionsDialog(
+      title = entry.title + suffix,
+      message = "Manage this title in Continue Watching.",
+      focusKey = entry.key,
+      focusLabel = "Continue Watching options",
+      actions = listOf(
+        CardAction("Remove from row") {
+          viewModel.forgetWatchEntry(entry)
+          options = null
+          rowEditTick++
+        },
+        CardAction("Mark watched") {
+          viewModel.markWatched(entry)
+          options = null
+          rowEditTick++
+        },
+      ),
       onDismiss = { options = null },
-      onMarkWatched = {
-        viewModel.markWatched(entry)
-        options = null
-        rowEditTick++
-      },
-      onRemove = {
-        viewModel.forgetWatchEntry(entry)
-        options = null
-        rowEditTick++
-      },
+    )
+  }
+
+  watchlistOptions?.let { entry ->
+    CardOptionsDialog(
+      title = entry.title,
+      message = "Manage this title in My List.",
+      focusKey = entry.key,
+      focusLabel = "My List options",
+      actions = listOf(
+        CardAction("Remove from My List") {
+          viewModel.removeFromWatchlist(entry)
+          watchlistOptions = null
+          rowEditTick++
+        },
+      ),
+      onDismiss = { watchlistOptions = null },
     )
   }
 }
 
+private class CardAction(val label: String, val onClick: () -> Unit)
+
 /**
- * What a long press on a Continue Watching card offers.
+ * What a long press on a managed Home card offers.
  *
- * Long press rather than a visible menu button: the row is posters, and every TV app the
- * user already owns puts row management behind a held OK.
+ * Long press rather than a visible menu button: the rows are posters, and every TV app the
+ * user already owns puts row management behind a held OK. Cancel is appended here rather than
+ * passed in, so no caller can ship a dialog with no way out of it but BACK.
+ *
+ * @param focusKey re-aims the first-option focus request when the dialog switches cards.
  */
 @Composable
-private fun ContinueWatchingOptions(
-  entry: WatchEntry,
+private fun CardOptionsDialog(
+  title: String,
+  message: String,
+  focusKey: Any,
+  focusLabel: String,
+  actions: List<CardAction>,
   onDismiss: () -> Unit,
-  onMarkWatched: () -> Unit,
-  onRemove: () -> Unit,
 ) {
   val firstOption = rememberInitialFocusTarget()
-  val suffix = if (entry.season != null) " S${entry.season}E${entry.episode}" else ""
 
   Dialog(
     onDismissRequest = onDismiss,
     properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false),
   ) {
-    RequestInitialFocus(target = firstOption, key = entry.key, label = "Continue Watching options")
+    RequestInitialFocus(target = firstOption, key = focusKey, label = focusLabel)
 
     Surface(modifier = Modifier.width(520.dp)) {
       Column(
         modifier = Modifier.padding(32.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
       ) {
-        Text(entry.title + suffix, style = MaterialTheme.typography.headlineSmall)
-        Text(
-          "Manage this title in Continue Watching.",
-          style = MaterialTheme.typography.bodyMedium,
-        )
-        Button(
-          onClick = onRemove,
-          modifier = Modifier.fillMaxWidth().initialFocusTarget(firstOption),
-        ) {
-          Text("Remove from row")
-        }
-        Button(onClick = onMarkWatched, modifier = Modifier.fillMaxWidth()) {
-          Text("Mark watched")
+        Text(title, style = MaterialTheme.typography.headlineSmall)
+        Text(message, style = MaterialTheme.typography.bodyMedium)
+        actions.forEachIndexed { index, action ->
+          Button(
+            onClick = action.onClick,
+            modifier = Modifier.fillMaxWidth()
+              .initialFocusTarget(if (index == 0) firstOption else null),
+          ) {
+            Text(action.label)
+          }
         }
         Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
           Text("Cancel")
@@ -499,6 +551,42 @@ private fun LoadingMoreCard() {
       color = MaterialTheme.colorScheme.primary,
       modifier = Modifier.size(28.dp),
     )
+  }
+}
+
+/**
+ * "My List", drawn entirely from the stored snapshots.
+ *
+ * No TMDB call and no key needed, which is the point: a saved title has to be reachable on a
+ * TV that has just woken up with no network, exactly like Continue Watching.
+ */
+@Composable
+private fun WatchlistRow(
+  entries: List<WatchlistEntry>,
+  onItemClick: (WatchlistEntry) -> Unit,
+  onOptions: (WatchlistEntry) -> Unit,
+  firstCardFocus: InitialFocusTarget?,
+) {
+  Column(modifier = Modifier.fillMaxWidth()) {
+    Text(
+      text = "My List",
+      style = MaterialTheme.typography.titleLarge,
+      modifier = Modifier.padding(start = 48.dp, bottom = 12.dp),
+    )
+    LazyRow(
+      contentPadding = PaddingValues(horizontal = 48.dp),
+      horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+      items(entries.size, key = { entries[it].key }) { index ->
+        val entry = entries[index]
+        MediaCard(
+          item = remember(entry) { entry.toMediaItem() },
+          onClick = { onItemClick(entry) },
+          modifier = Modifier.initialFocusTarget(if (index == 0) firstCardFocus else null),
+          onLongClick = { onOptions(entry) },
+        )
+      }
+    }
   }
 }
 

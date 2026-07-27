@@ -193,6 +193,8 @@ fun ArtworkImage(
  *   where a viewer is choosing between similarly named results. Omitted on the rails, where the
  *   row heading already says what kind of thing is in it and the extra line would cost a card's
  *   worth of height on every row.
+ * @param onLongClick row management for the rows that have any (My List). Null everywhere else, so
+ *   a held OK on a catalog card stays the plain press it has always been.
  */
 @Composable
 fun MediaCard(
@@ -200,10 +202,12 @@ fun MediaCard(
   onClick: () -> Unit,
   modifier: Modifier = Modifier,
   subtitle: String? = null,
+  onLongClick: (() -> Unit)? = null,
 ) {
   Column(modifier = modifier.width(140.dp)) {
     Card(
       onClick = onClick,
+      onLongClick = onLongClick,
       // Modest focus scale so the poster does not grow over its own title.
       scale = CardDefaults.scale(focusedScale = 1.08f),
       modifier = Modifier.width(140.dp).height(200.dp),

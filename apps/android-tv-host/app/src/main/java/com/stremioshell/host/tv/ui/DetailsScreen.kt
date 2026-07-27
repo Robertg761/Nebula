@@ -40,6 +40,7 @@ import coil.request.ImageRequest
 import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.data.WatchEntry
+import com.stremioshell.host.tv.data.WatchlistEntry
 import com.stremioshell.host.tv.data.tmdb.AirDate
 import com.stremioshell.host.tv.data.tmdb.CastMember
 import com.stremioshell.host.tv.data.tmdb.DetailsMetadata
@@ -66,6 +67,7 @@ fun DetailsScreen(
   // Every record, watched ones included: this screen marks finished episodes as well as
   // part-watched ones, so it cannot use the Continue Watching projection.
   val watching by viewModel.watchEntries.collectAsState()
+  val watchlistKeys by viewModel.watchlistKeys.collectAsState()
   // Read once: an episode list that recomputed "has this aired" on every recomposition would be
   // doing date arithmetic per frame for a boundary that moves once a day.
   val today = remember { LocalDate.now() }
@@ -210,12 +212,15 @@ fun DetailsScreen(
               // survives the season switches and watch-state updates that recompose this header.
               stateKey = "$type:$tmdbId",
             )
+            val inWatchlist = WatchlistEntry.keyOf(media.item.type, media.item.tmdbId) in watchlistKeys
+            val toggleWatchlist = { viewModel.toggleWatchlist(media.item) }
             if (media.imdbId == null) {
               Text(
                 "No IMDb id found for this title; streams are unavailable.",
                 style = MaterialTheme.typography.bodySmall,
               )
-            } else if (media.item.type == MediaType.Movie) {
+            }
+            if (media.imdbId != null && media.item.type == MediaType.Movie) {
               val entry = watching.firstOrNull { it.key == "movie:${media.item.tmdbId}" }
               val resumable = entry?.takeIf { !it.watched && it.positionMs > 0 }
               PlayActions(
@@ -229,9 +234,11 @@ fun DetailsScreen(
                 offerStartOver = resumable != null,
                 focusTarget = primaryFocus,
                 onPlay = { startOver -> onPlay(media, null, null, startOver) },
+                inWatchlist = inWatchlist,
+                onToggleWatchlist = toggleWatchlist,
               )
               if (resumable != null) ResumeHint(resumable)
-            } else if (showResume != null) {
+            } else if (media.imdbId != null && showResume != null) {
               val episodeLabel = "S${showResume.season}E${showResume.episode}"
               val resumable = showResume.positionMs > 0
               PlayActions(
@@ -243,8 +250,17 @@ fun DetailsScreen(
                 onPlay = { startOver ->
                   onPlay(media, showResume.season, showResume.episode, startOver)
                 },
+                inWatchlist = inWatchlist,
+                onToggleWatchlist = toggleWatchlist,
               )
               if (resumable) ResumeHint(showResume)
+            } else {
+              // Saving for later is offered on every title, including the ones with nothing
+              // to play from the header: a series with no resume point is the main reason a
+              // viewer wants the button at all.
+              Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                WatchlistButton(inWatchlist, toggleWatchlist)
+              }
             }
             if (needsFallbackAction) {
               if (media.item.type == MediaType.Show) {
@@ -536,6 +552,10 @@ private fun WatchEntry.minutesLeft(): Long? =
  * The header's play control(s). "Start over" is a separate button rather than a mode on
  * the first one because a resume that cannot be overridden is the complaint this fixes,
  * and a TV remote has nowhere to put a modifier press.
+ *
+ * The My List toggle rides in the same row rather than on a line of its own: it is the
+ * one thing a viewer reaches for when they are not going to press Play, so it should be
+ * one press right of it rather than one press down and past the season buttons.
  */
 @Composable
 private fun PlayActions(
@@ -543,6 +563,8 @@ private fun PlayActions(
   offerStartOver: Boolean,
   focusTarget: InitialFocusTarget,
   onPlay: (startOver: Boolean) -> Unit,
+  inWatchlist: Boolean,
+  onToggleWatchlist: () -> Unit,
 ) {
   Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
     Button(
@@ -554,6 +576,18 @@ private fun PlayActions(
     if (offerStartOver) {
       Button(onClick = { onPlay(true) }) { Text("Start over") }
     }
+    WatchlistButton(inWatchlist, onToggleWatchlist)
+  }
+}
+
+/**
+ * One button that both reports membership and changes it. Two buttons - one to add, one
+ * to remove - would mean the row's width changed under the D-pad on every press.
+ */
+@Composable
+private fun WatchlistButton(inWatchlist: Boolean, onToggle: () -> Unit) {
+  Button(onClick = onToggle) {
+    Text(if (inWatchlist) "✓ In My List - Remove" else "+ Add to My List")
   }
 }
 

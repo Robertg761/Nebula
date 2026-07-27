@@ -10,6 +10,8 @@ import com.stremioshell.host.tv.data.StalenessPolicy
 import com.stremioshell.host.tv.data.StreamPickStore
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.WatchStateStore
+import com.stremioshell.host.tv.data.WatchlistEntry
+import com.stremioshell.host.tv.data.WatchlistStore
 import com.stremioshell.host.tv.data.addon.AddonClient
 import com.stremioshell.host.tv.data.addon.AddonStream
 import com.stremioshell.host.tv.data.addon.StreamOrder
@@ -106,6 +108,7 @@ sealed interface LoadState<out T> {
 class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   val settings = SettingsStore(application)
   val watchState = WatchStateStore(application)
+  val watchlist = WatchlistStore(application)
   val streamPicks = StreamPickStore(application)
   private val addonClient = AddonClient()
 
@@ -126,6 +129,18 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   val continueWatching: StateFlow<List<WatchEntry>> = watchState.entries
     .map { entries -> entries.filterNot { it.watched } }
     .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+  /** "My List", newest first. Local snapshots, so the row survives a TMDB outage. */
+  val watchlistEntries: StateFlow<List<WatchlistEntry>> = watchlist.entries
+    .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+  /**
+   * Membership only, for the Details toggle. Derived from [watchlistEntries] rather than
+   * collected separately so that adding an unrelated title cannot recompose the button.
+   */
+  val watchlistKeys: StateFlow<Set<String>> = watchlistEntries
+    .map { entries -> entries.mapTo(mutableSetOf()) { it.key } }
+    .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
   val rememberedPicks: StateFlow<Map<String, StreamSelection>> = streamPicks.selections
     .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
@@ -616,6 +631,21 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    */
   fun forgetWatchEntry(entry: WatchEntry) {
     persistenceScope.launch { runCatching { watchState.remove(entry.key) } }
+  }
+
+  /**
+   * Saves or unsaves a title from the Details toggle. The stored copy is a snapshot of
+   * [item], which is what lets the Home row draw before - or without - TMDB answering.
+   */
+  fun toggleWatchlist(item: MediaItem) {
+    val entry = WatchlistEntry.of(item, System.currentTimeMillis())
+    // persistenceScope for the same reason the other writes use it: the press can be the
+    // last thing that happens on a screen that is already going away.
+    persistenceScope.launch { runCatching { watchlist.toggle(entry) } }
+  }
+
+  fun removeFromWatchlist(entry: WatchlistEntry) {
+    persistenceScope.launch { runCatching { watchlist.remove(entry.key) } }
   }
 
   fun saveSettings(tmdbKey: String, addonUrl: String, onStatus: (String) -> Unit) {

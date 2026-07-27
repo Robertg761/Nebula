@@ -5,6 +5,8 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.stremioshell.host.tv.data.addon.StreamSelection
+import com.stremioshell.host.tv.data.tmdb.MediaItem
+import com.stremioshell.host.tv.data.tmdb.MediaType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -151,6 +153,99 @@ class WatchStateStore(private val context: Context) {
 
   private companion object {
     val KEY_WATCH = stringPreferencesKey("watch_state")
+  }
+}
+
+/**
+ * A title saved to "My List".
+ *
+ * Carries a copy of everything a card and a Details arrival need rather than just an
+ * id: the row has to draw with no TMDB key and no network, which is exactly the state
+ * a TV is in for the first second after it wakes up.
+ */
+@Serializable
+data class WatchlistEntry(
+  val tmdbId: Int,
+  /** "movie" or "show", the same spelling [WatchEntry] stores. */
+  val mediaType: String,
+  val title: String,
+  val posterUrl: String? = null,
+  val backdropUrl: String? = null,
+  val overview: String = "",
+  val year: String? = null,
+  val rating: Double? = null,
+  val addedAtMs: Long,
+) {
+  /** Identity, and the lazy-row key. TMDB numbers movies and shows separately. */
+  val key: String get() = "$mediaType:$tmdbId"
+
+  val type: MediaType get() = if (mediaType == SHOW) MediaType.Show else MediaType.Movie
+
+  fun toMediaItem(): MediaItem = MediaItem(
+    tmdbId = tmdbId,
+    type = type,
+    title = title,
+    posterUrl = posterUrl,
+    backdropUrl = backdropUrl,
+    overview = overview,
+    year = year,
+    rating = rating,
+  )
+
+  companion object {
+    private const val SHOW = "show"
+
+    fun of(item: MediaItem, addedAtMs: Long): WatchlistEntry = WatchlistEntry(
+      tmdbId = item.tmdbId,
+      mediaType = storageType(item.type),
+      title = item.title,
+      posterUrl = item.posterUrl,
+      backdropUrl = item.backdropUrl,
+      overview = item.overview,
+      year = item.year,
+      rating = item.rating,
+      addedAtMs = addedAtMs,
+    )
+
+    /** The key a screen holding only a type and an id can test membership with. */
+    fun keyOf(type: MediaType, tmdbId: Int): String = "${storageType(type)}:$tmdbId"
+
+    private fun storageType(type: MediaType): String = if (type == MediaType.Show) SHOW else "movie"
+  }
+}
+
+/** "My List": titles saved for later, newest first. */
+class WatchlistStore(private val context: Context) {
+  private val json = Json { ignoreUnknownKeys = true }
+
+  val entries: Flow<List<WatchlistEntry>> = context.tvDataStore.data.map { prefs ->
+    WatchlistRetention.ordered(decode(prefs[KEY_LIST]))
+  }
+
+  /**
+   * Saves or unsaves [entry] in one read-modify-write, so the button cannot act on a
+   * membership value that has already changed underneath it.
+   */
+  suspend fun toggle(entry: WatchlistEntry) {
+    context.tvDataStore.edit { prefs ->
+      val next = WatchlistRetention.toggled(decode(prefs[KEY_LIST]), entry)
+      prefs[KEY_LIST] = json.encodeToString(next)
+    }
+  }
+
+  suspend fun remove(key: String) {
+    context.tvDataStore.edit { prefs ->
+      prefs[KEY_LIST] = json.encodeToString(WatchlistRetention.remove(decode(prefs[KEY_LIST]), key))
+    }
+  }
+
+  private fun decode(raw: String?): List<WatchlistEntry> {
+    if (raw.isNullOrBlank()) return emptyList()
+    return runCatching { json.decodeFromString<List<WatchlistEntry>>(raw) }.getOrDefault(emptyList())
+  }
+
+  private companion object {
+    val KEY_LIST = stringPreferencesKey("watchlist")
   }
 }
 
