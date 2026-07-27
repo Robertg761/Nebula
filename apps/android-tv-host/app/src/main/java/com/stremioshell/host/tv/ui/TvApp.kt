@@ -14,6 +14,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -48,8 +49,17 @@ fun interface StreamLauncher {
  */
 private fun stateKeyFor(index: Int, screen: Screen): String = "$index:$screen"
 
+/**
+ * @param pendingStreams an episode the player handed back because it could not pick a
+ *   stream for it on its own. Cleared through [onPendingStreamsHandled] once navigated
+ *   to, so a BACK out of the picker does not immediately push it again.
+ */
 @Composable
-fun TvApp(streamLauncher: StreamLauncher = StreamLauncher { _, _ -> }) {
+fun TvApp(
+  streamLauncher: StreamLauncher = StreamLauncher { _, _ -> },
+  pendingStreams: Screen.Streams? = null,
+  onPendingStreamsHandled: () -> Unit = {},
+) {
   val viewModel: TvAppViewModel = viewModel()
   // Saveable: Screen is Parcelable, so the stack outlives activity recreation
   // (display-mode switches behind the player, config changes, process death).
@@ -94,6 +104,16 @@ fun TvApp(streamLauncher: StreamLauncher = StreamLauncher { _, _ -> }) {
   }
 
   BackHandler(enabled = backstack.size > 1) { popTo(backstack.size - 1) }
+
+  // The stream list the previous episode was started from is still on top when the
+  // player hands the next one back, and replacing it keeps the stack the same depth
+  // for episode 9 as it was for episode 1 - BACK still lands on Details.
+  LaunchedEffect(pendingStreams) {
+    val target = pendingStreams ?: return@LaunchedEffect
+    if (backstack.last() is Screen.Streams) popTo(backstack.size - 1)
+    push(target)
+    onPendingStreamsHandled()
+  }
 
   val openDetails: (MediaType, Int) -> Unit = { type, id -> push(Screen.Details(type, id)) }
   val openResume: (WatchEntry) -> Unit = { entry ->
@@ -146,7 +166,7 @@ fun TvApp(streamLauncher: StreamLauncher = StreamLauncher { _, _ -> }) {
               is Screen.Search -> SearchScreen(viewModel, onItemClick = openDetails)
               is Screen.Settings -> SettingsScreen(viewModel, onPairWithPhone = { push(Screen.Pair) })
               is Screen.Pair -> PairScreen(viewModel, onPaired = { popTo(1) })
-              is Screen.Details -> DetailsScreen(viewModel, screen) { media, season, episode ->
+              is Screen.Details -> DetailsScreen(viewModel, screen) { media, season, episode, startOver ->
                 val imdbId = media.imdbId ?: return@DetailsScreen
                 push(
                   Screen.Streams(
@@ -157,6 +177,7 @@ fun TvApp(streamLauncher: StreamLauncher = StreamLauncher { _, _ -> }) {
                     posterUrl = media.item.posterUrl,
                     season = season,
                     episode = episode,
+                    startOver = startOver,
                   )
                 )
               }

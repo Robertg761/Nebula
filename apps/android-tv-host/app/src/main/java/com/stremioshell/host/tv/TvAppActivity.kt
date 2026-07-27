@@ -4,11 +4,15 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.mutableStateOf
+import androidx.core.content.IntentCompat
 import androidx.lifecycle.lifecycleScope
 import com.stremioshell.host.BuildConfig
 import com.stremioshell.host.tv.data.SettingsStore
 import com.stremioshell.host.tv.data.WatchStateStore
 import com.stremioshell.host.tv.player.MpvPlayerActivity
+import com.stremioshell.host.tv.ui.Screen
 import com.stremioshell.host.tv.ui.StreamLauncher
 import com.stremioshell.host.tv.ui.TvApp
 import com.stremioshell.host.tv.ui.UpdatePromptHost
@@ -30,6 +34,29 @@ class TvAppActivity : ComponentActivity() {
    * read, so a second press cannot slip through while that read is in flight.
    */
   private val launchInFlight = AtomicBoolean(false)
+
+  /**
+   * Set when the player ends an episode, finds a next one, and cannot decide which
+   * release to play it from. Compose state rather than a navigation call because the
+   * result can arrive while the activity is stopped, before TvApp is composed again.
+   */
+  private val pendingStreams = mutableStateOf<Screen.Streams?>(null)
+
+  /**
+   * The player is started for a result purely so it can hand an episode back for
+   * stream selection; a plain exit returns no data and only clears the guard.
+   */
+  private val playerLauncher = registerForActivityResult(
+    ActivityResultContracts.StartActivityForResult(),
+  ) { result ->
+    launchInFlight.set(false)
+    val data = result.data ?: return@registerForActivityResult
+    IntentCompat.getParcelableExtra(
+      data,
+      MpvPlayerActivity.EXTRA_RESULT_STREAMS,
+      Screen.Streams::class.java,
+    )?.let { pendingStreams.value = it }
+  }
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -57,8 +84,14 @@ class TvAppActivity : ComponentActivity() {
             if (launchInFlight.compareAndSet(false, true)) {
               lifecycleScope.launch {
                 try {
-                  val resumeMs = watchStore.get(MpvPlayerActivity.watchKeyFor(screen))?.positionMs ?: 0L
-                  startActivity(
+                  // "Start over" is the one case that ignores a stored position; a watched
+                  // record keeps position 0 anyway, so a re-watch also starts at the top.
+                  val resumeMs = if (screen.startOver) {
+                    0L
+                  } else {
+                    watchStore.get(MpvPlayerActivity.watchKeyFor(screen))?.positionMs ?: 0L
+                  }
+                  playerLauncher.launch(
                     MpvPlayerActivity.createIntent(this@TvAppActivity, screen, stream, resumeMs)
                       .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
                   )
@@ -69,7 +102,9 @@ class TvAppActivity : ComponentActivity() {
                 }
               }
             }
-          }
+          },
+          pendingStreams = pendingStreams.value,
+          onPendingStreamsHandled = { pendingStreams.value = null },
         )
         UpdatePromptHost()
       }

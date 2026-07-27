@@ -22,6 +22,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -33,10 +34,14 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.tv.material3.Button
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
+import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.tv.TvAppViewModel
@@ -67,6 +72,12 @@ fun HomeScreen(
   var userNavigated by rememberSaveable { mutableStateOf(false) }
   var landedFocus by rememberSaveable { mutableStateOf(false) }
 
+  // The card a long press opened the options for, and a counter that re-aims focus after
+  // one of those options removes it: the focused node disappearing leaves the D-pad dead
+  // until something asks for focus again.
+  var options by remember { mutableStateOf<WatchEntry?>(null) }
+  var rowEditTick by remember { mutableStateOf(0) }
+
   LaunchedEffect(apiKey) { viewModel.loadHomeRails() }
 
   val needsSetup = apiKey != null && apiKey!!.isBlank()
@@ -88,6 +99,15 @@ fun HomeScreen(
     label = "Home first content card",
     enabled = !userNavigated &&
       (needsSetup || (!landedFocus && (rails is LoadState.Ready || hasContinueWatching))),
+  )
+
+  // Separate request, because the one above is deliberately dead once the user has driven
+  // focus themselves - which they always have by the time they long-press a card.
+  RequestInitialFocus(
+    target = firstContentFocus,
+    key = "row-edit:$rowEditTick",
+    label = "Home first content card after row edit",
+    enabled = rowEditTick > 0 && options == null,
   )
 
   if (needsSetup) {
@@ -147,7 +167,12 @@ fun HomeScreen(
     ) {
       if (hasContinueWatching) {
         item(key = "continue") {
-          ContinueWatchingRow(continueWatching, onResumeClick, firstContentFocus)
+          ContinueWatchingRow(
+            entries = continueWatching,
+            onResumeClick = onResumeClick,
+            onOptions = { options = it },
+            firstCardFocus = firstContentFocus,
+          )
         }
       }
       items(railList.size, key = { railList[it].title }) { index ->
@@ -164,6 +189,72 @@ fun HomeScreen(
       } else if (inlineNotice != null) {
         item(key = "rails-status") {
           RailsStatusRow(inlineNotice, onRetry = { viewModel.loadHomeRails(force = true) })
+        }
+      }
+    }
+  }
+
+  options?.let { entry ->
+    ContinueWatchingOptions(
+      entry = entry,
+      onDismiss = { options = null },
+      onMarkWatched = {
+        viewModel.markWatched(entry)
+        options = null
+        rowEditTick++
+      },
+      onRemove = {
+        viewModel.forgetWatchEntry(entry)
+        options = null
+        rowEditTick++
+      },
+    )
+  }
+}
+
+/**
+ * What a long press on a Continue Watching card offers.
+ *
+ * Long press rather than a visible menu button: the row is posters, and every TV app the
+ * user already owns puts row management behind a held OK.
+ */
+@Composable
+private fun ContinueWatchingOptions(
+  entry: WatchEntry,
+  onDismiss: () -> Unit,
+  onMarkWatched: () -> Unit,
+  onRemove: () -> Unit,
+) {
+  val firstOption = rememberInitialFocusTarget()
+  val suffix = if (entry.season != null) " S${entry.season}E${entry.episode}" else ""
+
+  Dialog(
+    onDismissRequest = onDismiss,
+    properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false),
+  ) {
+    RequestInitialFocus(target = firstOption, key = entry.key, label = "Continue Watching options")
+
+    Surface(modifier = Modifier.width(520.dp)) {
+      Column(
+        modifier = Modifier.padding(32.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+      ) {
+        Text(entry.title + suffix, style = MaterialTheme.typography.headlineSmall)
+        Text(
+          "Manage this title in Continue Watching.",
+          style = MaterialTheme.typography.bodyMedium,
+        )
+        Button(
+          onClick = onRemove,
+          modifier = Modifier.fillMaxWidth().initialFocusTarget(firstOption),
+        ) {
+          Text("Remove from row")
+        }
+        Button(onClick = onMarkWatched, modifier = Modifier.fillMaxWidth()) {
+          Text("Mark watched")
+        }
+        Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
+          Text("Cancel")
         }
       }
     }
@@ -229,10 +320,12 @@ private fun MediaRowFocusable(
   }
 }
 
+@OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun ContinueWatchingRow(
   entries: List<WatchEntry>,
   onResumeClick: (WatchEntry) -> Unit,
+  onOptions: (WatchEntry) -> Unit,
   firstCardFocus: InitialFocusTarget,
 ) {
   Column {
@@ -250,6 +343,7 @@ private fun ContinueWatchingRow(
         Column(modifier = Modifier.width(140.dp)) {
           Card(
             onClick = { onResumeClick(entry) },
+            onLongClick = { onOptions(entry) },
             scale = CardDefaults.scale(focusedScale = 1.08f),
             modifier = Modifier.width(140.dp).height(200.dp)
               .initialFocusTarget(if (index == 0) firstCardFocus else null),

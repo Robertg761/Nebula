@@ -75,6 +75,9 @@ data class AddonStream(
 ) {
   val label: String get() = name ?: "Stream"
   val detail: String get() = (description ?: title).orEmpty()
+
+  /** The release this stream belongs to; see [BingeGroupMatcher]. */
+  val bingeGroup: String? get() = behaviorHints?.bingeGroup
 }
 
 @Serializable

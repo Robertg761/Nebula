@@ -31,6 +31,10 @@ sealed interface Screen : Parcelable {
     val initialEpisode: Int? = null,
   ) : Screen
 
+  /**
+   * @param startOver plays from 0:00 even when a resume point exists, which is what
+   *   the "Start over" action on a part-watched title asks for.
+   */
   @Parcelize
   data class Streams(
     val imdbId: String,
@@ -40,5 +44,6 @@ sealed interface Screen : Parcelable {
     val posterUrl: String?,
     val season: Int? = null,
     val episode: Int? = null,
+    val startOver: Boolean = false,
   ) : Screen
 }

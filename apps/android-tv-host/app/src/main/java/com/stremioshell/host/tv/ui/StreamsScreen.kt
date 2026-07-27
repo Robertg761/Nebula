@@ -1,5 +1,6 @@
 package com.stremioshell.host.tv.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -9,6 +10,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -26,6 +29,8 @@ import androidx.tv.material3.Text
 import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.data.addon.AddonStream
+import com.stremioshell.host.tv.data.addon.StreamAutoPick
+import com.stremioshell.host.tv.data.addon.StreamQuality
 
 @Composable
 fun StreamsScreen(
@@ -34,8 +39,10 @@ fun StreamsScreen(
   onStreamClick: (AddonStream) -> Unit,
 ) {
   val streams by viewModel.streams.collectAsState()
+  val remembered by viewModel.rememberedPicks.collectAsState()
   val firstStreamFocus = rememberInitialFocusTarget()
   val goBack = rememberBackAction()
+  val listState = rememberLazyListState()
 
   // The shared streams flow still holds the *previous* title's Ready list while this screen first
   // composes - loadStreams only resets it to Loading from the effect below. Rendering that list
@@ -50,6 +57,23 @@ fun StreamsScreen(
   }
 
   val state: LoadState<List<AddonStream>> = if (loadIssued) streams else LoadState.Loading
+
+  // The row matching what was last picked for this series, which focus starts on instead
+  // of the top of the list. Deliberately only preselected, never auto-played: the addon's
+  // best row for *this* episode may well be better than a memory two episodes old, and a
+  // list that played itself would take that choice away.
+  val list = (state as? LoadState.Ready)?.value.orEmpty()
+  val memory = if (screen.season != null) remembered[screen.imdbId] else null
+  val preselected = remember(list, memory) {
+    val match = memory?.let { StreamAutoPick.pick(list, bingeGroup = null, remembered = it) }
+    match?.let { list.indexOf(it) }?.takeIf { it > 0 } ?: 0
+  }
+
+  // A LazyColumn only composes what is on screen, so a preselected row further down the
+  // list has no node for the focus request to reach until it has been scrolled to.
+  LaunchedEffect(preselected) {
+    if (preselected > 0) listState.scrollToItem(preselected)
+  }
 
   RequestInitialFocus(
     target = firstStreamFocus,
@@ -91,6 +115,7 @@ fun StreamsScreen(
         }
       } else {
         LazyColumn(
+          state = listState,
           verticalArrangement = Arrangement.spacedBy(10.dp),
           contentPadding = PaddingValues(bottom = 32.dp),
         ) {
@@ -99,13 +124,31 @@ fun StreamsScreen(
           // and takes the screen down. The position prefix keeps keys unique there while staying
           // stable for recompositions of the same list.
           itemsIndexed(list, key = { index, s -> "$index:${s.url ?: s.label}" }) { index, stream ->
+            val badges = remember(stream) { StreamQuality.parse(stream).badges }
             Card(
-              onClick = { onStreamClick(stream) },
+              onClick = {
+                // Recorded before the launch, and only for a series: this is the choice the
+                // next episode's autoplay resolves against.
+                if (screen.season != null) viewModel.rememberStreamPick(screen.imdbId, stream)
+                onStreamClick(stream)
+              },
               modifier = Modifier.fillMaxWidth(0.85f)
-                .initialFocusTarget(if (index == 0) firstStreamFocus else null),
+                .initialFocusTarget(if (index == preselected) firstStreamFocus else null),
             ) {
               Column(modifier = Modifier.padding(14.dp)) {
                 Text(stream.label, style = MaterialTheme.typography.titleMedium)
+                if (badges.isNotEmpty() || index == preselected && preselected > 0) {
+                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    badges.forEach { badge -> QualityBadge(badge) }
+                    if (index == preselected && preselected > 0) {
+                      Text(
+                        "last used",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                      )
+                    }
+                  }
+                }
                 if (stream.detail.isNotBlank()) {
                   Text(
                     stream.detail,
@@ -121,4 +164,16 @@ fun StreamsScreen(
       }
     }
   }
+}
+
+/** Resolution / dynamic range / size chip, so a row's quality reads at a glance. */
+@Composable
+private fun QualityBadge(text: String) {
+  Text(
+    text,
+    style = MaterialTheme.typography.labelMedium,
+    modifier = Modifier
+      .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(4.dp))
+      .padding(horizontal = 8.dp, vertical = 2.dp),
+  )
 }

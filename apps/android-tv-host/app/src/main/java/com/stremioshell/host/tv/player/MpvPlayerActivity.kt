@@ -52,19 +52,30 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.lifecycleScope
 import androidx.tv.material3.Button
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.stremioshell.host.tv.data.PlayerPrefs
 import com.stremioshell.host.tv.data.PlayerPrefsStore
+import com.stremioshell.host.tv.data.SettingsStore
+import com.stremioshell.host.tv.data.StreamPickStore
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.WatchStateStore
+import com.stremioshell.host.tv.data.addon.AddonClient
 import com.stremioshell.host.tv.data.addon.AddonStream
+import com.stremioshell.host.tv.data.addon.StreamAutoPick
 import com.stremioshell.host.tv.data.persistenceScope
+import com.stremioshell.host.tv.data.tmdb.EpisodeItem
+import com.stremioshell.host.tv.data.tmdb.MediaType
+import com.stremioshell.host.tv.data.tmdb.TmdbClient
 import com.stremioshell.host.tv.ui.Screen
 import com.stremioshell.host.tv.ui.theme.StremioTvTheme
 import dev.jdtech.mpv.MPVLib
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Date
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -72,6 +83,12 @@ class MpvPlayerActivity : ComponentActivity() {
   private var mpvCreated = false
   private lateinit var watchStore: WatchStateStore
   private lateinit var playerPrefsStore: PlayerPrefsStore
+
+  // Only the binge loop needs these: the next episode's list, the release to look
+  // for in it, and the key TMDB is asked for it with.
+  private lateinit var settingsStore: SettingsStore
+  private lateinit var streamPickStore: StreamPickStore
+  private val addonClient = AddonClient()
   private val mainHandler = Handler(Looper.getMainLooper())
 
   /**
@@ -177,6 +194,46 @@ class MpvPlayerActivity : ComponentActivity() {
   private var resumeMs = 0L
   private var finishing = false
 
+  /** The addon's id for the title, which is what the next episode is asked for by. */
+  private var imdbId: String? = null
+
+  /**
+   * The release the playing stream came from, matched against the next episode's
+   * streams so a binge stays on one debrid source, one encode and one set of
+   * subtitle tracks. See [com.stremioshell.host.tv.data.addon.BingeGroupMatcher].
+   */
+  private var bingeGroup: String? = null
+
+  /**
+   * Whether the end of the video has already been acted on. `eof-reached` and
+   * END_FILE can both arrive for one ending, and the up-next card keeps this
+   * activity alive afterwards, so without this the watched record is written twice
+   * and the countdown restarts under the viewer.
+   */
+  private var endHandled = false
+
+  /**
+   * The next episode, resolved from TMDB while the current one plays so the card
+   * can appear on the last frame rather than after a round trip. Null means there
+   * is nothing to go on to, or the lookup has not landed (or failed).
+   */
+  private var upNextTarget: UpNextTarget? = null
+  private var upNextLookupIssued = false
+
+  /** Non-null while the up-next card is on screen; also what redirects the remote. */
+  private val upNextCard = mutableStateOf<UpNextCardState?>(null)
+  private var upNextCountdownStartMs = 0L
+
+  /** Guards the next episode's stream lookup, so OK during it cannot start two. */
+  private var nextEpisodeStarting = false
+
+  /**
+   * When the viewer last pressed something, as [SystemClock.uptimeMillis]. Zero
+   * means "not this session", which is what makes an untouched ending count down
+   * rather than ask - see [UpNextPolicy.offer].
+   */
+  private var lastInteractionMs = 0L
+
   /**
    * Audio focus is this activity's to manage: mpv's `ao=audiotrack` opens an
    * AudioTrack directly and never asks for focus, so without this a film starts
@@ -193,6 +250,14 @@ class MpvPlayerActivity : ComponentActivity() {
    * for: returning from a phone call must not restart a film they had paused.
    */
   private var pausedForFocusLoss = false
+
+  /**
+   * Whether the pause on screen is one this player asked for. mpv pauses itself at
+   * the end of a file (`keep-open=yes`) and that arrives as the same `pause`
+   * property change, so the flag - not the property - is what says a viewer was
+   * sitting on a paused frame when the credits ran out.
+   */
+  private var pauseRequested = false
 
   /** mpv's volume before ducking, or null when not ducked. */
   private var volumeBeforeDuck: Int? = null
@@ -322,6 +387,25 @@ class MpvPlayerActivity : ComponentActivity() {
     }
   }
 
+  /**
+   * Drives the up-next countdown, and starts the next episode when it runs out.
+   * Ticks faster than once a second so the number on screen is never a whole
+   * second stale, which reads as a stuck countdown.
+   */
+  private val upNextTickRunnable = object : Runnable {
+    override fun run() {
+      val state = upNextCard.value ?: return
+      val elapsedMs = SystemClock.uptimeMillis() - upNextCountdownStartMs
+      if (UpNextPolicy.isDue(elapsedMs, UpNextPolicy.COUNTDOWN_MS)) {
+        playNextEpisode()
+        return
+      }
+      upNextCard.value =
+        state.copy(secondsLeft = UpNextPolicy.secondsLeft(elapsedMs, UpNextPolicy.COUNTDOWN_MS))
+      mainHandler.postDelayed(this, UP_NEXT_TICK_MS)
+    }
+  }
+
   private val seeker = SeekCoalescer(
     endGuardSec = END_GUARD_SEC,
     repeatMinIntervalMs = SEEK_REPEAT_MIN_MS,
@@ -423,6 +507,9 @@ class MpvPlayerActivity : ComponentActivity() {
           // Playback is genuinely under way, so start recording where it gets to.
           scheduleProgressSave()
           syncPlayingState()
+          // Two or three TMDB requests, spent now rather than on the last frame:
+          // the card has to be on screen the moment the credits start.
+          prefetchUpNext()
         }
         // Nothing else notices a dead stream: `keep-open=yes` leaves mpv idling
         // on a black frame, so without this a failed load or a fatal mid-stream
@@ -505,6 +592,8 @@ class MpvPlayerActivity : ComponentActivity() {
     super.onCreate(savedInstanceState)
     watchStore = WatchStateStore(applicationContext)
     playerPrefsStore = PlayerPrefsStore(applicationContext)
+    settingsStore = SettingsStore(applicationContext)
+    streamPickStore = StreamPickStore(applicationContext)
 
     url = intent.getStringExtra(EXTRA_URL).orEmpty()
     title = intent.getStringExtra(EXTRA_TITLE).orEmpty()
@@ -514,6 +603,8 @@ class MpvPlayerActivity : ComponentActivity() {
     posterUrl = intent.getStringExtra(EXTRA_POSTER)
     season = intent.getIntExtra(EXTRA_SEASON, -1).takeIf { it >= 0 }
     episode = intent.getIntExtra(EXTRA_EPISODE, -1).takeIf { it >= 0 }
+    imdbId = intent.getStringExtra(EXTRA_IMDB_ID)
+    bingeGroup = intent.getStringExtra(EXTRA_BINGE_GROUP)
     // Prefer the live position over the intent's: if the activity is recreated
     // mid-playback, the intent still points at where this session started.
     resumeMs = savedInstanceState?.getLong(STATE_POSITION_MS, 0L)
@@ -699,7 +790,7 @@ class MpvPlayerActivity : ComponentActivity() {
       return
     }
     if (reachedEndOfFile()) {
-      finishPlayback(markFinished = true)
+      onVideoFinished()
       return
     }
     // Keep the resume point: the viewer stopped where the stream died. The
@@ -709,8 +800,8 @@ class MpvPlayerActivity : ComponentActivity() {
   }
 
   /**
-   * Whether playback stopped at the actual end of the video, which is the only
-   * thing that may mark it watched and drop the resume entry.
+   * Whether playback stopped at the actual end of the video, which is what marks
+   * it watched and clears its resume point.
    *
    * Deliberately not mpv's `eof-reached`: debrid and torrent sources routinely
    * serve a truncated file whose container still claims the full runtime, so the
@@ -720,14 +811,25 @@ class MpvPlayerActivity : ComponentActivity() {
    * apart; with no duration reported nothing can be established, so such a
    * stream is always treated as stopped short and stays resumable.
    */
-  private fun reachedEndOfFile(): Boolean {
-    val duration = durationSec.doubleValue
-    if (duration <= 0) return false
-    val position = timePosSec.doubleValue
-    // The absolute guard covers a duration that is a second or two out (VBR
-    // estimates); the fraction covers coarser metadata, while still leaving a
-    // file that stops well short of its claimed length resumable.
-    return position >= duration - END_GUARD_SEC || position / duration >= END_FRACTION
+  private fun reachedEndOfFile(): Boolean =
+    WatchedThreshold.isFinished(timePosSec.doubleValue, durationSec.doubleValue)
+
+  /**
+   * The video ran to its end. The watched record is written here rather than on
+   * the way out, because the up-next card can keep this activity alive for another
+   * episode - and because a viewer who leaves during the credits has already
+   * watched the thing.
+   */
+  private fun onVideoFinished() {
+    if (endHandled) return
+    endHandled = true
+    // Before the watched record: a periodic tick landing after it would put the
+    // resume position it just cleared straight back.
+    mainHandler.removeCallbacks(progressSaveRunnable)
+    cancelStallWatchdog()
+    saveWatchState(SaveReason.Finished)
+    seedNextEpisodeEntry()
+    offerUpNext()
   }
 
   private fun armLoadWatchdog(delayMs: Long) {
@@ -813,6 +915,227 @@ class MpvPlayerActivity : ComponentActivity() {
   }
 
   /**
+   * Looks up the episode after this one while there is still time to spend on it.
+   * Costs one TMDB season request, or two plus a details request when the season
+   * runs out here; all of it off the main thread, and none of it load-bearing -
+   * a failure just means no card at the end.
+   */
+  private fun prefetchUpNext() {
+    if (upNextLookupIssued || mediaType != "show" || tmdbId == 0) return
+    if (season == null || episode == null) return
+    upNextLookupIssued = true
+    lifecycleScope.launch {
+      val target = runCatching { withContext(Dispatchers.IO) { resolveNextEpisode() } }.getOrNull()
+      if (!finishing) upNextTarget = target
+    }
+  }
+
+  /** Called off the main thread. */
+  private suspend fun resolveNextEpisode(): UpNextTarget? {
+    val currentSeason = season ?: return null
+    val currentEpisode = episode ?: return null
+    // A special chains to nothing (see [NextEpisodeFinder]); asking for the season
+    // after season 0 would drop a viewer who watched one at the start of series.
+    if (currentSeason <= 0) return null
+    val apiKey = settingsStore.tmdbApiKey.first().takeIf { it.isNotBlank() } ?: return null
+    val client = TmdbClient(apiKey)
+    val thisSeason = client.season(tmdbId, currentSeason)
+    val current = NextEpisodeFinder.EpisodeRef(currentSeason, currentEpisode)
+    NextEpisodeFinder.next(current, thisSeason.map { it.ref() })?.let { next ->
+      return thisSeason.first { it.ref() == next }.target()
+    }
+    // The season ran out here, and TMDB's season list is the only place the number
+    // of the next one can come from: seasons are not always consecutive.
+    val seasons = client.details(MediaType.Show, tmdbId).seasons.map { it.seasonNumber }
+    val nextSeason = NextEpisodeFinder.nextSeason(currentSeason, seasons) ?: return null
+    val episodes = client.season(tmdbId, nextSeason)
+    val first = NextEpisodeFinder.firstOfSeason(episodes.map { it.ref() }, nextSeason) ?: return null
+    return episodes.first { it.ref() == first }.target()
+  }
+
+  private fun EpisodeItem.ref() = NextEpisodeFinder.EpisodeRef(seasonNumber, episodeNumber)
+
+  private fun EpisodeItem.target() = UpNextTarget(seasonNumber, episodeNumber, name)
+
+  /**
+   * Puts the next episode into Continue Watching at zero progress, so a viewer who
+   * finishes an episode and leaves comes back to a row that offers the one they
+   * have not seen instead of dropping the series off it entirely.
+   */
+  private fun seedNextEpisodeEntry() {
+    val target = upNextTarget ?: return
+    if (tmdbId == 0) return
+    val store = watchStore
+    val entry = WatchEntry(
+      key = watchKeyFor(tmdbId, target.season, target.episode),
+      tmdbId = tmdbId,
+      mediaType = mediaType,
+      title = title,
+      posterUrl = posterUrl,
+      season = target.season,
+      episode = target.episode,
+      updatedAtMs = System.currentTimeMillis(),
+    )
+    persistenceScope.launch { runCatching { store.upsertIfAbsent(entry) } }
+  }
+
+  /**
+   * Decides what the end of an episode offers, and puts the card up. Nothing to
+   * play next - a film, the last episode, a lookup that failed - leaves the player
+   * exactly as it always did.
+   */
+  private fun offerUpNext() {
+    val target = upNextTarget
+    val offer = UpNextPolicy.offer(
+      hasNext = target != null,
+      paused = pauseRequested,
+      msSinceInteractionMs = SystemClock.uptimeMillis() - lastInteractionMs,
+    )
+    if (target == null || offer == UpNextPolicy.Offer.None) {
+      finishPlayback(markFinished = true)
+      return
+    }
+    // The card is the only thing on screen now: the menu edits tracks of a video
+    // that has ended, and it would hold focus in front of the card.
+    menuVisible.value = false
+    val countdown = offer as? UpNextPolicy.Offer.Countdown
+    upNextCard.value = UpNextCardState(
+      seriesTitle = title,
+      target = target,
+      secondsLeft = countdown?.let { UpNextPolicy.secondsLeft(0L, it.totalMs) },
+      resolving = false,
+    )
+    if (countdown != null) {
+      upNextCountdownStartMs = SystemClock.uptimeMillis()
+      mainHandler.postDelayed(upNextTickRunnable, UP_NEXT_TICK_MS)
+    }
+  }
+
+  /**
+   * Leaves the card up but stops it acting on its own. Used when the player goes
+   * to the background: a countdown that ran there would start an episode into an
+   * empty room, and finding it half-watched later is worse than the extra press.
+   */
+  private fun freezeUpNextCountdown() {
+    val state = upNextCard.value ?: return
+    mainHandler.removeCallbacks(upNextTickRunnable)
+    if (state.secondsLeft != null) upNextCard.value = state.copy(secondsLeft = null)
+  }
+
+  private fun dismissUpNext() {
+    mainHandler.removeCallbacks(upNextTickRunnable)
+    upNextCard.value = null
+  }
+
+  /**
+   * Resolves a stream for the next episode and plays it in this activity. It has
+   * to be this activity: MPVLib is a process-global singleton whose second
+   * `create()` takes the process with it, so a second player is not an option -
+   * hence `loadfile ... replace` rather than a new intent.
+   */
+  private fun playNextEpisode() {
+    val target = upNextTarget ?: return
+    if (nextEpisodeStarting || finishing) return
+    nextEpisodeStarting = true
+    mainHandler.removeCallbacks(upNextTickRunnable)
+    upNextCard.value = upNextCard.value?.copy(secondsLeft = null, resolving = true)
+    lifecycleScope.launch {
+      val stream = runCatching { withContext(Dispatchers.IO) { resolveNextStream(target) } }
+        .getOrNull()
+      if (finishing) return@launch
+      nextEpisodeStarting = false
+      val nextUrl = stream?.url
+      // Nothing could be matched, or the addon could not be reached: the picker is
+      // where both of those are the viewer's to resolve, and where the addon's own
+      // failure message and Retry already live.
+      if (nextUrl.isNullOrBlank()) handOffToPicker(target) else startNextEpisode(target, stream, nextUrl)
+    }
+  }
+
+  /** Called off the main thread; throws on a failed addon request. */
+  private suspend fun resolveNextStream(target: UpNextTarget): AddonStream? {
+    val imdb = imdbId?.takeIf { it.isNotBlank() } ?: return null
+    val manifest = settingsStore.addonManifestUrl.first().takeIf { it.isNotBlank() } ?: return null
+    val streams = addonClient.episodeStreams(manifest, imdb, target.season, target.episode)
+    return StreamAutoPick.pick(streams, bingeGroup, streamPickStore.get(imdb))
+  }
+
+  /**
+   * Swaps the playing file for the next episode's. Everything the previous episode
+   * left behind has to go with it - the watch key above all, or the next progress
+   * save records this episode's position against the one just finished.
+   */
+  private fun startNextEpisode(target: UpNextTarget, stream: AddonStream, nextUrl: String) {
+    if (!mpvCreated || finishing) return
+    dismissUpNext()
+    mainHandler.removeCallbacks(progressSaveRunnable)
+    mainHandler.removeCallbacks(seekRunnable)
+    url = nextUrl
+    bingeGroup = stream.bingeGroup
+    season = target.season
+    episode = target.episode
+    watchKey = watchKeyFor(tmdbId, target.season, target.episode)
+    resumeMs = 0L
+    endHandled = false
+    upNextTarget = null
+    upNextLookupIssued = false
+    playbackStarted = false
+    lastErrorMessage = null
+    buffering.value = true
+    seeking.value = false
+    contentFps = 0f
+    timePosSec.doubleValue = 0.0
+    durationSec.doubleValue = 0.0
+    lastPostedSecond = Long.MIN_VALUE
+    // The session's metadata is republished from a duration nothing has reported
+    // yet, which is what gets the new episode number in front of a CEC client.
+    publishedDurationMs = -1L
+    seeker.reset()
+    seekPreviewSec.doubleValue = NO_SEEK
+    tracks.value = emptyList()
+    trackInfo.value = ""
+    // The previous episode's resume point is still in `start`, and applying it to a
+    // fresh episode would open it half an hour in.
+    MPVLib.setPropertyString("start", "0")
+    MPVLib.command(arrayOf("loadfile", nextUrl, "replace"))
+    // `keep-open=yes` left mpv paused on the finished file, and that pause survives
+    // the reload; this is also where audio focus is taken back.
+    playPlayback()
+    armLoadWatchdog(LOAD_TIMEOUT_MS)
+    publishMediaMetadata()
+    publishPlaybackState()
+    syncPlayingState()
+    showOsd()
+  }
+
+  /**
+   * Leaves the player with the next episode's stream list as the result, so the
+   * viewer lands on the picker rather than back on the episode they just watched.
+   */
+  private fun handOffToPicker(target: UpNextTarget) {
+    dismissUpNext()
+    val imdb = imdbId?.takeIf { it.isNotBlank() }
+    if (imdb != null && tmdbId != 0) {
+      val next = Screen.Streams(
+        imdbId = imdb,
+        title = title,
+        tmdbId = tmdbId,
+        mediaType = MediaType.Show,
+        posterUrl = posterUrl,
+        season = target.season,
+        episode = target.episode,
+      )
+      setResult(RESULT_OK, Intent().putExtra(EXTRA_RESULT_STREAMS, next))
+    }
+    finishPlayback(markFinished = true)
+  }
+
+  /** Notes that the remote is in someone's hand; see [UpNextPolicy.offer]. */
+  private fun noteInteraction() {
+    lastInteractionMs = SystemClock.uptimeMillis()
+  }
+
+  /**
    * Applies everything that is only true while pictures are actually moving: the
    * headphone-disconnect receiver is registered, and the screen is kept awake.
    * Idempotent, so every state change that might have started or stopped
@@ -868,7 +1191,14 @@ class MpvPlayerActivity : ComponentActivity() {
       Osd()
       // Last, so the panel sits over the OSD rather than under it.
       PlayerMenuHost()
+      UpNextCardHost()
     }
+  }
+
+  @Composable
+  private fun BoxScope.UpNextCardHost() {
+    val state by upNextCard
+    UpNextCard(state ?: return)
   }
 
   /**
@@ -970,9 +1300,13 @@ class MpvPlayerActivity : ComponentActivity() {
     val error by playbackError
     val isPaused by paused
     val show by osdVisible
+    val upNext by upNextCard
     // The transport hints are a lie once the stream is dead, and keep-open pauses
     // at an error end, which would otherwise pin the OSD open behind the panel.
     if (error != null) return
+    // Same at the other end: the video has finished, so a full-width transport bar
+    // under the up-next card would offer controls that no longer do anything.
+    if (upNext != null) return
     if (!show && !isPaused) return
 
     Column(
@@ -1094,6 +1428,30 @@ class MpvPlayerActivity : ComponentActivity() {
 
   override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
     if (!mpvCreated) return super.onKeyDown(keyCode, event)
+    noteInteraction()
+    // The up-next card owns the remote: the video has ended, so there is no
+    // transport left to drive, and OK means "play it" rather than "pause".
+    if (upNextCard.value != null) {
+      if (event.repeatCount == 0) {
+        when (keyCode) {
+          in UP_NEXT_PLAY_KEYS -> {
+            playNextEpisode()
+            return true
+          }
+          KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_MEDIA_STOP -> {
+            // The episode is already recorded as watched; this is just the exit.
+            dismissUpNext()
+            finishPlayback(markFinished = true)
+            return true
+          }
+        }
+      }
+      // Everything else is swallowed rather than passed on, media keys included: an
+      // unhandled one reaches the MediaSession, which would ask to resume a video
+      // that has finished.
+      if (keyCode in TRANSPORT_KEYS) return true
+      return super.onKeyDown(keyCode, event)
+    }
     // On a dead stream the only useful keys are the ones that retry or leave.
     if (playbackError.value != null) {
       if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_MEDIA_STOP) {
@@ -1269,7 +1627,9 @@ class MpvPlayerActivity : ComponentActivity() {
     // Refused means someone else has the speakers, so stay put rather than
     // playing over them. mpv is normally already paused here; asserting it covers
     // the initial-load call, where mpv starts unpaused on its own.
-    MPVLib.setPropertyBoolean("pause", !requestAudioFocus())
+    val granted = requestAudioFocus()
+    pauseRequested = !granted
+    MPVLib.setPropertyBoolean("pause", !granted)
   }
 
   /**
@@ -1280,6 +1640,7 @@ class MpvPlayerActivity : ComponentActivity() {
   private fun pausePlayback(forFocusLoss: Boolean = false) {
     if (!mpvCreated) return
     pausedForFocusLoss = forFocusLoss
+    pauseRequested = true
     MPVLib.setPropertyBoolean("pause", true)
   }
 
@@ -1347,12 +1708,19 @@ class MpvPlayerActivity : ComponentActivity() {
     val session = MediaSession(this, MEDIA_SESSION_TAG)
     session.setCallback(object : MediaSession.Callback() {
       override fun onPlay() {
+        noteInteraction()
+        // Play against a finished video is the card's offer, not a resume.
+        if (upNextCard.value != null) {
+          playNextEpisode()
+          return
+        }
         if (!transportAllowed()) return
         playPlayback()
         showOsd()
       }
 
       override fun onPause() {
+        noteInteraction()
         if (!transportAllowed()) return
         pausePlayback()
         showOsd()
@@ -1360,19 +1728,24 @@ class MpvPlayerActivity : ComponentActivity() {
 
       // Stopping is leaving the player, so it saves what BACK saves.
       override fun onStop() {
+        noteInteraction()
+        dismissUpNext()
         finishPlayback(markFinished = false)
       }
 
       override fun onSeekTo(pos: Long) {
+        noteInteraction()
         if (!transportAllowed()) return
         seekToSec(pos / 1000.0)
       }
 
       override fun onFastForward() {
+        noteInteraction()
         if (transportAllowed()) requestSeek(10.0, isRepeat = false)
       }
 
       override fun onRewind() {
+        noteInteraction()
         if (transportAllowed()) requestSeek(-10.0, isRepeat = false)
       }
     })
@@ -1741,8 +2114,9 @@ class MpvPlayerActivity : ComponentActivity() {
     if (finishing) return
     finishing = true
     // Before the verdict below: a periodic upsert must not land after a Finished
-    // removal and resurrect the entry it just dropped.
+    // save and put back the resume point it just cleared.
     mainHandler.removeCallbacks(progressSaveRunnable)
+    mainHandler.removeCallbacks(upNextTickRunnable)
     syncPlayingState()
     val finished = markFinished || reachedEndOfFile()
     saveWatchState(if (finished) SaveReason.Finished else SaveReason.Stopped)
@@ -1800,8 +2174,9 @@ class MpvPlayerActivity : ComponentActivity() {
    *  - [Stopped]: playback ended before the end of the video — the viewer backed
    *    out, the stream died, or a truncated file ran out of data. Keeps the
    *    position so the next session resumes there.
-   *  - [Finished]: the video reached its actual end, so there is nothing left to
-   *    continue and the entry goes.
+   *  - [Finished]: the video crossed the watched threshold, so the record becomes
+   *    a watched one: no resume position, but still a record. Deleting it was what
+   *    left a finished episode indistinguishable from one nobody had opened.
    */
   private enum class SaveReason { Progress, Paused, Stopped, Finished }
 
@@ -1823,11 +2198,18 @@ class MpvPlayerActivity : ComponentActivity() {
       durationMs = durationMs,
       updatedAtMs = System.currentTimeMillis(),
     )
+    // [endHandled] and not the reason alone: the position is still sitting at the
+    // end of the video, so a Paused save from an overlay - or the Stopped save the
+    // way out takes - would otherwise put a finished episode back in Continue
+    // Watching at 100%.
+    val finished = reason == SaveReason.Finished || endHandled
     // Deliberately not lifecycleScope: the exit saves run as the player is
     // finishing, and a cancelled write means the resume position is lost.
     persistenceScope.launch {
-      if (reason == SaveReason.Finished) {
-        store.remove(key)
+      if (finished) {
+        // The threshold was crossed, so there is nothing left to resume - only
+        // something to remember having watched.
+        store.upsert(entry.copy(positionMs = 0, watchedAtMs = entry.updatedAtMs))
       } else if (positionMs > MIN_SAVE_MS) {
         store.upsert(entry)
       }
@@ -1845,6 +2227,9 @@ class MpvPlayerActivity : ComponentActivity() {
   }
 
   override fun onStop() {
+    // A countdown must not start an episode into an empty room, but the card stays
+    // up: coming back to the offer is exactly what a viewer left it for.
+    freezeUpNextCountdown()
     // Pause on onStop rather than onPause: onPause also fires for transient
     // overlays, where stopping playback is just an annoyance. Deliberately not
     // marked as a focus-loss pause: a player the viewer left in the background
@@ -1899,16 +2284,16 @@ class MpvPlayerActivity : ComponentActivity() {
     private const val OSD_TIMEOUT_MS = 4_000L
     private const val SEEK_DEBOUNCE_MS = 350L
     private const val SEEK_REPEAT_MIN_MS = 120L
-    private const val END_GUARD_SEC = 5.0
 
     /**
-     * Fraction of a claimed runtime that still counts as having watched the
-     * whole thing, for containers whose duration is out by more than
-     * [END_GUARD_SEC]. Tight on purpose: everything below it must survive as a
-     * resume point, because a truncated stream is indistinguishable from a real
-     * ending except by how much of the runtime is missing.
+     * How close to the end a seek may land. Shared with the watched verdict on
+     * purpose: a seek that stops short of the same margin cannot accidentally
+     * finish the video, and one that crosses it means to.
      */
-    private const val END_FRACTION = 0.98
+    private const val END_GUARD_SEC = WatchedThreshold.END_GUARD_SEC
+
+    /** How often the up-next countdown redraws; see [upNextTickRunnable]. */
+    private const val UP_NEXT_TICK_MS = 250L
 
     /** Below this, resuming is more disruptive than just starting over. */
     private const val MIN_RESUME_MS = 3_000L
@@ -2014,6 +2399,15 @@ class MpvPlayerActivity : ComponentActivity() {
       KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
     )
 
+    /** What accepts the up-next offer, when the card is up. */
+    private val UP_NEXT_PLAY_KEYS = setOf(
+      KeyEvent.KEYCODE_DPAD_CENTER,
+      KeyEvent.KEYCODE_ENTER,
+      KeyEvent.KEYCODE_MEDIA_PLAY,
+      KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+      KeyEvent.KEYCODE_MEDIA_NEXT,
+    )
+
     /** What asks a dead stream to be tried again, when the panel is up. */
     private val RETRY_KEYS = setOf(
       KeyEvent.KEYCODE_DPAD_CENTER,
@@ -2053,14 +2447,22 @@ class MpvPlayerActivity : ComponentActivity() {
     private const val EXTRA_SEASON = "season"
     private const val EXTRA_EPISODE = "episode"
     private const val EXTRA_RESUME_MS = "resumeMs"
+    private const val EXTRA_IMDB_ID = "imdbId"
+    private const val EXTRA_BINGE_GROUP = "bingeGroup"
 
-    fun watchKeyFor(screen: Screen.Streams): String {
-      return if (screen.season != null) {
-        "episode:${screen.tmdbId}:${screen.season}:${screen.episode}"
-      } else {
-        "movie:${screen.tmdbId}"
-      }
+    /**
+     * The stream list the player could not pick from for the next episode, handed
+     * back so the caller can put the viewer on the picker instead of on the episode
+     * they have just watched. A [Screen.Streams].
+     */
+    const val EXTRA_RESULT_STREAMS = "resultStreams"
+
+    fun watchKeyFor(tmdbId: Int, season: Int?, episode: Int?): String {
+      return if (season != null) "episode:$tmdbId:$season:$episode" else "movie:$tmdbId"
     }
+
+    fun watchKeyFor(screen: Screen.Streams): String =
+      watchKeyFor(screen.tmdbId, screen.season, screen.episode)
 
     fun createIntent(
       context: Context,
@@ -2079,6 +2481,10 @@ class MpvPlayerActivity : ComponentActivity() {
         screen.season?.let { putExtra(EXTRA_SEASON, it) }
         screen.episode?.let { putExtra(EXTRA_EPISODE, it) }
         putExtra(EXTRA_RESUME_MS, resumeMs)
+        // Both only mean anything to the binge loop: the id the next episode's
+        // streams are asked for by, and the release to prefer among them.
+        putExtra(EXTRA_IMDB_ID, screen.imdbId)
+        stream.bingeGroup?.let { putExtra(EXTRA_BINGE_GROUP, it) }
       }
     }
   }

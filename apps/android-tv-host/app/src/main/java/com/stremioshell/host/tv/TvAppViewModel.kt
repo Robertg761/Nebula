@@ -7,10 +7,14 @@ import com.stremioshell.host.tv.data.NetworkErrorMessage
 import com.stremioshell.host.tv.data.NetworkSource
 import com.stremioshell.host.tv.data.SettingsStore
 import com.stremioshell.host.tv.data.StalenessPolicy
+import com.stremioshell.host.tv.data.StreamPickStore
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.WatchStateStore
 import com.stremioshell.host.tv.data.addon.AddonClient
 import com.stremioshell.host.tv.data.addon.AddonStream
+import com.stremioshell.host.tv.data.addon.StreamOrder
+import com.stremioshell.host.tv.data.addon.StreamQuality
+import com.stremioshell.host.tv.data.addon.StreamSelection
 import com.stremioshell.host.tv.data.persistenceScope
 import com.stremioshell.host.tv.data.tmdb.EpisodeItem
 import com.stremioshell.host.tv.data.tmdb.MediaDetails
@@ -32,6 +36,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -72,14 +77,29 @@ sealed interface LoadState<out T> {
 class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   val settings = SettingsStore(application)
   val watchState = WatchStateStore(application)
+  val streamPicks = StreamPickStore(application)
   private val addonClient = AddonClient()
 
   val tmdbApiKey: StateFlow<String?> = settings.tmdbApiKey
     .stateIn(viewModelScope, SharingStarted.Eagerly, null)
   val addonManifestUrl: StateFlow<String?> = settings.addonManifestUrl
     .stateIn(viewModelScope, SharingStarted.Eagerly, null)
-  val continueWatching: StateFlow<List<WatchEntry>> = watchState.entries
+
+  /** Everything ever played, watched records included: what episode lists mark from. */
+  val watchEntries: StateFlow<List<WatchEntry>> = watchState.entries
     .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+  /**
+   * The rail, which is resume points only. A finished video keeps its record now
+   * instead of being deleted, so the rail has to filter rather than just render
+   * whatever is stored.
+   */
+  val continueWatching: StateFlow<List<WatchEntry>> = watchState.entries
+    .map { entries -> entries.filterNot { it.watched } }
+    .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+  val rememberedPicks: StateFlow<Map<String, StreamSelection>> = streamPicks.selections
+    .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
   private val _homeRails = MutableStateFlow<LoadState<List<HomeRail>>>(LoadState.Loading)
   val homeRails: StateFlow<LoadState<List<HomeRail>>> = _homeRails
@@ -411,10 +431,47 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
         } else {
           addonClient.movieStreams(manifest, imdbId)
         }
-        LoadState.Ready(streams) as LoadState<List<AddonStream>>
+        // Comet returns its rows grouped by debrid service, so 2160p, 1080p and 480p
+        // are interleaved and the best release is rarely near the top.
+        LoadState.Ready(StreamOrder.byQuality(streams)) as LoadState<List<AddonStream>>
       }.getOrElse { LoadState.Failed(NetworkErrorMessage.forThrowable(NetworkSource.Addon, it)) }
       if (isActive && streamsKey == key) _streams.value = result
     }
+  }
+
+  /**
+   * Records the release picked for a series so its next episode can start on the
+   * same one. Series only: a movie has no next episode to spend one of the store's
+   * slots on.
+   */
+  fun rememberStreamPick(seriesId: String, stream: AddonStream) {
+    if (seriesId.isBlank()) return
+    val quality = StreamQuality.parse(stream)
+    val selection = StreamSelection(
+      seriesId = seriesId,
+      bingeGroup = stream.bingeGroup,
+      resolutionHeight = quality.resolutionHeight,
+      label = stream.name ?: stream.title,
+      updatedAtMs = System.currentTimeMillis(),
+    )
+    // persistenceScope, not viewModelScope: this fires as the picker hands off to the
+    // player, and the ViewModel's scope can be torn down with the activity behind it.
+    persistenceScope.launch { runCatching { streamPicks.remember(selection) } }
+  }
+
+  /** "Mark watched" from the Continue Watching row: keeps the record, drops the resume point. */
+  fun markWatched(entry: WatchEntry) {
+    persistenceScope.launch {
+      runCatching { watchState.markWatched(entry.key, System.currentTimeMillis()) }
+    }
+  }
+
+  /**
+   * "Remove from row": forgets the video entirely rather than marking it watched,
+   * which is what a viewer who started the wrong thing is asking for.
+   */
+  fun forgetWatchEntry(entry: WatchEntry) {
+    persistenceScope.launch { runCatching { watchState.remove(entry.key) } }
   }
 
   fun saveSettings(tmdbKey: String, addonUrl: String, onStatus: (String) -> Unit) {

@@ -47,13 +47,15 @@ import com.stremioshell.host.tv.data.tmdb.MediaType
 fun DetailsScreen(
   viewModel: TvAppViewModel,
   screen: Screen.Details,
-  onPlay: (details: MediaDetails, season: Int?, episode: Int?) -> Unit,
+  onPlay: (details: MediaDetails, season: Int?, episode: Int?, startOver: Boolean) -> Unit,
 ) {
   val type = screen.type
   val tmdbId = screen.tmdbId
   val detailsState by viewModel.details.collectAsState()
   val episodesState by viewModel.episodes.collectAsState()
-  val watching by viewModel.continueWatching.collectAsState()
+  // Every record, watched ones included: this screen marks finished episodes as well as
+  // part-watched ones, so it cannot use the Continue Watching projection.
+  val watching by viewModel.watchEntries.collectAsState()
 
   LaunchedEffect(type, tmdbId) { viewModel.loadDetails(type, tmdbId) }
 
@@ -102,7 +104,7 @@ fun DetailsScreen(
     // Continue Watching. Shows get the same Resume affordance movies always had.
     val showResume = if (media.item.type == MediaType.Show && media.imdbId != null) {
       val forShow = watching.filter {
-        it.tmdbId == media.item.tmdbId && it.season != null && it.episode != null
+        it.tmdbId == media.item.tmdbId && it.season != null && it.episode != null && !it.watched
       }
       forShow.firstOrNull { it.season == screen.initialSeason && it.episode == screen.initialEpisode }
         ?: forShow.firstOrNull()
@@ -204,21 +206,34 @@ fun DetailsScreen(
               )
             } else if (media.item.type == MediaType.Movie) {
               val entry = watching.firstOrNull { it.key == "movie:${media.item.tmdbId}" }
-              Button(
-                onClick = { onPlay(media, null, null) },
-                modifier = Modifier.initialFocusTarget(primaryFocus),
-              ) {
-                Text(if (entry != null) "Resume" else "Find Streams")
-              }
-              if (entry != null) ResumeHint(entry)
+              val resumable = entry?.takeIf { !it.watched && it.positionMs > 0 }
+              PlayActions(
+                playLabel = when {
+                  resumable != null -> "Resume"
+                  entry?.watched == true -> "Watch again"
+                  else -> "Find Streams"
+                },
+                // Only a real resume point has something to start over from; a watched
+                // record already plays from 0:00, so it needs no second button.
+                offerStartOver = resumable != null,
+                focusTarget = primaryFocus,
+                onPlay = { startOver -> onPlay(media, null, null, startOver) },
+              )
+              if (resumable != null) ResumeHint(resumable)
             } else if (showResume != null) {
-              Button(
-                onClick = { onPlay(media, showResume.season, showResume.episode) },
-                modifier = Modifier.initialFocusTarget(primaryFocus),
-              ) {
-                Text("Resume S${showResume.season}E${showResume.episode}")
-              }
-              ResumeHint(showResume)
+              val episodeLabel = "S${showResume.season}E${showResume.episode}"
+              val resumable = showResume.positionMs > 0
+              PlayActions(
+                // A next episode seeded by the player's up-next has never been played, so
+                // it is offered as "Play", not as a resume of something at 0:00.
+                playLabel = if (resumable) "Resume $episodeLabel" else "Play $episodeLabel",
+                offerStartOver = resumable,
+                focusTarget = primaryFocus,
+                onPlay = { startOver ->
+                  onPlay(media, showResume.season, showResume.episode, startOver)
+                },
+              )
+              if (resumable) ResumeHint(showResume)
             }
             if (needsFallbackAction) {
               if (media.item.type == MediaType.Show) {
@@ -278,7 +293,11 @@ fun DetailsScreen(
                   }
                   val isResumeTarget = episode.episodeNumber == resumeEpisode
                   Card(
-                    onClick = { onPlay(media, episode.seasonNumber, episode.episodeNumber) },
+                    onClick = {
+                      // Clicking a watched episode replays it: its stored position is 0, so
+                      // startOver would change nothing and is left false.
+                      onPlay(media, episode.seasonNumber, episode.episodeNumber, false)
+                    },
                     modifier = Modifier.fillMaxWidth(0.8f)
                       .initialFocusTarget(if (isResumeTarget) resumeFocus else null),
                   ) {
@@ -304,7 +323,13 @@ fun DetailsScreen(
                       }
                       Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(
-                          "E${episode.episodeNumber}  ${episode.name}",
+                          // The tick is the whole point of keeping a finished episode's record:
+                          // a season list that never says what you have seen is the reason
+                          // "which one was I on" is a question at all.
+                          buildString {
+                            if (entry?.watched == true) append("✓  ")
+                            append("E${episode.episodeNumber}  ${episode.name}")
+                          },
                           style = MaterialTheme.typography.titleMedium,
                           color = if (isResumeTarget) MaterialTheme.colorScheme.primary else Color.Unspecified,
                         )
@@ -333,6 +358,7 @@ fun DetailsScreen(
                         }
                         val marker = listOfNotNull(
                           "Resume here".takeIf { isResumeTarget },
+                          "Watched".takeIf { entry?.watched == true },
                           entry?.minutesLeft()?.let { "$it min left" },
                         ).joinToString("  -  ")
                         if (marker.isNotEmpty()) {
@@ -355,9 +381,42 @@ fun DetailsScreen(
   }
 }
 
-/** Whole minutes left in a saved position, or null when the duration was never learned. */
+/**
+ * Whole minutes left in a saved position, or null when there is no position to be part
+ * way through: an unstarted or finished record has none, and "45 min left" under a
+ * watched episode reads as if it had never been played.
+ */
 private fun WatchEntry.minutesLeft(): Long? =
-  if (durationMs > 0) ((durationMs - positionMs) / 60_000).coerceAtLeast(1) else null
+  if (durationMs > 0 && positionMs > 0 && !watched) {
+    ((durationMs - positionMs) / 60_000).coerceAtLeast(1)
+  } else {
+    null
+  }
+
+/**
+ * The header's play control(s). "Start over" is a separate button rather than a mode on
+ * the first one because a resume that cannot be overridden is the complaint this fixes,
+ * and a TV remote has nowhere to put a modifier press.
+ */
+@Composable
+private fun PlayActions(
+  playLabel: String,
+  offerStartOver: Boolean,
+  focusTarget: InitialFocusTarget,
+  onPlay: (startOver: Boolean) -> Unit,
+) {
+  Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+    Button(
+      onClick = { onPlay(false) },
+      modifier = Modifier.initialFocusTarget(focusTarget),
+    ) {
+      Text(playLabel)
+    }
+    if (offerStartOver) {
+      Button(onClick = { onPlay(true) }) { Text("Start over") }
+    }
+  }
+}
 
 @Composable
 private fun ResumeHint(entry: WatchEntry) {
