@@ -32,6 +32,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Button
 import androidx.tv.material3.Card
+import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
@@ -39,14 +40,23 @@ import coil.request.ImageRequest
 import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.data.WatchEntry
+import com.stremioshell.host.tv.data.tmdb.AirDate
+import com.stremioshell.host.tv.data.tmdb.CastMember
+import com.stremioshell.host.tv.data.tmdb.DetailsMetadata
 import com.stremioshell.host.tv.data.tmdb.EpisodeItem
 import com.stremioshell.host.tv.data.tmdb.MediaDetails
+import com.stremioshell.host.tv.data.tmdb.MediaItem
 import com.stremioshell.host.tv.data.tmdb.MediaType
+import java.time.LocalDate
+
+/** Lines of synopsis shown before the "More" affordance takes over. */
+private const val OVERVIEW_COLLAPSED_LINES = 4
 
 @Composable
 fun DetailsScreen(
   viewModel: TvAppViewModel,
   screen: Screen.Details,
+  onItemClick: (MediaType, Int) -> Unit,
   onPlay: (details: MediaDetails, season: Int?, episode: Int?, startOver: Boolean) -> Unit,
 ) {
   val type = screen.type
@@ -56,6 +66,9 @@ fun DetailsScreen(
   // Every record, watched ones included: this screen marks finished episodes as well as
   // part-watched ones, so it cannot use the Continue Watching projection.
   val watching by viewModel.watchEntries.collectAsState()
+  // Read once: an episode list that recomputed "has this aired" on every recomposition would be
+  // doing date arithmetic per frame for a boundary that moves once a day.
+  val today = remember { LocalDate.now() }
 
   LaunchedEffect(type, tmdbId) { viewModel.loadDetails(type, tmdbId) }
 
@@ -185,19 +198,17 @@ fun DetailsScreen(
         item(key = "header") {
           Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(media.item.title, style = MaterialTheme.typography.displaySmall)
-            val meta = listOfNotNull(
-              media.item.year,
-              media.runtimeMinutes?.let { "${it} min" },
-              media.item.rating?.let { "%.1f".format(it) + " / 10" },
-              media.genres.take(3).joinToString(", ").ifBlank { null },
-            ).joinToString("   ")
-            Text(meta, style = MaterialTheme.typography.bodyMedium)
-            Text(
-              media.item.overview,
-              style = MaterialTheme.typography.bodyLarge,
-              maxLines = 4,
-              overflow = TextOverflow.Ellipsis,
-              modifier = Modifier.fillMaxWidth(0.7f),
+            // Remembered because this header recomposes on every watch-state update, and the
+            // metadata line only changes when the title does.
+            val meta = remember(media) { DetailsMetadata.of(media) }
+            if (meta.isNotEmpty()) {
+              Text(meta, style = MaterialTheme.typography.bodyMedium)
+            }
+            ExpandableOverview(
+              text = media.item.overview,
+              // Keyed on the title so opening another one starts collapsed, and so the flag
+              // survives the season switches and watch-state updates that recompose this header.
+              stateKey = "$type:$tmdbId",
             )
             if (media.imdbId == null) {
               Text(
@@ -275,7 +286,7 @@ fun DetailsScreen(
                       if (!hasHeaderAction && season.seasonNumber == selectedSeason) primaryFocus else null,
                     ),
                 ) {
-                  Text("Season ${season.seasonNumber}")
+                  Text(season.label)
                 }
               }
             }
@@ -292,13 +303,21 @@ fun DetailsScreen(
                     it.key == "episode:${media.item.tmdbId}:${episode.seasonNumber}:${episode.episodeNumber}"
                   }
                   val isResumeTarget = episode.episodeNumber == resumeEpisode
+                  // Nothing has been released for an episode that has not aired, so its streams
+                  // would come back empty. It stays focusable with a no-op OK rather than being
+                  // made unfocusable: a whole unaired season would otherwise render as a block the
+                  // D-pad cannot enter or read.
+                  val upcoming = AirDate.isUpcoming(episode.airDate, today)
                   Card(
                     onClick = {
                       // Clicking a watched episode replays it: its stored position is 0, so
                       // startOver would change nothing and is left false.
-                      onPlay(media, episode.seasonNumber, episode.episodeNumber, false)
+                      if (!upcoming) {
+                        onPlay(media, episode.seasonNumber, episode.episodeNumber, false)
+                      }
                     },
                     modifier = Modifier.fillMaxWidth(0.8f)
+                      .then(if (upcoming) Modifier.alpha(0.6f) else Modifier)
                       .initialFocusTarget(if (isResumeTarget) resumeFocus else null),
                   ) {
                     Row(modifier = Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -356,7 +375,11 @@ fun DetailsScreen(
                             )
                           }
                         }
+                        val airLabel = AirDate.label(episode.airDate)
                         val marker = listOfNotNull(
+                          // "Airs <date>" rather than a bare date, because that is the whole
+                          // explanation for why pressing OK on this row does nothing.
+                          airLabel?.let { if (upcoming) "Airs $it" else it },
                           "Resume here".takeIf { isResumeTarget },
                           "Watched".takeIf { entry?.watched == true },
                           entry?.minutesLeft()?.let { "$it min left" },
@@ -376,10 +399,126 @@ fun DetailsScreen(
             }
           }
         }
+
+        // Below the episode list, in the order a viewer asks the questions: who is in this, then
+        // what else is like it.
+        if (media.cast.isNotEmpty()) {
+          item(key = "cast") { CastRow(media.cast) }
+        }
+        if (media.similar.isNotEmpty()) {
+          item(key = "similar") { SimilarRow(media.similar, onItemClick) }
+        }
       }
     }
   }
 }
+
+/**
+ * Synopsis capped at [OVERVIEW_COLLAPSED_LINES] with an inline expander.
+ *
+ * A truncated synopsis with no way to read the rest is the complaint; a dialog would be the other
+ * option, but expanding in place keeps the D-pad exactly where it was, and the button is a real
+ * focusable node so a remote can reach it at all.
+ *
+ * @param stateKey resets the expanded flag when the screen switches to another title.
+ */
+@Composable
+private fun ExpandableOverview(text: String, stateKey: String) {
+  if (text.isBlank()) return
+  var expanded by rememberSaveable(stateKey) { mutableStateOf(false) }
+  // Latched, never cleared: expanding removes the overflow that revealed the button, and clearing
+  // the flag would take the "Less" button away with it - stranding focus on a node that vanished.
+  var overflowed by rememberSaveable(stateKey) { mutableStateOf(false) }
+
+  Text(
+    text,
+    style = MaterialTheme.typography.bodyLarge,
+    maxLines = if (expanded) Int.MAX_VALUE else OVERVIEW_COLLAPSED_LINES,
+    overflow = TextOverflow.Ellipsis,
+    onTextLayout = { if (it.hasVisualOverflow) overflowed = true },
+    modifier = Modifier.fillMaxWidth(0.7f),
+  )
+  if (overflowed) {
+    Button(onClick = { expanded = !expanded }) {
+      Text(if (expanded) "Less" else "More")
+    }
+  }
+}
+
+/**
+ * The billed cast, headshot first.
+ *
+ * Every card is focusable with a deliberately empty click: a row a remote cannot enter is a row
+ * that does not exist on TV, and there is no person screen to open yet. Focus passes straight
+ * through left/right and out again vertically, so nothing is trapped.
+ */
+@Composable
+private fun CastRow(cast: List<CastMember>) {
+  Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Text("Cast", style = MaterialTheme.typography.titleLarge)
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+      // Index in the key: TMDB credits the same person twice on plenty of titles (an actor who
+      // also voices something), and a duplicate key crashes a lazy list outright.
+      items(cast.size, key = { "${cast[it].id}:$it" }) { index ->
+        val member = cast[index]
+        Column(modifier = Modifier.width(CAST_CARD_WIDTH)) {
+          Card(
+            onClick = {},
+            scale = CardDefaults.scale(focusedScale = 1.08f),
+            modifier = Modifier.width(CAST_CARD_WIDTH).height(160.dp),
+          ) {
+            ArtworkImage(
+              url = member.profileUrl,
+              contentDescription = member.name,
+              modifier = Modifier.fillMaxSize(),
+            ) {
+              Text(
+                member.name,
+                maxLines = 3,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(6.dp),
+              )
+            }
+          }
+          Text(
+            member.name,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.bodyMedium,
+            // Clears the focused card's scaled-up bottom edge, as on the poster rows.
+            modifier = Modifier.padding(top = 12.dp),
+          )
+          if (member.character.isNotBlank()) {
+            Text(
+              member.character,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+              style = MaterialTheme.typography.bodySmall,
+              modifier = Modifier.alpha(0.7f),
+            )
+          }
+        }
+      }
+    }
+  }
+}
+
+/** Recommendations, on the same poster card the Home rails use. */
+@Composable
+private fun SimilarRow(items: List<MediaItem>, onItemClick: (MediaType, Int) -> Unit) {
+  Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Text("More like this", style = MaterialTheme.typography.titleLarge)
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+      items(items.size, key = { "${items[it].type}:${items[it].tmdbId}" }) { index ->
+        val item = items[index]
+        MediaCard(item = item, onClick = { onItemClick(item.type, item.tmdbId) })
+      }
+    }
+  }
+}
+
+/** Narrower than a poster card: a headshot is portrait, but not 2:3. */
+private val CAST_CARD_WIDTH = 120.dp
 
 /**
  * Whole minutes left in a saved position, or null when there is no position to be part

@@ -71,8 +71,80 @@ class TmdbClientTest {
     assertEquals("tt14688458", details.imdbId)
     assertEquals(50, details.runtimeMinutes)
     assertEquals(listOf("Drama"), details.genres)
-    assertEquals(1, details.seasons.size)
+    // Specials are offered, but after the real seasons so the screen still opens on season 1.
+    assertEquals(listOf(1, 0), details.seasons.map { it.seasonNumber })
+    assertEquals(listOf("Season 1", "Specials"), details.seasons.map { it.label })
     assertEquals(10, details.seasons.first().episodeCount)
+  }
+
+  @Test
+  fun `details asks for every extra in one request`() = runBlocking {
+    client("""{"id":9,"name":"Silo"}""").details(MediaType.Show, 9)
+    val showUrl = requested.single()
+    assertTrue(showUrl.contains("append_to_response=external_ids,credits,videos,similar,content_ratings"))
+
+    requested.clear()
+    client("""{"id":9,"title":"Heat"}""").details(MediaType.Movie, 9)
+    val movieUrl = requested.single()
+    // Certifications live under a different key for movies.
+    assertTrue(movieUrl.contains("append_to_response=external_ids,credits,videos,similar,release_dates"))
+  }
+
+  @Test
+  fun `details parses cast, similar titles, trailer and a show certification`() = runBlocking {
+    val details = client(
+      """
+      {"id":9,"name":"Silo","first_air_date":"2023-05-05","last_air_date":"2025-01-17",
+       "in_production":true,
+       "credits":{"cast":[
+         {"id":7,"name":"Second","character":"Sims","order":1},
+         {"id":5,"name":"First","character":"Juliette","profile_path":"/j.jpg","order":0}]},
+       "videos":{"results":[{"key":"abc","site":"YouTube","type":"Trailer","official":true}]},
+       "similar":{"results":[
+         {"id":9,"name":"Silo"},
+         {"id":11,"name":"Severance","poster_path":"/s.jpg"}]},
+       "content_ratings":{"results":[{"iso_3166_1":"DE","rating":"16"},
+         {"iso_3166_1":"US","rating":"TV-MA"}]}}
+      """.trimIndent()
+    ).details(MediaType.Show, 9)
+
+    assertEquals(listOf("First", "Second"), details.cast.map { it.name })
+    assertEquals("Juliette", details.cast.first().character)
+    assertEquals("https://image.tmdb.org/t/p/w185/j.jpg", details.cast.first().profileUrl)
+    assertNull(details.cast[1].profileUrl)
+    // The title itself is dropped from its own recommendations, and the type is inherited.
+    assertEquals(listOf(11), details.similar.map { it.tmdbId })
+    assertEquals(MediaType.Show, details.similar.first().type)
+    assertEquals("abc", details.trailerYoutubeKey)
+    assertEquals("TV-MA", details.contentRating)
+    assertEquals("2025", details.endYear)
+    assertTrue(details.ongoing)
+  }
+
+  @Test
+  fun `details reads a movie certification out of release dates`() = runBlocking {
+    val details = client(
+      """
+      {"id":9,"title":"Heat","release_date":"1995-12-15",
+       "release_dates":{"results":[
+         {"iso_3166_1":"DE","release_dates":[{"certification":"16"}]},
+         {"iso_3166_1":"US","release_dates":[{"certification":""},{"certification":"R"}]}]}}
+      """.trimIndent()
+    ).details(MediaType.Movie, 9)
+
+    assertEquals("R", details.contentRating)
+    assertNull(details.endYear)
+    assertEquals(false, details.ongoing)
+  }
+
+  @Test
+  fun `details tolerates every extra being absent`() = runBlocking {
+    val details = client("""{"id":9,"title":"X"}""").details(MediaType.Movie, 9)
+
+    assertTrue(details.cast.isEmpty())
+    assertTrue(details.similar.isEmpty())
+    assertNull(details.trailerYoutubeKey)
+    assertNull(details.contentRating)
   }
 
   @Test

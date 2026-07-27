@@ -166,21 +166,32 @@ fun TvApp(
               is Screen.Search -> SearchScreen(viewModel, onItemClick = openDetails)
               is Screen.Settings -> SettingsScreen(viewModel, onPairWithPhone = { push(Screen.Pair) })
               is Screen.Pair -> PairScreen(viewModel, onPaired = { popTo(1) })
-              is Screen.Details -> DetailsScreen(viewModel, screen) { media, season, episode, startOver ->
-                val imdbId = media.imdbId ?: return@DetailsScreen
-                push(
-                  Screen.Streams(
-                    imdbId = imdbId,
-                    title = media.item.title,
-                    tmdbId = media.item.tmdbId,
-                    mediaType = media.item.type,
-                    posterUrl = media.item.posterUrl,
-                    season = season,
-                    episode = episode,
-                    startOver = startOver,
-                  )
-                )
-              }
+              // "More like this" pushes another Details, exactly as a Home card does: the same
+              // screen at a deeper stack index, so BACK walks the trail back out.
+              is Screen.Details -> DetailsScreen(
+                viewModel = viewModel,
+                screen = screen,
+                onItemClick = openDetails,
+                onPlay = { media, season, episode, startOver ->
+                  // No IMDb id means no addon lookup is possible; the screen says so in place
+                  // rather than pushing a picker that could only come back empty.
+                  val imdbId = media.imdbId
+                  if (imdbId != null) {
+                    push(
+                      Screen.Streams(
+                        imdbId = imdbId,
+                        title = media.item.title,
+                        tmdbId = media.item.tmdbId,
+                        mediaType = media.item.type,
+                        posterUrl = media.item.posterUrl,
+                        season = season,
+                        episode = episode,
+                        startOver = startOver,
+                      )
+                    )
+                  }
+                },
+              )
               is Screen.Streams -> StreamsScreen(viewModel, screen) { stream ->
                 streamLauncher.play(screen, stream)
               }

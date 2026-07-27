@@ -41,10 +41,28 @@ class TmdbClient(
     }
   }
 
+  /**
+   * One request for everything the details screen shows.
+   *
+   * The extras ride along on `append_to_response` rather than as separate calls: five sequential
+   * round trips would put the cast row seconds behind the title on a TV's Wi-Fi, and each one would
+   * be its own chance to fail.
+   */
   suspend fun details(type: MediaType, tmdbId: Int): MediaDetails {
-    val path = if (type == MediaType.Movie) "movie/$tmdbId" else "tv/$tmdbId"
-    val body = fetcher.getAllowingStale(url(path, "append_to_response=external_ids"))
+    val isMovie = type == MediaType.Movie
+    val path = if (isMovie) "movie/$tmdbId" else "tv/$tmdbId"
+    val appends = if (isMovie) MOVIE_APPENDS else SHOW_APPENDS
+    val body = fetcher.getAllowingStale(url(path, "append_to_response=$appends"))
     val details = json.decodeFromString<TmdbDetailsResponse>(body)
+    // Certifications live under a different key per media type, and in a different shape: shows
+    // carry one rating per country, movies carry a list of releases per country.
+    val certifications = if (isMovie) {
+      details.releaseDates?.results.orEmpty().flatMap { country ->
+        country.releaseDates.map { country.country to it.certification }
+      }
+    } else {
+      details.contentRatings?.results.orEmpty().map { it.country to it.rating }
+    }
     return MediaDetails(
       item = MediaItem(
         tmdbId = details.id,
@@ -59,9 +77,35 @@ class TmdbClient(
       imdbId = details.externalIds?.imdbId?.ifBlank { null },
       runtimeMinutes = details.runtime ?: details.episodeRunTime.firstOrNull(),
       genres = details.genres.map { it.name },
-      seasons = details.seasons
-        .filter { it.seasonNumber > 0 && it.episodeCount > 0 }
-        .map { SeasonSummary(it.seasonNumber, it.name, it.episodeCount) },
+      seasons = SeasonList.order(
+        details.seasons.map { SeasonSummary(it.seasonNumber, it.name, it.episodeCount) },
+      ),
+      endYear = AirDate.year(details.lastAirDate),
+      ongoing = details.inProduction,
+      contentRating = ContentRating.pick(certifications),
+      cast = details.credits?.cast.orEmpty()
+        .sortedBy { it.order }
+        .take(MAX_CAST)
+        .map { member ->
+          CastMember(
+            id = member.id,
+            name = member.name,
+            character = member.character,
+            profileUrl = member.profilePath?.let { IMAGE_BASE_PROFILE + it },
+          )
+        },
+      // `similar` has no media_type of its own, so it inherits this title's - which is right,
+      // because TMDB only ever recommends within the endpoint that was asked.
+      similar = details.similar?.results.orEmpty()
+        .filter { it.id != details.id }
+        .distinctBy { it.id }
+        .take(MAX_SIMILAR)
+        .map { it.toItem(type) },
+      trailerYoutubeKey = TrailerPick.bestYoutubeKey(
+        details.videos?.results.orEmpty().map {
+          VideoRef(key = it.key, site = it.site, type = it.type, official = it.official)
+        },
+      ),
     )
   }
 
@@ -105,5 +149,15 @@ class TmdbClient(
   companion object {
     private const val IMAGE_BASE_POSTER = "https://image.tmdb.org/t/p/w342"
     private const val IMAGE_BASE_BACKDROP = "https://image.tmdb.org/t/p/w1280"
+
+    /** Headshots are card-sized; w342 would be four times the bytes for no visible gain. */
+    private const val IMAGE_BASE_PROFILE = "https://image.tmdb.org/t/p/w185"
+
+    private const val MOVIE_APPENDS = "external_ids,credits,videos,similar,release_dates"
+    private const val SHOW_APPENDS = "external_ids,credits,videos,similar,content_ratings"
+
+    /** Full TMDB casts run to hundreds of one-line parts; nobody scrolls a row that far. */
+    private const val MAX_CAST = 20
+    private const val MAX_SIMILAR = 20
   }
 }
