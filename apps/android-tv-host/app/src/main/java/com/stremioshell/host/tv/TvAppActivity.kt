@@ -14,6 +14,7 @@ import com.stremioshell.host.tv.channel.WatchNextSync
 import com.stremioshell.host.tv.channel.WatchNextTarget
 import com.stremioshell.host.tv.data.SettingsStore
 import com.stremioshell.host.tv.data.WatchStateStore
+import com.stremioshell.host.tv.data.tmdb.MediaType
 import com.stremioshell.host.tv.player.MpvPlayerActivity
 import com.stremioshell.host.tv.ui.Screen
 import com.stremioshell.host.tv.ui.StreamLauncher
@@ -124,6 +125,19 @@ class TvAppActivity : ComponentActivity() {
           },
           pendingStreams = pendingStreams.value,
           onPendingStreamsHandled = { pendingStreams.value = null },
+          pendingDeepLink = pendingWatchNextTarget.value?.let { target ->
+            Screen.Details(
+              type = if (target.mediaType == WatchNextDeepLink.TYPE_SHOW) {
+                MediaType.Show
+              } else {
+                MediaType.Movie
+              },
+              tmdbId = target.tmdbId,
+              initialSeason = target.season,
+              initialEpisode = target.episode,
+            )
+          },
+          onPendingDeepLinkHandled = { pendingWatchNextTarget.value = null },
         )
         UpdatePromptHost()
       }

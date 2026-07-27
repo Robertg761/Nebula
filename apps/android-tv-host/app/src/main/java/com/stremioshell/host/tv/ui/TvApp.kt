@@ -53,12 +53,17 @@ private fun stateKeyFor(index: Int, screen: Screen): String = "$index:$screen"
  * @param pendingStreams an episode the player handed back because it could not pick a
  *   stream for it on its own. Cleared through [onPendingStreamsHandled] once navigated
  *   to, so a BACK out of the picker does not immediately push it again.
+ * @param pendingDeepLink a title a Watch Next row on the TV home asked to reopen.
+ *   Cleared through [onPendingDeepLinkHandled] so a BACK out of Details does not push
+ *   it straight back.
  */
 @Composable
 fun TvApp(
   streamLauncher: StreamLauncher = StreamLauncher { _, _ -> },
   pendingStreams: Screen.Streams? = null,
   onPendingStreamsHandled: () -> Unit = {},
+  pendingDeepLink: Screen.Details? = null,
+  onPendingDeepLinkHandled: () -> Unit = {},
 ) {
   val viewModel: TvAppViewModel = viewModel()
   // Saveable: Screen is Parcelable, so the stack outlives activity recreation
@@ -113,6 +118,16 @@ fun TvApp(
     if (backstack.last() is Screen.Streams) popTo(backstack.size - 1)
     push(target)
     onPendingStreamsHandled()
+  }
+
+  // A Watch Next row names a title, not a place in the stack. Rooting it on Home
+  // means BACK out of it lands where the launcher icon would have, instead of
+  // dropping straight out of the app.
+  LaunchedEffect(pendingDeepLink) {
+    val target = pendingDeepLink ?: return@LaunchedEffect
+    popTo(1)
+    push(target)
+    onPendingDeepLinkHandled()
   }
 
   val openDetails: (MediaType, Int) -> Unit = { type, id -> push(Screen.Details(type, id)) }
