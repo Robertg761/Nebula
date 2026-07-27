@@ -1,43 +1,24 @@
 # Android TV Host
 
-This folder contains the Android TV host app for Stremio Shell TV.
+This folder contains the Android TV app for Stremio Shell TV: a native Jetpack
+Compose (TV) app talking to TMDB for catalog metadata, a Stremio addon (Comet)
+for streams, and libmpv for playback. There is no WebView shell any more - it
+was deleted in favour of the native app, along with the JS host bridge, the
+bundled `apps/web/dist` assets and the JsSandbox core runtime.
 
-## Host bridge contract
-
-Use `apps/android-tv-host/host-bridge-contract.json` as the source of truth for Android-to-web host events and web-to-Android host commands.
-
-- Contract version is pinned to `1`.
-- Envelope shape is `{ type, version, payload, timestampMs }`.
-- Payloads must remain JSON-serializable.
+`apps/android-tv-host/host-bridge-contract.json` is retained only as the mirror
+of the web-side contract in `apps/web`; nothing in this module reads it.
 
 ## What is implemented
 
-- `tv` flavor app package:
-  - `com.stremioshell.host.tv`
-- Full-screen WebView host loading:
-  - Debug default: bundled `apps/web/dist` shell (override with `-PwebAppUrl=...` when needed).
-  - Debug override: pass `-PwebAppUrl=http://10.0.2.2:5173` to target local Vite dev shell.
-  - Release: bundled `apps/web/dist` assets.
-  - Startup watchdog + diagnostics overlay prevents silent black screens and offers retry/export actions.
-  - Remote fallback URL (`https://web.stremio.com/`) is used only when local shell startup fails.
-- JS bridge command support:
-  - `playback.open`
-    - Optional metadata/settings payloads: artwork/logo/resume/fallback URL/settings/tracks.
-  - `playback.close`
-  - `external.openUrl`
-  - `diagnostics.export`
-  - `updates.check`
-  - `back.handled`
-    - Payload: `{ requestId, handled, reason? }`
-- Host event dispatch to web shell:
-  - `lifecycle.changed`
-  - `network.changed`
-  - `back.pressed`
-    - Payload includes `requestId` for deterministic acknowledgement.
-  - `deepLink.received`
-  - `playback.result`
-    - Optional fallback diagnostics fields: `fallbackTriggered`, `failureDomain`, `failureDetail`, `settingsDiagnostics`.
-- Native playback path via Media3 ExoPlayer.
+- Single TV-only variant, package `com.stremioshell.host`, application id
+  `com.stremioshell.host.tv`.
+- `com.stremioshell.host.tv` - Compose TV UI (home rails, details, streams,
+  search, settings, phone pairing).
+- `com.stremioshell.host.tv.player` - libmpv player activity (track selection,
+  refresh-rate matching, up-next).
+- `com.stremioshell.host.update` - GitHub-release self-updater (`-tv-` named
+  APK asset) plus the background update worker.
 
 ## Build and run
 
@@ -45,25 +26,19 @@ Prerequisites:
 
 - Android SDK installed and `ANDROID_HOME` set.
 - JDK 17 installed and active (`java -version` should report 17).
-- Web shell built (`apps/web/dist`).
-
-Build steps:
 
 ```bash
 # 0) Set up JDK 17 / Android SDK paths (Linux/macOS)
 source scripts/android-env.sh
 
-# 1) Build web assets used by Android release/debug fallback
-pnpm --filter @stremio-shell/web build
-
-# 2) Build Android TV variant
+# 1) Build
 cd apps/android-tv-host
 ./gradlew :app:assembleDebug
-./gradlew :app:assembleDebug -PwebAppUrl=http://10.0.2.2:5173
 ```
 
 On Windows use `.\gradlew.bat` instead, or run `pnpm android:tv:assemble` from
-the repo root on any platform.
+the repo root on any platform. No Node/pnpm step is needed: the Android build
+no longer consumes any JS bundle.
 
 Install to connected device/emulator:
 
@@ -75,11 +50,14 @@ Install to connected device/emulator:
 
 The app is Android TV-only (single variant, no flavors): the manifest requires
 leanback, marks touchscreen as not required, and registers the Leanback
-launcher alias with the TV banner.
+launcher alias with the TV banner. The alias
+(`com.stremioshell.host.TvLauncherActivity`) has to keep its name so updates do
+not drop the app off TV home screens.
 
-## Generated assets
+## ABIs
 
-Gradle packages web and core runtime assets from
-`app/build/generated/assets/main`. The source path
-`app/src/main/assets/web` is ignored and should remain uncommitted so stale
-hashed web bundles do not accumulate in release APKs.
+Release packages `arm64-v8a` + `armeabi-v7a` only - no TV device is x86, and
+libmpv's native libs are the bulk of the APK. Debug adds `x86_64` for the dev
+emulator. Deliberately one universal APK rather than ABI splits: the release
+workflow publishes a single `StremioShell-tv-<version>.apk` and the in-app
+updater selects the release asset by that name.

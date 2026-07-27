@@ -1,43 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
   <string name="app_name">Stremio Shell</string>
-  <string name="export_diagnostics_title">Export diagnostics</string>
-  <string name="startup_loading_title">Loading Stremio Shell</string>
-  <string name="startup_loading_message">Initializing web runtime and host bridge...</string>
-  <string name="startup_retry">Retry</string>
-  <string name="startup_timeout_title">Startup took too long</string>
-  <string name="startup_timeout_message">The shell did not render in time. You can retry or export diagnostics.</string>
-  <string name="startup_error_title">Startup failed</string>
-  <string name="startup_error_message">Could not load the shell UI. Falling back to bundled assets.</string>
-  <string name="playback_options_title">Playback options</string>
-  <string name="playback_option_audio_tracks">Audio tracks</string>
-  <string name="playback_option_subtitles">Subtitles</string>
-  <string name="playback_option_speed">Playback speed</string>
-  <string name="playback_option_video_mode">Video mode: %1$s</string>
-  <string name="playback_speed_title">Playback speed</string>
-  <string name="playback_video_mode_title">Video mode</string>
-  <string name="playback_mode_fit">Fit</string>
-  <string name="playback_mode_fill">Fill</string>
-  <string name="playback_mode_zoom">Zoom</string>
-  <string name="playback_audio_title">Audio tracks</string>
-  <string name="playback_subtitles_title">Subtitles</string>
-  <string name="playback_no_audio_tracks">No audio tracks available for this stream.</string>
-  <string name="playback_no_subtitles">No subtitles available for this stream.</string>
-  <string name="playback_video_mode_changed">Video mode updated</string>
-  <string name="check_updates_in_progress">Checking for updates...</string>
-  <string name="check_updates_none">You are on the latest version.</string>
-  <string name="check_updates_unavailable_debug">Update checks are disabled in debug builds.</string>
-  <string name="check_updates_failed">Could not check for updates right now.</string>
-  <string name="update_available_title">Update available: %1$s</string>
-  <string name="update_download_button">Download</string>
-  <string name="update_view_release_button">View release</string>
-  <string name="update_install_button">Install</string>
-  <string name="update_enable_installs_button">Enable installs</string>
-  <string name="update_later_button">Later</string>
-  <string name="update_download_started">Downloading Stremio Shell %1$s in the background.</string>
-  <string name="update_download_failed">Update download failed. Please try again.</string>
-  <string name="update_download_ready_title">Update downloaded</string>
-  <string name="update_download_ready_message">Stremio Shell %1$s is ready to install.</string>
-  <string name="update_enable_installs_message">To install this update, Android needs one-time permission to install apps from Stremio Shell.</string>
   <string name="update_install_failed">Could not open installer. Please re-download the update.</string>
 </resources>

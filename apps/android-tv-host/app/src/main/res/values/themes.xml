@@ -1,13 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-  <style name="Theme.StremioShell" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-    <item name="colorPrimary">@color/stremio_green</item>
-    <item name="colorOnPrimary">@android:color/white</item>
+  <!-- Platform theme, not MaterialComponents/AppCompat: every activity is a
+       ComponentActivity rendering Compose, so the only thing the XML theme has
+       to get right is a black window background (no white flash before the
+       first frame). Colors live in tv/ui/theme/Theme.kt. -->
+  <style name="Theme.StremioShell" parent="@android:style/Theme.Material.NoActionBar">
     <item name="android:windowBackground">@android:color/black</item>
   </style>
 
-  <style name="Theme.StremioShell.NoActionBar" parent="Theme.StremioShell">
-    <item name="windowNoTitle">true</item>
-    <item name="windowActionBar">false</item>
-  </style>
+  <style name="Theme.StremioShell.NoActionBar" parent="Theme.StremioShell" />
 </resources>

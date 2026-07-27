@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-  <color name="stremio_green">#1F7A63</color>
+  <!-- Only the launcher icon background needs an XML color; the in-app palette
+       is Compose-side in tv/ui/theme/Theme.kt. -->
   <color name="stremio_green_dark">#102321</color>
-  <color name="stremio_focus">#F7B500</color>
 </resources>

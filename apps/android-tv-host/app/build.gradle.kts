@@ -1,6 +1,3 @@
-import org.gradle.api.GradleException
-import org.gradle.api.tasks.Sync
-
 plugins {
   id("com.android.application")
   id("org.jetbrains.kotlin.android")
@@ -21,10 +18,6 @@ val ssHasSigning = !ssSigningStoreFile.isNullOrBlank() &&
   !ssSigningKeyAlias.isNullOrBlank() &&
   !ssSigningKeyPassword.isNullOrBlank()
 
-val debugWebAppUrl = (project.findProperty("webAppUrl") as String?)
-  ?.trim()
-  .orEmpty()
-  .ifBlank { "" }
 val githubReleaseOwner = (project.findProperty("githubReleaseOwner") as String?)
   ?.trim()
   .orEmpty()
@@ -33,12 +26,6 @@ val githubReleaseRepo = (project.findProperty("githubReleaseRepo") as String?)
   ?.trim()
   .orEmpty()
   .ifBlank { "stremio-shell-tv" }
-
-val webDistDir = rootDir.resolve("../web/dist")
-val coreRuntimeDistDir = rootDir.resolve("core-runtime-dist")
-val generatedMainAssetsDir = project.layout.buildDirectory.dir("generated/assets/main")
-val webAssetsDir = generatedMainAssetsDir.map { it.dir("web") }
-val coreRuntimeAssetsDir = generatedMainAssetsDir.map { it.dir("core-runtime") }
 
 android {
   namespace = "com.stremioshell.host"
@@ -76,11 +63,22 @@ android {
 
   buildTypes {
     debug {
-      buildConfigField("String", "WEB_APP_URL", "\"$debugWebAppUrl\"")
-      buildConfigField("String", "WEB_REMOTE_FALLBACK_URL", "\"https://web.stremio.com/\"")
+      // The dev/CI emulators are x86_64 (and libmpv ships no 32-bit x86 that a
+      // TV emulator image would ever load), so debug keeps x86_64 on top of the
+      // shipping ABIs.
+      ndk {
+        abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+      }
       manifestPlaceholders["usesCleartextTraffic"] = "true"
     }
     release {
+      // No Android TV device is x86; shipping those ABIs doubled the APK for
+      // nothing. Single universal APK on purpose - the release workflow picks
+      // one file out of outputs/apk/release and the in-app updater matches a
+      // single "-tv-" named asset, both of which ABI splits would break.
+      ndk {
+        abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+      }
       isMinifyEnabled = false
       proguardFiles(
         getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -89,8 +87,6 @@ android {
       if (ssHasSigning) {
         signingConfig = signingConfigs.getByName("release")
       }
-      buildConfigField("String", "WEB_APP_URL", "\"\"")
-      buildConfigField("String", "WEB_REMOTE_FALLBACK_URL", "\"https://web.stremio.com/\"")
       manifestPlaceholders["usesCleartextTraffic"] = "false"
     }
   }
@@ -112,77 +108,17 @@ android {
   composeOptions {
     kotlinCompilerExtensionVersion = "1.5.14"
   }
-
-  sourceSets {
-    getByName("main") {
-      assets.srcDir(generatedMainAssetsDir)
-    }
-  }
 }
 
 kotlin {
   jvmToolchain(17)
 }
 
-val syncWebAssets by tasks.registering(Sync::class) {
-  group = "build setup"
-  description = "Sync built web shell assets from apps/web/dist into Android assets."
-
-  from(webDistDir)
-  into(webAssetsDir)
-
-  doFirst {
-    if (!webDistDir.exists()) {
-      throw GradleException(
-        "Missing web bundle at ${webDistDir.absolutePath}. Run `pnpm --filter @stremio-shell/web build` first."
-      )
-    }
-  }
-}
-
-val syncCoreRuntimeAssets by tasks.registering(Sync::class) {
-  group = "build setup"
-  description = "Sync bundled core runtime JS into Android assets."
-
-  from(coreRuntimeDistDir)
-  into(coreRuntimeAssetsDir)
-
-  doFirst {
-    if (!coreRuntimeDistDir.exists()) {
-      throw GradleException(
-        "Missing core runtime bundle at ${coreRuntimeDistDir.absolutePath}. Expected runtime.js in this directory."
-      )
-    }
-  }
-}
-
-tasks.matching { task ->
-  task.name.startsWith("merge") && task.name.endsWith("Assets")
-}.configureEach {
-  dependsOn(syncWebAssets)
-  dependsOn(syncCoreRuntimeAssets)
-}
-
-tasks.matching { task ->
-  task.name.contains("LintVital", ignoreCase = true)
-}.configureEach {
-  dependsOn(syncWebAssets)
-  dependsOn(syncCoreRuntimeAssets)
-}
-
 dependencies {
   implementation("androidx.core:core-ktx:1.13.1")
-  implementation("androidx.appcompat:appcompat:1.7.0")
-  implementation("com.google.android.material:material:1.12.0")
-  implementation("androidx.webkit:webkit:1.11.0")
   implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.5")
   implementation("androidx.work:work-runtime-ktx:2.9.1")
   implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-
-  implementation("androidx.javascriptengine:javascriptengine:1.0.0")
-
-  implementation("androidx.media3:media3-exoplayer:1.4.1")
-  implementation("androidx.media3:media3-ui:1.4.1")
 
   // Native Compose TV app (Comet + Real-Debrid path)
   implementation(platform("androidx.compose:compose-bom:2024.09.00"))

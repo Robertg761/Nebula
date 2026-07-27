@@ -25,14 +25,7 @@
     android:supportsRtl="true"
     android:theme="@style/Theme.StremioShell"
     android:usesCleartextTraffic="${usesCleartextTraffic}">
-    <activity
-      android:name=".PlayerActivity"
-      android:exported="false"
-      android:theme="@style/Theme.StremioShell.NoActionBar" />
-
-    <!-- Native Compose TV app; becomes the launcher target once it reaches
-         parity with the WebView shell for the Comet/Real-Debrid flow.
-         Handles its own config changes for the same reason MpvPlayerActivity
+    <!-- Handles its own config changes for the same reason MpvPlayerActivity
          does: the player's refresh-rate matching can switch display mode
          mid-playback, and HDR10 content flips the panel into HDR/wide-gamut
          mode (colorMode), either of which otherwise recreates this activity
@@ -63,25 +56,9 @@
       android:supportsPictureInPicture="false"
       android:theme="@style/Theme.StremioShell.NoActionBar" />
 
-    <activity
-      android:name=".MainActivity"
-      android:exported="true"
-      android:launchMode="singleTask"
-      android:theme="@style/Theme.StremioShell.NoActionBar">
-      <intent-filter>
-        <action android:name="android.intent.action.VIEW" />
-
-        <category android:name="android.intent.category.DEFAULT" />
-        <category android:name="android.intent.category.BROWSABLE" />
-
-        <data android:scheme="stremio-shell" />
-      </intent-filter>
-    </activity>
-
     <!-- Keeps the historical launcher component name from the tv flavor so
          updates do not drop the app from TV home screens. Points at the
-         native Compose app since 0.3.0; the WebView MainActivity remains
-         intent-reachable as a fallback for one release. -->
+         native Compose app since 0.3.0. -->
     <activity-alias
       android:name=".TvLauncherActivity"
       android:enabled="true"
