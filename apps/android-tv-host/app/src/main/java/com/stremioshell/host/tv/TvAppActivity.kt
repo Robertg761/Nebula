@@ -11,7 +11,9 @@ import com.stremioshell.host.tv.data.WatchStateStore
 import com.stremioshell.host.tv.player.MpvPlayerActivity
 import com.stremioshell.host.tv.ui.StreamLauncher
 import com.stremioshell.host.tv.ui.TvApp
+import com.stremioshell.host.tv.ui.UpdatePromptHost
 import com.stremioshell.host.tv.ui.theme.StremioTvTheme
+import com.stremioshell.host.update.UpdateWorkScheduler
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.launch
 
@@ -32,6 +34,9 @@ class TvAppActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     val watchStore = WatchStateStore(applicationContext)
+    // The native app is the launcher target, so it owns update scheduling now;
+    // the WebView shell may never be opened again on a fresh install.
+    UpdateWorkScheduler.ensureScheduled(this)
 
     if (BuildConfig.DEBUG) {
       // Debug-only: allow test automation to inject settings via intent extras.
@@ -66,6 +71,7 @@ class TvAppActivity : ComponentActivity() {
             }
           }
         )
+        UpdatePromptHost()
       }
     }
   }

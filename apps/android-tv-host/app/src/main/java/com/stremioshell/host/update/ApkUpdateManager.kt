@@ -42,8 +42,9 @@ class ApkUpdateManager(
       .setDescription("Downloading Stremio Shell ${info.latestVersionName}")
       .setMimeType("application/vnd.android.package-archive")
       .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-      .setAllowedOverMetered(true)
-      .setAllowedOverRoaming(true)
+      // The release APK is ~117 MB; never burn a tethered or roaming connection on it.
+      .setAllowedOverMetered(false)
+      .setAllowedOverRoaming(false)
       .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, fileName)
 
     val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
@@ -54,6 +55,7 @@ class ApkUpdateManager(
       .putLong(KEY_DOWNLOAD_ID, downloadId)
       .putString(KEY_APK_PATH, file.absolutePath)
       .putString(KEY_DOWNLOADED_VERSION_NAME, normalizeVersionName(info.latestVersionName))
+      .putLong(KEY_EXPECTED_SIZE_BYTES, info.apkSizeBytes ?: 0L)
       .apply()
 
     return downloadId
@@ -122,7 +124,31 @@ class ApkUpdateManager(
   fun hasDownloadedApk(context: Context): Boolean {
     val apkFile = getDownloadedApkFile(context) ?: return false
     val query = queryDownload(context) ?: return false
-    return query.status == DownloadManager.STATUS_SUCCESSFUL && apkFile.exists()
+    if (query.status != DownloadManager.STATUS_SUCCESSFUL || !apkFile.exists()) {
+      return false
+    }
+
+    val verdict = verifyDownloadedApk(context)
+    if (!DownloadIntegrityPolicy.isInstallable(verdict)) {
+      // A truncated APK would only fail at the installer, after the user has
+      // committed to the update; drop it so the next check re-downloads.
+      clearDownloadedState(context, deleteApk = true)
+      return false
+    }
+    return true
+  }
+
+  fun getExpectedApkSizeBytes(context: Context): Long? {
+    return prefs(context).getLong(KEY_EXPECTED_SIZE_BYTES, 0L).takeIf { it > 0L }
+  }
+
+  fun verifyDownloadedApk(context: Context): DownloadIntegrityPolicy.Verdict {
+    val apkFile = getDownloadedApkFile(context)
+    val actualSize = apkFile?.takeIf { it.exists() }?.length()
+    return DownloadIntegrityPolicy.verify(
+      expectedSizeBytes = getExpectedApkSizeBytes(context),
+      actualSizeBytes = actualSize
+    )
   }
 
   fun hasDownloadedApkForVersion(context: Context, versionName: String): Boolean {
@@ -188,6 +214,7 @@ class ApkUpdateManager(
       .remove(KEY_DOWNLOAD_ID)
       .remove(KEY_APK_PATH)
       .remove(KEY_DOWNLOADED_VERSION_NAME)
+      .remove(KEY_EXPECTED_SIZE_BYTES)
       .apply()
   }
 
@@ -197,6 +224,12 @@ class ApkUpdateManager(
       return null
     }
     if (needsUnknownSourcesPermission(context)) {
+      return null
+    }
+    if (!DownloadIntegrityPolicy.isInstallable(verifyDownloadedApk(context))) {
+      // Last gate before the installer: a short file here is a guaranteed
+      // "app not installed" dialog, so bin it and let the next check retry.
+      clearDownloadedState(context, deleteApk = true)
       return null
     }
 
@@ -213,6 +246,7 @@ class ApkUpdateManager(
     private const val KEY_DOWNLOAD_ID = "download_id"
     private const val KEY_APK_PATH = "apk_path"
     private const val KEY_DOWNLOADED_VERSION_NAME = "downloaded_version_name"
+    private const val KEY_EXPECTED_SIZE_BYTES = "expected_size_bytes"
 
     internal fun isNewerVersion(downloadedVersionName: String, currentVersionName: String): Boolean {
       val downloaded = normalizeVersionName(downloadedVersionName)
