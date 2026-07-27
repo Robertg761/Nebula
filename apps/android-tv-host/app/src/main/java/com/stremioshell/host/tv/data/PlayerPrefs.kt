@@ -32,6 +32,12 @@ data class PlayerPrefs(
   val subtitleLanguage: String = "",
   /** A [com.stremioshell.host.tv.player.SubtitleSize] storage name; blank means the default. */
   val subtitleSize: String = "",
+  /**
+   * A [com.stremioshell.host.tv.player.AudioOutputMode] storage name; blank means
+   * the default. Stored because it describes the room's amplifier rather than the
+   * film: a viewer who has an AVR has it for every film they watch.
+   */
+  val audioOutput: String = "",
 )
 
 /** Reads and writes the player's cross-file preferences. */
@@ -57,15 +63,21 @@ class PlayerPrefsStore(private val context: Context) {
     context.playerPrefsDataStore.edit { it[KEY_SUB_SIZE] = storageName.trim() }
   }
 
+  suspend fun setAudioOutput(storageName: String) {
+    context.playerPrefsDataStore.edit { it[KEY_AUDIO_OUTPUT] = storageName.trim() }
+  }
+
   private fun read(prefs: Preferences) = PlayerPrefs(
     audioLanguage = prefs[KEY_AUDIO_LANG].orEmpty(),
     subtitleLanguage = prefs[KEY_SUB_LANG].orEmpty(),
     subtitleSize = prefs[KEY_SUB_SIZE].orEmpty(),
+    audioOutput = prefs[KEY_AUDIO_OUTPUT].orEmpty(),
   )
 
   private companion object {
     val KEY_AUDIO_LANG = stringPreferencesKey("player_audio_language")
     val KEY_SUB_LANG = stringPreferencesKey("player_subtitle_language")
     val KEY_SUB_SIZE = stringPreferencesKey("player_subtitle_size")
+    val KEY_AUDIO_OUTPUT = stringPreferencesKey("player_audio_output")
   }
 }

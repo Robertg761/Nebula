@@ -36,10 +36,10 @@ class MpvTracksTest {
   }
 
   @Test
-  fun `video tracks are offered as neither audio nor subtitle`() {
+  fun `video tracks are read but offered as neither audio nor subtitle`() {
     val tracks = MpvTracks.parse(remuxTrackList)
 
-    assertEquals(TrackKind.Other, tracks.first().kind)
+    assertEquals(TrackKind.Video, tracks.first().kind)
     assertEquals(2, MpvTracks.audioRows(tracks).size)
     // Off plus the three subtitle tracks, and nothing from the video track.
     assertEquals(4, MpvTracks.subtitleRows(tracks).size)
@@ -168,5 +168,94 @@ class MpvTracksTest {
   @Test
   fun `a whole frame rate has no trailing zeroes`() {
     assertTrue(MpvTracks.osdLine(emptyList(), 25f).endsWith("25 fps"))
+  }
+
+  @Test
+  fun `an ordinary HEVC remux is not Dolby Vision`() {
+    assertFalse(MpvTracks.isDolbyVision(MpvTracks.parse(remuxTrackList)))
+  }
+
+  @Test
+  fun `the dolby-vision-profile field is taken at its word`() {
+    val tracks = MpvTracks.parse(
+      """[{"id":1,"type":"video","selected":true,"codec":"hevc","dolby-vision-profile":5}]""",
+    )
+
+    assertTrue(MpvTracks.isDolbyVision(tracks))
+    assertEquals(5, tracks.first().dolbyVisionProfile)
+  }
+
+  @Test
+  fun `a zero or absent dolby-vision-profile is not a profile`() {
+    val tracks = MpvTracks.parse(
+      """[{"id":1,"type":"video","selected":true,"codec":"hevc","dolby-vision-profile":0}]""",
+    )
+
+    assertNull(tracks.first().dolbyVisionProfile)
+    assertFalse(MpvTracks.isDolbyVision(tracks))
+  }
+
+  @Test
+  fun `the DV codec tags are recognised on builds with no dedicated field`() {
+    listOf("dvhe", "dvh1", "dav1").forEach { tag ->
+      val tracks = MpvTracks.parse("""[{"id":1,"type":"video","selected":true,"codec":"$tag"}]""")
+      assertTrue(tag, MpvTracks.isDolbyVision(tracks))
+    }
+  }
+
+  @Test
+  fun `a DV profile string is enough on its own`() {
+    val tracks = MpvTracks.parse(
+      """[{"id":1,"type":"video","selected":true,"codec":"hevc","codec-profile":"dvhe.05.06"}]""",
+    )
+
+    assertTrue(MpvTracks.isDolbyVision(tracks))
+  }
+
+  @Test
+  fun `the DV camcorder codec is not Dolby Vision`() {
+    // "dvvideo" contains "dv", and a home video has nothing to warn about.
+    val tracks = MpvTracks.parse("""[{"id":1,"type":"video","selected":true,"codec":"dvvideo"}]""")
+
+    assertFalse(MpvTracks.isDolbyVision(tracks))
+  }
+
+  @Test
+  fun `dv as a word of its own counts`() {
+    val tracks = MpvTracks.parse(
+      """[{"id":1,"type":"video","selected":true,"codec":"hevc","codec-profile":"Main 10 DV"}]""",
+    )
+
+    assertTrue(MpvTracks.isDolbyVision(tracks))
+  }
+
+  @Test
+  fun `a Dolby Vision audio track says nothing about the picture`() {
+    // Dolby Digital audio next to plain HEVC video: the warning is about what the
+    // panel has to render, so only the video track may raise it.
+    val tracks = MpvTracks.parse(
+      """
+      [
+        {"id":1,"type":"video","selected":true,"codec":"hevc"},
+        {"id":1,"type":"audio","selected":true,"codec":"dvhe"}
+      ]
+      """.trimIndent(),
+    )
+
+    assertFalse(MpvTracks.isDolbyVision(tracks))
+  }
+
+  @Test
+  fun `the video track falls back to the first when nothing is flagged selected`() {
+    val tracks = MpvTracks.parse("""[{"id":1,"type":"video","codec":"dvh1"}]""")
+
+    assertEquals(1, MpvTracks.selectedVideo(tracks)?.id)
+    assertTrue(MpvTracks.isDolbyVision(tracks))
+  }
+
+  @Test
+  fun `a file with no video track is not Dolby Vision`() {
+    assertNull(MpvTracks.selectedVideo(emptyList()))
+    assertFalse(MpvTracks.isDolbyVision(emptyList()))
   }
 }

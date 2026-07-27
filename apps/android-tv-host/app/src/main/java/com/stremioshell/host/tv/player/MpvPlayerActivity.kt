@@ -303,8 +303,17 @@ class MpvPlayerActivity : ComponentActivity() {
   private val menuVisible = mutableStateOf(false)
   private val menuTab = mutableStateOf(PlayerMenuTab.Audio)
   private val subtitleSize = mutableStateOf(SubtitleSize.DEFAULT)
+  private val audioOutput = mutableStateOf(AudioOutputMode.DEFAULT)
   private val audioDelaySec = mutableDoubleStateOf(0.0)
   private val subtitleDelaySec = mutableDoubleStateOf(0.0)
+
+  /**
+   * Whether this file's Dolby Vision notice has been shown. Per file, and reset in
+   * [startNextEpisode] with the rest of the per-file state: the track list is read
+   * again on every track pick, and repeating the notice each time would turn one
+   * piece of information into nagging.
+   */
+  private var dolbyVisionWarned = false
 
   /**
    * What a subtitles addon has for the playing file, and whether it has been asked
@@ -738,8 +747,8 @@ class MpvPlayerActivity : ComponentActivity() {
   }.getOrDefault(0L)
 
   /**
-   * Reads the stored audio/subtitle languages and subtitle size, and hands them
-   * to mpv before the file is opened.
+   * Reads the stored audio/subtitle languages, subtitle size and audio output
+   * mode, and hands them to mpv before the file is opened.
    *
    * The read is asynchronous and `loadfile` cannot run ahead of it — mpv reads
    * `alang`/`slang` when it opens a file, so applying them afterwards would do
@@ -760,6 +769,8 @@ class MpvPlayerActivity : ComponentActivity() {
     playerPrefs = prefs
     val size = SubtitleSize.fromStorage(prefs.subtitleSize)
     subtitleSize.value = size
+    val output = AudioOutputMode.fromStorage(prefs.audioOutput)
+    audioOutput.value = output
     if (mpvCreated && !finishing) {
       // Options are properties once mpv is initialised, and these are read at
       // file open, so setting them here still lands ahead of `loadfile`.
@@ -775,6 +786,10 @@ class MpvPlayerActivity : ComponentActivity() {
         MPVLib.setPropertyString("sid", "no")
       }
       MPVLib.setPropertyString("sub-font-size", size.fontSize.toString())
+      // Read when mpv builds the audio chain, which is at file open — so like
+      // `alang` this only lands because the gate below holds `loadfile` back
+      // until it has. A mid-file change needs [reselectAudioTrack] instead.
+      applyAudioOutput(output)
     }
     if (prefsApplied) return
     prefsApplied = true
@@ -1123,6 +1138,9 @@ class MpvPlayerActivity : ComponentActivity() {
     tracks.value = emptyList()
     trackInfo.value = ""
     osdMessage.value = ""
+    // Per file, like the track list it is derived from: the next episode may be a
+    // different release, and it gets its own single chance to say so.
+    dolbyVisionWarned = false
     // External subtitles are per file: `loadfile ... replace` drops the tracks mpv
     // had fetched, and the previous episode's list is the wrong list to offer for
     // this one anyway.
@@ -1254,6 +1272,7 @@ class MpvPlayerActivity : ComponentActivity() {
       subtitleRows = MpvTracks.subtitleRows(tracks.value),
       speed = playbackSpeed.doubleValue,
       subtitleSize = subtitleSize.value,
+      audioOutput = audioOutput.value,
       audioDelaySec = audioDelaySec.doubleValue,
       subtitleDelaySec = subtitleDelaySec.doubleValue,
       externalSubtitles = externalSubtitles.value,
@@ -1265,6 +1284,7 @@ class MpvPlayerActivity : ComponentActivity() {
         onSelectSubtitle = ::selectSubtitleTrack,
         onSpeedStep = ::stepPlaybackSpeed,
         onSubtitleSizeStep = ::stepSubtitleSize,
+        onAudioOutputStep = ::stepAudioOutput,
         onAudioDelayStep = ::stepAudioDelay,
         onSubtitleDelayStep = ::stepSubtitleDelay,
         onFetchExternalSubtitles = ::fetchExternalSubtitles,
@@ -1921,6 +1941,7 @@ class MpvPlayerActivity : ComponentActivity() {
   private fun applyTracks(parsed: List<MpvTrack>) {
     tracks.value = parsed
     trackInfo.value = MpvTracks.osdLine(parsed, contentFps)
+    maybeWarnDolbyVision(parsed)
     // Only ever set by the audio-cycle key, so this cannot learn a preference
     // from the track mpv chose on its own at file open.
     if (audioCyclePending) {
@@ -1930,6 +1951,46 @@ class MpvPlayerActivity : ComponentActivity() {
       }
     }
   }
+
+  /**
+   * Says once, per file, that a Dolby Vision stream is playing on a screen that
+   * cannot render it. See [DolbyVisionNotice] for why this is a line in the OSD
+   * and not something that stops playback.
+   */
+  private fun maybeWarnDolbyVision(parsed: List<MpvTrack>) {
+    val warn = DolbyVisionNotice.shouldWarn(
+      isDolbyVision = MpvTracks.isDolbyVision(parsed),
+      display = displayHdrSupport(),
+      alreadyWarned = dolbyVisionWarned,
+    )
+    if (!warn) return
+    dolbyVisionWarned = true
+    showOsdMessage(DolbyVisionNotice.MESSAGE)
+  }
+
+  /**
+   * What the panel on the other end of the cable says it can take. A query that
+   * throws or reports nothing at all is [DisplayHdrSupport.Unknown], not "no": TV
+   * boxes vary in what they answer here, and a wrong "no" would warn about every
+   * DV stream on hardware that plays them properly.
+   */
+  private fun displayHdrSupport(): DisplayHdrSupport = runCatching {
+    val display = currentDisplay() ?: return DisplayHdrSupport.Unknown
+    val types = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+      // getHdrCapabilities is deprecated from 34 and can report the display's
+      // full set rather than the current mode's; the mode is what is on air.
+      display.mode.supportedHdrTypes
+    } else {
+      @Suppress("DEPRECATION")
+      display.hdrCapabilities?.supportedHdrTypes
+    }
+    if (types == null) return DisplayHdrSupport.Unknown
+    if (types.any { it == Display.HdrCapabilities.HDR_TYPE_DOLBY_VISION }) {
+      DisplayHdrSupport.DolbyVision
+    } else {
+      DisplayHdrSupport.NoDolbyVision
+    }
+  }.getOrDefault(DisplayHdrSupport.Unknown)
 
   /** The quick audio cycle, for remotes with a dedicated audio-track key. */
   private fun cycleAudioTrack() {
@@ -2132,6 +2193,47 @@ class MpvPlayerActivity : ComponentActivity() {
     playerPrefs = playerPrefs.copy(subtitleSize = next.storageName)
     val store = playerPrefsStore
     persistenceScope.launch { runCatching { store.setSubtitleSize(next.storageName) } }
+  }
+
+  /**
+   * Switches between decoding here and handing the bitstream to the sink, and
+   * remembers the choice: an AVR is a property of the room, not of the film.
+   */
+  private fun stepAudioOutput(steps: Int) {
+    if (!mpvCreated) return
+    val next = AudioOutputMode.stepped(audioOutput.value, steps)
+    if (next == audioOutput.value) return
+    audioOutput.value = next
+    applyAudioOutput(next)
+    reselectAudioTrack()
+    playerPrefs = playerPrefs.copy(audioOutput = next.storageName)
+    val store = playerPrefsStore
+    persistenceScope.launch { runCatching { store.setAudioOutput(next.storageName) } }
+    // The same confirmation a subtitle add gets, and for the same reason: what
+    // changed is off screen, and passthrough's failure mode is silence.
+    showOsdMessage(next.osdMessage)
+  }
+
+  private fun applyAudioOutput(mode: AudioOutputMode) {
+    MPVLib.setPropertyString("audio-spdif", mode.spdifCodecs)
+  }
+
+  /**
+   * Makes a mid-file `audio-spdif` change take effect. mpv reads the option when
+   * it builds the audio chain, so without this the switch would sit there doing
+   * nothing until the next episode.
+   *
+   * Off and back on rather than a write of the current id: mpv's track-switch
+   * handler returns early when the requested track is the one already playing, so
+   * the obvious nudge is the one thing that does not work. The cost is a fraction
+   * of a second of silence while the AO is reopened — and if the sink will not
+   * take the bitstream, that silence is permanent until Decode is chosen again,
+   * which is what the OSD line and the menu's footnote are for.
+   */
+  private fun reselectAudioTrack() {
+    val aid = MpvTracks.selected(tracks.value, TrackKind.Audio)?.id ?: return
+    MPVLib.setPropertyString("aid", "no")
+    MPVLib.setPropertyString("aid", aid.toString())
   }
 
   private fun stepAudioDelay(steps: Int) {

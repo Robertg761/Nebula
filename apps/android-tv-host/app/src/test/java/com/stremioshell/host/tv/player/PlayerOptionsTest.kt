@@ -1,6 +1,7 @@
 package com.stremioshell.host.tv.player
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PlayerOptionsTest {
@@ -62,6 +63,54 @@ class PlayerOptionsTest {
     assertEquals(SubtitleSize.Small, SubtitleSize.stepped(SubtitleSize.Medium, -1))
     assertEquals(SubtitleSize.Huge, SubtitleSize.stepped(SubtitleSize.Huge, 1))
     assertEquals(SubtitleSize.Small, SubtitleSize.stepped(SubtitleSize.Small, -1))
+  }
+
+  @Test
+  fun `decode is the default, so nobody gets silence out of the box`() {
+    assertEquals(AudioOutputMode.Decode, AudioOutputMode.DEFAULT)
+    assertEquals("", AudioOutputMode.Decode.spdifCodecs)
+  }
+
+  @Test
+  fun `passthrough hands over the formats a receiver decodes`() {
+    assertEquals("ac3,eac3,dts,dts-hd,truehd", AudioOutputMode.Passthrough.spdifCodecs)
+  }
+
+  @Test
+  fun `audio output round-trips through storage`() {
+    AudioOutputMode.entries.forEach { mode ->
+      assertEquals(mode, AudioOutputMode.fromStorage(mode.storageName))
+    }
+  }
+
+  @Test
+  fun `an unset or unrecognised stored audio output falls back to decode`() {
+    assertEquals(AudioOutputMode.DEFAULT, AudioOutputMode.fromStorage(null))
+    assertEquals(AudioOutputMode.DEFAULT, AudioOutputMode.fromStorage(""))
+    assertEquals(AudioOutputMode.DEFAULT, AudioOutputMode.fromStorage("spdif"))
+    assertEquals(AudioOutputMode.Passthrough, AudioOutputMode.fromStorage(" PASSTHROUGH "))
+  }
+
+  @Test
+  fun `audio output steps and holds at either end`() {
+    assertEquals(
+      AudioOutputMode.Passthrough,
+      AudioOutputMode.stepped(AudioOutputMode.Decode, 1),
+    )
+    assertEquals(
+      AudioOutputMode.Decode,
+      AudioOutputMode.stepped(AudioOutputMode.Passthrough, -1),
+    )
+    assertEquals(
+      AudioOutputMode.Passthrough,
+      AudioOutputMode.stepped(AudioOutputMode.Passthrough, 3),
+    )
+    assertEquals(AudioOutputMode.Decode, AudioOutputMode.stepped(AudioOutputMode.Decode, -3))
+  }
+
+  @Test
+  fun `the passthrough confirmation names the way back out of silence`() {
+    assertTrue(AudioOutputMode.Passthrough.osdMessage.contains("Decode"))
   }
 
   @Test

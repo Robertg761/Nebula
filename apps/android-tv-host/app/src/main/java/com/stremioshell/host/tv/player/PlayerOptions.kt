@@ -86,6 +86,60 @@ enum class SubtitleSize(val storageName: String, val label: String, val fontSize
 }
 
 /**
+ * Where the soundtrack is decoded: here, or by whatever is on the other end of
+ * the HDMI cable.
+ *
+ * [Decode] is mpv doing the work and handing the sink PCM, which every TV,
+ * soundbar and pair of headphones can take — and which is why it is the default.
+ * [Passthrough] hands the compressed bitstream over untouched, so an AVR gets to
+ * apply its own decoding: the only way a 5.1 or Atmos mix reaches a receiver
+ * intact rather than as the stereo downmix mpv's own mixer produces for it.
+ *
+ * The codec list is deliberately only the formats a receiver plausibly decodes
+ * and mpv's `ao=audiotrack` can hand over; anything else stays decoded here,
+ * because a format the sink cannot take is silence rather than a fallback a
+ * viewer would recognise as one.
+ */
+enum class AudioOutputMode(
+  val storageName: String,
+  val label: String,
+  /** The value for mpv's `audio-spdif`; empty is "decode everything". */
+  val spdifCodecs: String,
+) {
+  Decode("decode", "Decode", ""),
+  Passthrough("passthrough", "Passthrough", "ac3,eac3,dts,dts-hd,truehd"),
+  ;
+
+  /**
+   * The OSD line for a mid-film switch. Passthrough's names the failure it can
+   * cause: a sink that will not take the bitstream plays nothing at all, and
+   * silence with no explanation reads as a broken player rather than as a setting
+   * to put back.
+   */
+  val osdMessage: String
+    get() = when (this) {
+      Decode -> "Audio output: Decode"
+      Passthrough -> "Audio output: Passthrough - switch back to Decode if it goes silent"
+    }
+
+  companion object {
+    val DEFAULT = Decode
+
+    /** The stored name, falling back to [DEFAULT] for anything unrecognised. */
+    fun fromStorage(name: String?): AudioOutputMode {
+      val key = name?.trim()?.lowercase(Locale.ROOT).orEmpty()
+      return entries.firstOrNull { it.storageName == key } ?: DEFAULT
+    }
+
+    /** [steps] places along the list, stopping at either end, as [SubtitleSize]. */
+    fun stepped(current: AudioOutputMode, steps: Int): AudioOutputMode {
+      val index = (current.ordinal + steps).coerceIn(0, entries.lastIndex)
+      return entries[index]
+    }
+  }
+}
+
+/**
  * Audio and subtitle delay stepping, for the lip-sync drift a Bluetooth speaker
  * or a soundbar's own processing introduces.
  *

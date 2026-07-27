@@ -3,10 +3,16 @@ package com.stremioshell.host.tv.player
 import org.json.JSONArray
 import java.util.Locale
 
-/** The track kinds the player offers a choice of; everything else is [Other]. */
+/**
+ * [Audio] and [Subtitle] are the kinds the player offers a choice of. [Video] is
+ * kept apart from [Other] not to be offered — a file's video track is not a
+ * decision a viewer makes — but because what it is encoded as decides whether the
+ * picture will look right on this screen; see [DolbyVisionNotice].
+ */
 enum class TrackKind {
   Audio,
   Subtitle,
+  Video,
   Other,
   ;
 
@@ -14,6 +20,7 @@ enum class TrackKind {
     fun fromMpv(type: String?): TrackKind = when (type) {
       "audio" -> Audio
       "sub" -> Subtitle
+      "video" -> Video
       else -> Other
     }
   }
@@ -30,6 +37,16 @@ data class MpvTrack(
   val lang: String = "",
   val title: String = "",
   val codec: String = "",
+  /**
+   * mpv's `codec-profile`, which is where a Dolby Vision stream names itself on
+   * builds whose track list carries no dedicated field ("dvhe.05.06").
+   */
+  val codecProfile: String = "",
+  /**
+   * mpv's `dolby-vision-profile`, present only on builds new enough to report it.
+   * Null means "the list did not say", never "not Dolby Vision".
+   */
+  val dolbyVisionProfile: Int? = null,
   val selected: Boolean = false,
   val isDefault: Boolean = false,
   val forced: Boolean = false,
@@ -68,6 +85,31 @@ data class MpvTrack(
       val codecNote = codec.trim().ifBlank { null }?.uppercase(Locale.ROOT)
       return if (codecNote == null) displayName else "$displayName ($codecNote)"
     }
+
+  /**
+   * Whether this is a Dolby Vision video track.
+   *
+   * Three sources because no one of them is present everywhere: the dedicated
+   * `dolby-vision-profile` field on recent mpv builds, the DV codec tags a
+   * container carries (`dvhe`/`dvh1` for HEVC, `dav1` for AV1), and the profile
+   * string ffmpeg builds out of them.
+   *
+   * "dv" is matched only as a word of its own: it is inside "dvvideo", which is
+   * the DV *camcorder* codec and nothing to do with Dolby Vision, and warning a
+   * viewer about the colours of a home video would be pure noise.
+   */
+  val isDolbyVision: Boolean
+    get() {
+      if (dolbyVisionProfile != null) return true
+      val text = "${codec.lowercase(Locale.ROOT)} ${codecProfile.lowercase(Locale.ROOT)}"
+      if (DV_TAGS.any { text.contains(it) }) return true
+      return DV_TOKEN.containsMatchIn(text)
+    }
+
+  private companion object {
+    val DV_TAGS = listOf("dvhe", "dvh1", "dav1", "dolby vision", "dolbyvision", "dovi")
+    val DV_TOKEN = Regex("(?<![a-z0-9])dv(?![a-z0-9])")
+  }
 }
 
 /**
@@ -104,6 +146,10 @@ object MpvTracks {
         lang = entry.optString("lang"),
         title = entry.optString("title"),
         codec = entry.optString("codec"),
+        codecProfile = entry.optString("codec-profile"),
+        // Zero is mpv's "no Dolby Vision", and an absent field reads as zero too,
+        // so both come back as null rather than as a profile number.
+        dolbyVisionProfile = entry.optInt("dolby-vision-profile").takeIf { it > 0 },
         selected = entry.optBoolean("selected"),
         isDefault = entry.optBoolean("default"),
         forced = entry.optBoolean("forced"),
@@ -117,6 +163,19 @@ object MpvTracks {
 
   fun selected(tracks: List<MpvTrack>, kind: TrackKind): MpvTrack? =
     tracks.firstOrNull { it.kind == kind && it.selected }
+
+  /**
+   * The video track being played. Falls back to the first one listed: a file's
+   * video track is selected before anything reads this list, but a track list read
+   * mid-open can arrive with nothing flagged yet, and the first video track is
+   * what mpv will be playing in every file this player opens.
+   */
+  fun selectedVideo(tracks: List<MpvTrack>): MpvTrack? =
+    selected(tracks, TrackKind.Video) ?: tracks.firstOrNull { it.kind == TrackKind.Video }
+
+  /** Whether the picture on screen is Dolby Vision; see [MpvTrack.isDolbyVision]. */
+  fun isDolbyVision(tracks: List<MpvTrack>): Boolean =
+    selectedVideo(tracks)?.isDolbyVision == true
 
   fun audioRows(tracks: List<MpvTrack>): List<TrackRow> =
     of(tracks, TrackKind.Audio).map { it.toRow() }

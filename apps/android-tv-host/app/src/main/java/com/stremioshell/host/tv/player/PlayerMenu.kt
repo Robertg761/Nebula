@@ -50,6 +50,7 @@ data class PlayerMenuState(
   val subtitleRows: List<TrackRow>,
   val speed: Double,
   val subtitleSize: SubtitleSize,
+  val audioOutput: AudioOutputMode,
   val audioDelaySec: Double,
   val subtitleDelaySec: Double,
   /** What a subtitles addon has for this file; see [ExternalSubtitlesState]. */
@@ -69,6 +70,7 @@ class PlayerMenuActions(
   val onSelectSubtitle: (Int?) -> Unit,
   val onSpeedStep: (Int) -> Unit,
   val onSubtitleSizeStep: (Int) -> Unit,
+  val onAudioOutputStep: (Int) -> Unit,
   val onAudioDelayStep: (Int) -> Unit,
   val onSubtitleDelayStep: (Int) -> Unit,
   /** Ask the subtitles addon what it has, or ask again after a failure. */
@@ -372,6 +374,11 @@ private fun OptionsSection(
       onStep = actions.onSubtitleSizeStep,
     )
     AdjusterRow(
+      label = "Audio output",
+      value = state.audioOutput.label,
+      onStep = actions.onAudioOutputStep,
+    )
+    AdjusterRow(
       label = "Audio delay",
       value = DelaySteps.label(state.audioDelaySec),
       onStep = actions.onAudioDelayStep,
@@ -383,6 +390,15 @@ private fun OptionsSection(
     )
     Text(
       "Delays are per file; the speed lasts until you leave the player.",
+      color = Color(0x99FFFFFF),
+      style = MaterialTheme.typography.bodySmall,
+    )
+    // Spelled out here rather than left to be discovered: passthrough is the one
+    // option in this list whose failure is silence, and a viewer has to know both
+    // what it is for and that Decode is the way back from it.
+    Text(
+      "Passthrough sends AC3/DTS/TrueHD to an AV receiver untouched. " +
+        "If the sound cuts out, your sink cannot take it - go back to Decode.",
       color = Color(0x99FFFFFF),
       style = MaterialTheme.typography.bodySmall,
     )
@@ -418,10 +434,14 @@ private fun AdjusterRow(
     )
     Text(
       value,
-      modifier = Modifier.width(96.dp).padding(horizontal = 8.dp),
+      // Wide enough for "Passthrough", which is the longest value any of these
+      // rows shows; the label beside it ellipsizes rather than this, because the
+      // value is the part that changes under the press.
+      modifier = Modifier.width(VALUE_WIDTH).padding(horizontal = 8.dp),
       color = Color.White,
       style = MaterialTheme.typography.bodyMedium,
       maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
     )
     StepButton(text = "+", onClick = { onStep(1) })
   }
@@ -481,6 +501,7 @@ private fun SelectionMarker(selected: Boolean) {
   )
 }
 
+private val VALUE_WIDTH = 124.dp
 private const val PANEL_WIDTH_FRACTION = 0.42f
 private const val OFF_ROW_KEY = Int.MIN_VALUE
 private const val FOCUS_ATTEMPTS = 5
