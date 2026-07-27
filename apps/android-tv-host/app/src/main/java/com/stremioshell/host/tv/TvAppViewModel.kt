@@ -150,6 +150,14 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   private val _searchResults = MutableStateFlow<LoadState<List<MediaItem>>>(LoadState.Ready(emptyList()))
   val searchResults: StateFlow<LoadState<List<MediaItem>>> = _searchResults
 
+  /**
+   * The query [searchResults] belongs to. Exposed because the field is debounced and so runs ahead
+   * of it: without knowing which query the results answer, the screen cannot tell "no results for
+   * what you typed" from "the request for what you typed has not started yet".
+   */
+  private val _searchQuery = MutableStateFlow("")
+  val searchQuery: StateFlow<String> = _searchQuery
+
   private val _details = MutableStateFlow<LoadState<MediaDetails>>(LoadState.Loading)
   val details: StateFlow<LoadState<MediaDetails>> = _details
 
@@ -172,7 +180,6 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   // Every per-screen loader keeps its Job plus the key it was asked for, so a newer request can
   // cancel the older one and a late response can be dropped instead of landing on the wrong screen.
   private var searchJob: Job? = null
-  private var searchKey: String? = null
   private var detailsJob: Job? = null
   private var detailsKey: Pair<MediaType, Int>? = null
   private var seasonJob: Job? = null
@@ -483,21 +490,34 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       Result.failure(error)
     }
 
+  /**
+   * Runs [query] against TMDB, replacing whatever the last one produced.
+   *
+   * A newer query always wins: the previous fetch is cancelled, and even if it were already past
+   * the point of cancellation its answer is dropped rather than published over a query the viewer
+   * has moved on from. [searchQuery] is set before the fetch starts, so the screen can always tell
+   * which query the state it is rendering belongs to.
+   */
   fun search(query: String) {
-    val client = tmdb() ?: return
-    // A newer query always wins; drop whatever is still in flight for the previous one.
     searchJob?.cancel()
-    searchKey = query
+    _searchQuery.value = query
     if (query.isBlank()) {
       _searchResults.value = LoadState.Ready(emptyList())
       return
     }
+    // Reported rather than ignored: search with no key used to leave the last state on screen,
+    // which read as "nothing matched" instead of "this needs setting up".
+    val client = tmdb()
+    if (client == null) {
+      _searchResults.value = LoadState.Failed("Add your TMDB API key in Settings to search.")
+      return
+    }
     _searchResults.value = LoadState.Loading
     searchJob = viewModelScope.launch {
-      val result = runCatching {
+      val result = catchingFailure {
         LoadState.Ready(client.search(query)) as LoadState<List<MediaItem>>
       }.getOrElse { LoadState.Failed(NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, it)) }
-      if (isActive && searchKey == query) _searchResults.value = result
+      if (isActive && _searchQuery.value == query) _searchResults.value = result
     }
   }
 

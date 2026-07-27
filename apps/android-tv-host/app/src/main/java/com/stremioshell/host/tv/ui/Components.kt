@@ -36,6 +36,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.tv.material3.Button
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.MaterialTheme
@@ -187,8 +188,19 @@ fun ArtworkImage(
   }
 }
 
+/**
+ * @param subtitle a second, quieter line under the title - the year and kind of title on surfaces
+ *   where a viewer is choosing between similarly named results. Omitted on the rails, where the
+ *   row heading already says what kind of thing is in it and the extra line would cost a card's
+ *   worth of height on every row.
+ */
 @Composable
-fun MediaCard(item: MediaItem, onClick: () -> Unit, modifier: Modifier = Modifier) {
+fun MediaCard(
+  item: MediaItem,
+  onClick: () -> Unit,
+  modifier: Modifier = Modifier,
+  subtitle: String? = null,
+) {
   Column(modifier = modifier.width(140.dp)) {
     Card(
       onClick = onClick,
@@ -212,6 +224,16 @@ fun MediaCard(item: MediaItem, onClick: () -> Unit, modifier: Modifier = Modifie
       // Clears the focused card's scaled-up bottom edge.
       modifier = Modifier.padding(top = 14.dp).width(140.dp),
     )
+    if (subtitle != null) {
+      Text(
+        text = subtitle,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 2.dp).width(140.dp),
+      )
+    }
   }
 }
 
@@ -235,10 +257,41 @@ fun MediaRow(title: String, items: List<MediaItem>, onItemClick: (MediaItem) -> 
   }
 }
 
+/** @param hint the smaller second line: what to do about [text], when there is something to do. */
 @Composable
-fun CenteredMessage(text: String) {
+fun CenteredMessage(text: String, hint: String? = null) {
   Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-    Text(text, style = MaterialTheme.typography.titleMedium)
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+      Text(text, style = MaterialTheme.typography.titleMedium)
+      if (hint != null) {
+        Text(
+          text = hint,
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          modifier = Modifier.padding(top = 10.dp),
+        )
+      }
+    }
+  }
+}
+
+/**
+ * A failure and, where the caller can offer one, a focusable way to try again.
+ *
+ * The Retry button is the only focusable thing on a failed screen, so it is also what stops the
+ * D-pad from being dead there - which is why it is shared rather than re-styled per screen.
+ */
+@Composable
+fun FailureMessage(message: String, onRetry: (() -> Unit)?) {
+  Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+      Text(message, style = MaterialTheme.typography.titleMedium)
+      if (onRetry != null) {
+        Button(onClick = onRetry, modifier = Modifier.padding(top = 16.dp)) {
+          Text("Retry")
+        }
+      }
+    }
   }
 }
 
@@ -261,16 +314,7 @@ fun <T> LoadStateContent(
 ) {
   when (state) {
     is LoadState.Loading -> CenteredLoading(loadingText)
-    is LoadState.Failed -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-      Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(state.message, style = MaterialTheme.typography.titleMedium)
-        if (onRetry != null) {
-          androidx.tv.material3.Button(onClick = onRetry, modifier = Modifier.padding(top = 16.dp)) {
-            Text("Retry")
-          }
-        }
-      }
-    }
+    is LoadState.Failed -> FailureMessage(state.message, onRetry)
     is LoadState.Ready -> content(state.value)
   }
 }
