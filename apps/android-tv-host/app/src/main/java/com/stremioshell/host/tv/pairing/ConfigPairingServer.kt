@@ -73,24 +73,31 @@ class ConfigPairingServer(
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <meta name="referrer" content="no-referrer">
-      <title>Set up Stremio Shell TV</title>
+      <title>Set up Nebula</title>
       <style>
         :root { color-scheme: dark; }
-        body { margin:0; background:#0C0B1E; color:#E6E4F0; font-family:system-ui,sans-serif;
-               display:flex; justify-content:center; }
-        main { width:100%; max-width:520px; padding:28px 20px 60px; box-sizing:border-box; }
-        h1 { font-size:22px; margin:0 0 4px; }
-        p.sub { color:#B7B3CF; margin:0 0 24px; font-size:14px; }
-        label { display:block; font-weight:600; margin:18px 0 6px; font-size:14px; }
-        .hint { color:#B7B3CF; font-weight:400; font-size:12px; }
-        input, textarea { width:100%; box-sizing:border-box; background:#161430; color:#fff;
-                border:1px solid #3a366a; border-radius:10px; padding:14px; font-size:16px; }
+        * { box-sizing: border-box; }
+        body { margin:0; background:#06060F; color:#F2F0FF;
+               font-family:"Outfit","Segoe UI",system-ui,sans-serif; display:flex; justify-content:center; }
+        main { width:100%; max-width:520px; padding:32px 20px 60px; }
+        h1 { font-size:24px; margin:0 0 4px; letter-spacing:0.2px; }
+        p.sub { color:#A9A4C7; margin:0 0 26px; font-size:14px; line-height:1.5; }
+        label { display:block; font-weight:600; margin:20px 0 8px; font-size:14px; color:#F2F0FF; }
+        .hint { color:#A9A4C7; font-weight:400; font-size:12px; }
+        input, textarea { width:100%; background:#1E1E3C; color:#F2F0FF;
+                border:1px solid #2C2C52; border-radius:12px; padding:14px 16px; font-size:16px;
+                font-family:inherit; transition:border-color .15s ease; }
+        input:focus, textarea:focus { outline:none; border-color:#8B6CFF;
+                box-shadow:0 0 0 3px rgba(139,108,255,0.25); }
+        input::placeholder, textarea::placeholder { color:#6F6A93; }
         textarea { min-height:96px; resize:vertical; }
-        button { margin-top:26px; width:100%; background:#7B5BF5; color:#fff; border:0;
-                 border-radius:24px; padding:16px; font-size:17px; font-weight:600; }
-        .err { background:#40202e; color:#ffb4c4; padding:10px 14px; border-radius:10px; font-size:14px; }
+        button { margin-top:28px; width:100%; background:#8B6CFF; color:#fff; border:0;
+                 border-radius:22px; padding:16px; font-size:17px; font-weight:600;
+                 font-family:inherit; }
+        button:focus, button:active { outline:none; box-shadow:0 0 0 3px rgba(167,139,255,0.4); }
+        .err { background:#40202e; color:#FF6B7A; padding:12px 16px; border-radius:12px; font-size:14px; }
       </style></head><body><main>
-      <h1>Set up Stremio Shell TV</h1>
+      <h1>Set up Nebula</h1>
       <p class="sub">Paste your keys here, then tap Save. They go straight to your TV over your home
       network. Leave a box empty to keep what the TV already has.</p>
       $errorHtml
@@ -127,12 +134,14 @@ class ConfigPairingServer(
       <title>Saved</title>
       <style>
         :root { color-scheme: dark; }
-        body { margin:0; background:#0C0B1E; color:#E6E4F0; font-family:system-ui,sans-serif;
+        body { margin:0; background:#06060F; color:#F2F0FF;
+               font-family:"Outfit","Segoe UI",system-ui,sans-serif;
                display:flex; align-items:center; justify-content:center; height:100vh; text-align:center; }
         div { padding:24px; }
-        h1 { color:#7B5BF5; }
-        ul { list-style:none; padding:0; color:#B7B3CF; font-size:14px; }
+        h1 { color:#A78BFF; font-size:24px; }
+        ul { list-style:none; padding:0; color:#A9A4C7; font-size:14px; }
         li { margin:6px 0; }
+        p { color:#6F6A93; font-size:13px; }
       </style></head><body>
       <div><h1>Saved to your TV</h1>
       <ul>

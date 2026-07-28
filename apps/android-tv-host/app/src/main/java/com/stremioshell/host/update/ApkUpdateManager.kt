@@ -38,8 +38,8 @@ class ApkUpdateManager(
   fun startDownload(context: Context, info: UpdateInfo): Long {
     val fileName = "StremioShell-${info.latestVersionName}.apk"
     val request = DownloadManager.Request(Uri.parse(info.apkUrl))
-      .setTitle("Stremio Shell update")
-      .setDescription("Downloading Stremio Shell ${info.latestVersionName}")
+      .setTitle("Nebula update")
+      .setDescription("Downloading Nebula ${info.latestVersionName}")
       .setMimeType("application/vnd.android.package-archive")
       .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
       // The release APK is ~117 MB; never burn a tethered or roaming connection on it.

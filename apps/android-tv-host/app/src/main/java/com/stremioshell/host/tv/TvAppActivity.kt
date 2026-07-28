@@ -25,7 +25,7 @@ import com.stremioshell.host.tv.ui.Screen
 import com.stremioshell.host.tv.ui.StreamLauncher
 import com.stremioshell.host.tv.ui.TvApp
 import com.stremioshell.host.tv.ui.UpdatePromptHost
-import com.stremioshell.host.tv.ui.theme.StremioTvTheme
+import com.stremioshell.host.tv.ui.theme.NebulaTheme
 import com.stremioshell.host.update.UpdateWorkScheduler
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.launch
@@ -113,7 +113,7 @@ class TvAppActivity : ComponentActivity() {
       }
     }
     setContent {
-      StremioTvTheme {
+      NebulaTheme {
         TvApp(
           streamLauncher = StreamLauncher { screen, stream ->
             if (launchInFlight.compareAndSet(false, true)) {

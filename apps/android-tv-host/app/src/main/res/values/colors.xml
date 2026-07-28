@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-  <!-- Only the launcher icon background needs an XML color; the in-app palette
-       is Compose-side in tv/ui/theme/Theme.kt. -->
-  <color name="stremio_green_dark">#102321</color>
+  <!-- The XML half of the palette, for the things that exist before Compose does:
+       the window background the system paints ahead of the first frame, and the
+       launcher icon and TV banner. These mirror NebulaPalette in tv/ui/theme/Color.kt
+       and have to move with it, or the icon drifts away from the app it opens.
+
+       Only the opaque accents live here. The icon artwork also uses faded stops
+       (#598B6CFF and the like) which have to stay inline, because a resource
+       reference cannot carry its own alpha. -->
+  <color name="nebula_void">#06060F</color>
+  <color name="nebula_violet">#8B6CFF</color>
+  <color name="nebula_violet_bright">#A78BFF</color>
+  <color name="nebula_cyan">#4CC9F0</color>
 </resources>

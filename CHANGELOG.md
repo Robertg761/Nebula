@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.6.0] - 2026-07-27
+The app is now called **Nebula**, and it looks like it: a full visual overhaul onto one design system, its own logo and launcher banner, and a player whose every control is reachable from a Google TV Streamer remote.
+
+- Named and badged: the app is Nebula everywhere - launcher label, TV banner, notifications, and the pairing page. The application id is unchanged, so this installs over your existing copy and keeps its place on the TV home screen.
+- Custom logo: an adaptive launcher icon and a 16:9 TV banner drawn as vectors (a ringed orb with a violet-to-cyan gradient), so both stay sharp at whatever size a launcher asks for. Includes a monochrome layer for themed icons.
+- One design system: a deep-space palette, the Outfit typeface bundled at four weights and scaled for 10-foot viewing, and shared shapes, spacings, buttons, badges, headings, progress bars and empty states. Every screen is built from those pieces rather than ad-hoc padding.
+- Focus you can see across the room: cards and buttons now grow, gain a violet ring and glow when focused, instead of the near-invisible default outline.
+- Home: a taller hero billboard with layered scrims, metadata as badges with the score picked out in accent, rails with accent-ticked headings, and Continue Watching cards that say how much is left ("22m left", "Watched").
+- Navigation rail rebuilt with the Nebula mark, a hairline edge, and labels that stay readable when the rail is collapsed.
+- Details, Search, Streams, Settings, pairing and the update prompt all restyled onto the same system.
+- **Every player control now reachable from a Google TV Streamer remote.** That remote has no MENU, CAPTIONS or transport keys, so audio tracks, subtitles, speed and delay were genuinely unreachable on it. Pressing UP over the picture now opens an on-screen control row - Play/Pause, Restart, Audio & subtitles, Playback options, and Next episode when there is one - driven entirely by the D-pad. Every legacy keycode still works for other remotes and HDMI-CEC.
+- Player OSD rebuilt: a scrub bar with a thumb that grows on focus, what is playing shown as chips (audio, subtitles, frame rate) instead of a pipe-separated line, the time you are seeking to shown as a signed offset while the seek is pending, and "Ends at HH:MM".
+- Fixed the OSD staying on screen for the rest of the film after a pause that was ended by a media key or by another app releasing audio focus.
+- Fixed the in-player menu never highlighting the focused tab.
+- Buffering and seeking now say which they are, and a playback failure is a proper card with a Retry that takes focus.
+
 ## [0.5.0] - 2026-07-27
 Feature release from a deep audit against established TV media players: Home, Details, Search, playback, and Settings all grew, and the legacy WebView shell is fully gone - the release APK drops from 116 MB to 50 MB.
 

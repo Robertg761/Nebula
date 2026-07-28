@@ -23,7 +23,7 @@
     android:label="@string/app_name"
     android:roundIcon="@mipmap/ic_launcher_round"
     android:supportsRtl="true"
-    android:theme="@style/Theme.StremioShell"
+    android:theme="@style/Theme.Nebula"
     android:usesCleartextTraffic="${usesCleartextTraffic}">
     <!-- Handles its own config changes for the same reason MpvPlayerActivity
          does: the player's refresh-rate matching can switch display mode
@@ -37,7 +37,7 @@
       android:configChanges="colorMode|orientation|screenSize|smallestScreenSize|screenLayout|density|keyboardHidden|navigation|uiMode"
       android:exported="true"
       android:launchMode="singleTask"
-      android:theme="@style/Theme.StremioShell.NoActionBar">
+      android:theme="@style/Theme.Nebula.NoActionBar">
       <!-- Watch Next rows on the TV home carry an intent that names this
            component explicitly, so this filter is not what routes them; it is
            what makes the same URI reachable from `adb shell am start` and from
@@ -51,7 +51,7 @@
           android:scheme="stremio-tv" />
       </intent-filter>
 
-      <!-- "Search for dune on Stremio Shell" said to the remote. ACTION_SEARCH is the
+      <!-- "Search for dune on Nebula" said to the remote. ACTION_SEARCH is the
            one the Assistant sends for an app-scoped query; the other two are what some
            Assistant surfaces and other apps still send for the same thing. All three
            carry the query in the same extra, so all three land in the same routing. -->
@@ -84,7 +84,7 @@
       android:launchMode="singleTop"
       android:screenOrientation="landscape"
       android:supportsPictureInPicture="false"
-      android:theme="@style/Theme.StremioShell.NoActionBar" />
+      android:theme="@style/Theme.Nebula.NoActionBar" />
 
     <!-- Keeps the historical launcher component name from the tv flavor so
          updates do not drop the app from TV home screens. Points at the

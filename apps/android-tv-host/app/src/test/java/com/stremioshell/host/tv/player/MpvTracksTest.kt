@@ -151,23 +151,32 @@ class MpvTracksTest {
   }
 
   @Test
-  fun `the OSD line names the selected tracks and the frame rate`() {
+  fun `the OSD chips name the selected tracks`() {
     val tracks = MpvTracks.parse(remuxTrackList)
 
     assertEquals(
-      "Audio: English - Surround 7.1 (TRUEHD)   |   Subtitles: Spanish (SUBRIP)   |   23.976 fps",
-      MpvTracks.osdLine(tracks, 23.976f),
+      "English - Surround 7.1 (TRUEHD)",
+      MpvTracks.selected(tracks, TrackKind.Audio)?.osdLabel,
     )
+    assertEquals("Spanish (SUBRIP)", MpvTracks.selected(tracks, TrackKind.Subtitle)?.osdLabel)
   }
 
   @Test
-  fun `the OSD line says off and none for what is not playing, and drops an unknown fps`() {
-    assertEquals("Audio: none   |   Subtitles: off", MpvTracks.osdLine(emptyList(), 0f))
+  fun `nothing is selected in an empty track list`() {
+    assertNull(MpvTracks.selected(emptyList(), TrackKind.Audio))
+    assertNull(MpvTracks.selected(emptyList(), TrackKind.Subtitle))
   }
 
   @Test
-  fun `a whole frame rate has no trailing zeroes`() {
-    assertTrue(MpvTracks.osdLine(emptyList(), 25f).endsWith("25 fps"))
+  fun `a fractional frame rate keeps its decimals and a whole one has none`() {
+    assertEquals("23.976 fps", MpvTracks.fpsLabel(23.976f))
+    assertEquals("25 fps", MpvTracks.fpsLabel(25f))
+  }
+
+  @Test
+  fun `an unknown frame rate has no chip at all`() {
+    assertNull(MpvTracks.fpsLabel(0f))
+    assertNull(MpvTracks.fpsLabel(-1f))
   }
 
   @Test

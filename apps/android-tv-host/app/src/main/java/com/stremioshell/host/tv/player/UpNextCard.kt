@@ -1,18 +1,27 @@
 package com.stremioshell.host.tv.player
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.stremioshell.host.tv.ui.BadgeTone
+import com.stremioshell.host.tv.ui.NebulaBadge
+import com.stremioshell.host.tv.ui.NebulaProgressBar
+import com.stremioshell.host.tv.ui.theme.NebulaDimens
+import com.stremioshell.host.tv.ui.theme.NebulaPalette
+import com.stremioshell.host.tv.ui.theme.NebulaShapes
 
 /** The episode an up-next card is offering. */
 data class UpNextTarget(
@@ -68,33 +77,59 @@ fun BoxScope.UpNextCard(state: UpNextCardState) {
   Column(
     modifier = Modifier
       .align(Alignment.BottomEnd)
-      .padding(48.dp)
-      .width(440.dp)
-      .background(Color(0xE6101010))
-      .padding(horizontal = 28.dp, vertical = 22.dp),
-    verticalArrangement = Arrangement.spacedBy(6.dp),
+      .padding(NebulaDimens.ScreenEdge)
+      .width(460.dp)
+      .background(NebulaPalette.Surface, NebulaShapes.large)
+      .border(1.dp, NebulaPalette.Outline, NebulaShapes.large)
+      .padding(horizontal = 28.dp, vertical = 24.dp),
+    verticalArrangement = Arrangement.spacedBy(8.dp),
   ) {
-    Text("Up next", style = MaterialTheme.typography.labelLarge, color = Color(0x99FFFFFF))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Text(
+        "Up next",
+        style = MaterialTheme.typography.labelMedium,
+        color = NebulaPalette.TextFaint,
+        modifier = Modifier.weight(1f),
+      )
+      // The number is the fastest thing to read from the sofa, so it gets the
+      // accent chip rather than being buried at the head of the title below.
+      NebulaBadge("S${state.target.season}E${state.target.episode}", BadgeTone.Accent)
+    }
     Text(
       UpNextText.episodeLine(state.target),
       style = MaterialTheme.typography.titleLarge,
-      color = Color.White,
+      color = NebulaPalette.TextHigh,
+      maxLines = 2,
+      overflow = TextOverflow.Ellipsis,
     )
     Text(
       state.seriesTitle,
       style = MaterialTheme.typography.bodySmall,
-      color = Color(0xCCFFFFFF),
+      color = NebulaPalette.TextMuted,
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
     )
     Text(
       UpNextText.statusLine(state),
       style = MaterialTheme.typography.titleMedium,
-      color = MaterialTheme.colorScheme.primary,
-      modifier = Modifier.padding(top = 8.dp),
+      color = NebulaPalette.VioletBright,
+      modifier = Modifier.padding(top = 6.dp),
     )
+    // The bar is the countdown made watchable: "Playing in 9s" tells a viewer
+    // reading it how long they have, a draining bar tells one who is not.
+    val seconds = state.secondsLeft
+    if (seconds != null) {
+      NebulaProgressBar(
+        progress = seconds * 1000f / UpNextPolicy.COUNTDOWN_MS,
+        height = 6.dp,
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+      )
+    }
     Text(
       UpNextText.hintLine(state),
-      style = MaterialTheme.typography.bodySmall,
-      color = Color(0x99FFFFFF),
+      style = MaterialTheme.typography.labelMedium,
+      color = NebulaPalette.TextFaint,
+      modifier = Modifier.padding(top = 4.dp),
     )
   }
 }

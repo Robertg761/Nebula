@@ -1,9 +1,13 @@
 # stremio-shell-tv
 
-A native Android/Google TV client for Stremio content. Jetpack Compose for TV
-UI, TMDB for catalog and metadata, Stremio stream addons (Comet and friends)
-for stream links, and libmpv for playback. There is no WebView and no bundled
-web bundle: the Compose app is the whole product.
+Nebula: a native Android/Google TV client for Stremio content. Jetpack Compose
+for TV UI, TMDB for catalog and metadata, Stremio stream addons (Comet and
+friends) for stream links, and libmpv for playback. There is no WebView and no
+bundled web bundle: the Compose app is the whole product.
+
+The repo, the Gradle module and the application id still say `stremio-shell`;
+only the product is called Nebula. Renaming the application id would break
+self-updates for every installed copy, so it stays.
 
 ## Repo layout
 

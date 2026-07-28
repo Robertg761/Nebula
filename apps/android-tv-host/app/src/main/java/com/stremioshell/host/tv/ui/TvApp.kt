@@ -1,14 +1,18 @@
 package com.stremioshell.host.tv.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Search
@@ -23,19 +27,30 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.tv.material3.DrawerValue
+import androidx.tv.material3.Glow
 import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.NavigationDrawer
 import androidx.tv.material3.NavigationDrawerItem
+import androidx.tv.material3.NavigationDrawerItemDefaults
 import androidx.tv.material3.Surface
+import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
 import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.addon.AddonStream
 import com.stremioshell.host.tv.data.tmdb.MediaType
 import com.stremioshell.host.tv.search.SearchLaunch
+import com.stremioshell.host.tv.ui.theme.NebulaAccentBrush
+import com.stremioshell.host.tv.ui.theme.NebulaDimens
+import com.stremioshell.host.tv.ui.theme.NebulaPalette
+import com.stremioshell.host.tv.ui.theme.NebulaShapes
 
 /** Launches playback of a resolved stream; provided by the hosting activity. */
 fun interface StreamLauncher {
@@ -155,36 +170,61 @@ fun TvApp(
     push(Screen.Details(type, entry.tmdbId, entry.season, entry.episode))
   }
 
-  Surface(modifier = Modifier.fillMaxSize()) {
+  // Void rather than the scheme's surface: this Surface is what shows through everywhere a screen
+  // does not paint its own background, and the rail beside it is the surface tone. Two different
+  // near-blacks meeting down the middle of the screen is exactly the seam the rail hairline exists
+  // to draw deliberately.
+  Surface(
+    colors = SurfaceDefaults.colors(containerColor = NebulaPalette.Void),
+    modifier = Modifier.fillMaxSize(),
+  ) {
     Row(modifier = Modifier.fillMaxSize()) {
       NavigationDrawer(
-        drawerContent = {
-          Column(
-            modifier = Modifier
-              .fillMaxHeight()
-              .background(MaterialTheme.colorScheme.surface)
-              .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
-          ) {
-            NavigationDrawerItem(
-              selected = current is Screen.Home,
-              onClick = { openRootDestination(Screen.Home) },
-              leadingContent = { Icon(Icons.Filled.Home, contentDescription = "Home") },
-            ) { Text("Home") }
-            NavigationDrawerItem(
-              selected = current is Screen.Search,
-              onClick = { openRootDestination(Screen.Search) },
-              leadingContent = { Icon(Icons.Filled.Search, contentDescription = "Search") },
-            ) { Text("Search") }
-            NavigationDrawerItem(
-              selected = current is Screen.Settings,
-              onClick = { openRootDestination(Screen.Settings) },
-              leadingContent = { Icon(Icons.Filled.Settings, contentDescription = "Settings") },
-            ) { Text("Settings") }
+        drawerContent = { drawerValue ->
+          Row(modifier = Modifier.fillMaxHeight().background(NebulaPalette.Surface)) {
+            Column(
+              modifier = Modifier.fillMaxHeight().padding(vertical = 26.dp, horizontal = RailInset),
+            ) {
+              NebulaMark(expanded = drawerValue == DrawerValue.Open)
+              Spacer(Modifier.weight(1f))
+              Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                NavigationDrawerItem(
+                  selected = current is Screen.Home,
+                  onClick = { openRootDestination(Screen.Home) },
+                  leadingContent = { Icon(Icons.Filled.Home, contentDescription = "Home") },
+                  colors = railItemColors(),
+                  shape = NavigationDrawerItemDefaults.shape(shape = NebulaShapes.small),
+                  glow = RailItemGlow,
+                ) { Text("Home") }
+                NavigationDrawerItem(
+                  selected = current is Screen.Search,
+                  onClick = { openRootDestination(Screen.Search) },
+                  leadingContent = { Icon(Icons.Filled.Search, contentDescription = "Search") },
+                  colors = railItemColors(),
+                  shape = NavigationDrawerItemDefaults.shape(shape = NebulaShapes.small),
+                  glow = RailItemGlow,
+                ) { Text("Search") }
+                NavigationDrawerItem(
+                  selected = current is Screen.Settings,
+                  onClick = { openRootDestination(Screen.Settings) },
+                  leadingContent = { Icon(Icons.Filled.Settings, contentDescription = "Settings") },
+                  colors = railItemColors(),
+                  shape = NavigationDrawerItemDefaults.shape(shape = NebulaShapes.small),
+                  glow = RailItemGlow,
+                ) { Text("Settings") }
+              }
+              // Heavier weight below than above, so the items sit on the optical centre line
+              // rather than the geometric one - the mark up top already pulls the eye high.
+              Spacer(Modifier.weight(1.25f))
+            }
+            // The rail and the page are one step apart in tone, which at three metres on a dim
+            // panel is no edge at all. The hairline is what makes the rail a panel instead of a
+            // slightly lighter smear down the left of the screen.
+            Box(modifier = Modifier.fillMaxHeight().width(1.dp).background(NebulaPalette.Outline))
           }
         },
       ) {
-        Box(modifier = Modifier.fillMaxSize()) {
+        Box(modifier = Modifier.fillMaxSize().background(NebulaPalette.Void)) {
           stateHolder.SaveableStateProvider(stateKeyFor(backstack.lastIndex, current)) {
             when (val screen = current) {
               is Screen.Home -> HomeScreen(
@@ -231,6 +271,101 @@ fun TvApp(
           }
         }
       }
+    }
+  }
+}
+
+/**
+ * Padding that lands the collapsed rail on [NebulaDimens.NavRailWidth].
+ *
+ * The item widths are the drawer's, not ours - it animates them between its own collapsed and
+ * expanded constants - so the only way the rail matches the width every other screen reserves for
+ * it is to derive the inset from that constant rather than to guess a pretty number. The extra
+ * 1dp is the hairline, which is part of the rail as far as the layout is concerned.
+ */
+private val RailInset =
+  (NebulaDimens.NavRailWidth - NavigationDrawerItemDefaults.CollapsedDrawerItemWidth - 1.dp) / 2f
+
+/** Same bloom a focused card gets, so the rail belongs to the same UI as the content beside it. */
+private val RailItemGlow = NavigationDrawerItemDefaults.glow(
+  focusedGlow = Glow(elevationColor = NebulaPalette.Violet, elevation = 12.dp),
+  focusedSelectedGlow = Glow(elevationColor = NebulaPalette.Violet, elevation = 12.dp),
+)
+
+/**
+ * The rail's two states, kept independent of each other.
+ *
+ * Selected-but-unfocused carries a tinted plate and a bright icon because focus lives in the
+ * content area almost all of the time: a rail that only marks the current screen while it holds
+ * focus answers "where am I" exactly when the viewer already knows. Focused then flips to a solid
+ * bright fill rather than adding an outline to the tint, so the two never have to be told apart by
+ * degree.
+ */
+@Composable
+private fun railItemColors() = NavigationDrawerItemDefaults.colors(
+  containerColor = Color.Transparent,
+  contentColor = NebulaPalette.TextMuted,
+  // What the icons use while the rail is collapsed, which is its resting state. The default drops
+  // to 40% alpha - on a 62dp strip of near-black that is a smudge rather than an icon.
+  inactiveContentColor = NebulaPalette.TextMuted,
+  focusedContainerColor = NebulaPalette.VioletBright,
+  focusedContentColor = Color(0xFF120A2E),
+  pressedContainerColor = NebulaPalette.Violet,
+  pressedContentColor = Color.White,
+  selectedContainerColor = NebulaPalette.Violet.copy(alpha = 0.22f),
+  selectedContentColor = NebulaPalette.VioletBright,
+  focusedSelectedContainerColor = NebulaPalette.VioletBright,
+  focusedSelectedContentColor = Color(0xFF120A2E),
+  pressedSelectedContainerColor = NebulaPalette.Violet,
+  pressedSelectedContentColor = Color.White,
+)
+
+/**
+ * The app's mark, at the top of the rail.
+ *
+ * Drawn rather than shipped as a drawable so it inherits the accent gradient and the app font - the
+ * launcher icon is a separate asset and the two only stay in step if this one is built from the
+ * same tokens. Collapsed it is the glyph alone; the wordmark rides in with the drawer, which is
+ * what gives the expansion something to be about beyond wider hit targets.
+ *
+ * Cleared from semantics: it is branding on a screen whose every other element is a destination,
+ * and a screen reader announcing the app's own name on entry to the rail is noise.
+ */
+@Composable
+private fun NebulaMark(expanded: Boolean) {
+  Row(
+    verticalAlignment = Alignment.CenterVertically,
+    modifier = Modifier.clearAndSetSemantics {},
+  ) {
+    Box(
+      contentAlignment = Alignment.Center,
+      // Matched to the item width so the glyph sits on the same vertical line as the icons under
+      // it; a mark that is a few pixels off that line is the sort of thing that reads as "unfinished"
+      // without the viewer being able to say why.
+      modifier = Modifier.width(NavigationDrawerItemDefaults.CollapsedDrawerItemWidth),
+    ) {
+      Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier.size(40.dp).background(NebulaAccentBrush, NebulaShapes.small),
+      ) {
+        Text(
+          text = "N",
+          style = MaterialTheme.typography.titleLarge,
+          color = Color(0xFF120A2E),
+        )
+      }
+    }
+    AnimatedVisibility(visible = expanded) {
+      Text(
+        text = "NEBULA",
+        // Wide tracking is the whole wordmark: it is six letters at title size, and without it
+        // the mark reads as a heading that happens to be shouting.
+        style = MaterialTheme.typography.titleLarge.copy(letterSpacing = 5.sp),
+        color = NebulaPalette.TextHigh,
+        maxLines = 1,
+        softWrap = false,
+        modifier = Modifier.padding(start = 12.dp),
+      )
     }
   }
 }

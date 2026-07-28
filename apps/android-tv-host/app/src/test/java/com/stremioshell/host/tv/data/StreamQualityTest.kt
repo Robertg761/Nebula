@@ -77,12 +77,20 @@ class StreamQualityTest {
   fun `badges read as a viewer would say them`() {
     val quality = StreamQuality.of("Movie 2160p DV HDR10 12 GB")
 
-    assertEquals(listOf("4K", "DV", "HDR", "12.0 GB"), quality.badges)
+    assertEquals("4K", quality.resolutionLabel())
+    assertTrue(quality.dolbyVision)
+    assertTrue(quality.hdr)
+    assertEquals("12.0 GB", quality.formattedSize())
   }
 
   @Test
   fun `a row with nothing to say carries no badges`() {
-    assertEquals(emptyList<String>(), StreamQuality.of("[RD+] Comet").badges)
+    val quality = StreamQuality.of("[RD+] Comet")
+
+    assertNull(quality.resolutionLabel())
+    assertFalse(quality.dolbyVision)
+    assertFalse(quality.hdr)
+    assertNull(quality.formattedSize())
   }
 
   @Test

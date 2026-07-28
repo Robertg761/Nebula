@@ -1,6 +1,7 @@
 package com.stremioshell.host.tv.player
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,11 +14,15 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -31,10 +36,14 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.stremioshell.host.tv.ui.theme.NebulaPalette
+import com.stremioshell.host.tv.ui.theme.NebulaShapes
 
 /** The menu's three sections. */
 enum class PlayerMenuTab(val label: String) {
@@ -108,56 +117,78 @@ fun BoxScope.PlayerMenu(state: PlayerMenuState, actions: PlayerMenuActions) {
     PlayerMenuTab.Options -> true
   }
 
-  Column(
+  Row(
     modifier = Modifier
       .align(Alignment.CenterEnd)
       .fillMaxHeight()
       .fillMaxWidth(PANEL_WIDTH_FRACTION)
-      .background(Color(0xE6000000))
-      .padding(horizontal = 24.dp, vertical = 20.dp),
+      .background(NebulaPalette.Surface),
   ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-      PlayerMenuTab.entries.forEach { tab ->
-        TabButton(
-          tab = tab,
-          active = tab == state.tab,
-          onFocused = { actions.onTab(tab) },
-          modifier = Modifier
-            .weight(1f)
-            .then(if (tab == state.tab) Modifier.focusRequester(tabFocus) else Modifier),
-        )
-      }
-    }
-    Spacer(modifier = Modifier.height(16.dp))
-    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-      when (state.tab) {
-        PlayerMenuTab.Audio -> TrackSection(
-          rows = state.audioRows,
-          emptyMessage = "This file has no audio tracks.",
-          focusRequester = contentFocus,
-          onSelect = { row -> row.trackId?.let(actions.onSelectAudio) },
-        )
-        PlayerMenuTab.Subtitles -> SubtitleSection(
-          rows = state.subtitleRows,
-          external = state.externalSubtitles,
-          focusRequester = contentFocus,
-          onSelect = { row -> actions.onSelectSubtitle(row.trackId) },
-          onFetch = actions.onFetchExternalSubtitles,
-          onSelectExternal = actions.onSelectExternalSubtitle,
-        )
-        PlayerMenuTab.Options -> OptionsSection(
-          state = state,
-          actions = actions,
-          focusRequester = contentFocus,
-        )
-      }
-    }
-    Text(
-      "OK selects   |   UP/DOWN moves   |   BACK closes",
-      modifier = Modifier.padding(top = 12.dp),
-      color = Color(0x99FFFFFF),
-      style = MaterialTheme.typography.bodySmall,
+    // The panel is opaque and the film behind it is not, so without an edge its
+    // left side reads as a dark band in the picture rather than as a boundary.
+    Box(
+      modifier = Modifier
+        .width(1.dp)
+        .fillMaxHeight()
+        .background(NebulaPalette.Outline),
     )
+    Column(
+      modifier = Modifier
+        .weight(1f)
+        .fillMaxHeight()
+        .padding(horizontal = 24.dp, vertical = 24.dp),
+    ) {
+      // One track, so the three sections read as one control with a position in
+      // it rather than as three buttons that happen to sit together.
+      Row(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier
+          .fillMaxWidth()
+          .background(NebulaPalette.SurfaceVariant, NebulaShapes.medium)
+          .padding(5.dp),
+      ) {
+        PlayerMenuTab.entries.forEach { tab ->
+          TabButton(
+            tab = tab,
+            active = tab == state.tab,
+            onFocused = { actions.onTab(tab) },
+            modifier = Modifier
+              .weight(1f)
+              .then(if (tab == state.tab) Modifier.focusRequester(tabFocus) else Modifier),
+          )
+        }
+      }
+      Spacer(modifier = Modifier.height(18.dp))
+      Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+        when (state.tab) {
+          PlayerMenuTab.Audio -> TrackSection(
+            rows = state.audioRows,
+            emptyMessage = "This file has no audio tracks.",
+            focusRequester = contentFocus,
+            onSelect = { row -> row.trackId?.let(actions.onSelectAudio) },
+          )
+          PlayerMenuTab.Subtitles -> SubtitleSection(
+            rows = state.subtitleRows,
+            external = state.externalSubtitles,
+            focusRequester = contentFocus,
+            onSelect = { row -> actions.onSelectSubtitle(row.trackId) },
+            onFetch = actions.onFetchExternalSubtitles,
+            onSelectExternal = actions.onSelectExternalSubtitle,
+          )
+          PlayerMenuTab.Options -> OptionsSection(
+            state = state,
+            actions = actions,
+            focusRequester = contentFocus,
+          )
+        }
+      }
+      Text(
+        "OK selects   |   UP/DOWN moves   |   BACK closes",
+        modifier = Modifier.padding(top = 14.dp),
+        color = NebulaPalette.TextFaint,
+        style = MaterialTheme.typography.labelMedium,
+      )
+    }
   }
 
   // Focus has to land inside the panel: while the menu is open the player
@@ -195,25 +226,41 @@ private fun TabButton(
   modifier: Modifier = Modifier,
 ) {
   var focused by remember { mutableStateOf(false) }
+  val shape = NebulaShapes.small
+  // Three states, three fills: the active section has to be obvious in a
+  // photograph of the screen, including when focus has been walked away from it.
   val background = when {
-    focused -> MaterialTheme.colorScheme.primary
-    active -> Color(0x33FFFFFF)
-    else -> Color(0x1AFFFFFF)
+    focused -> NebulaPalette.VioletBright
+    active -> NebulaPalette.Violet.copy(alpha = 0.30f)
+    else -> Color.Transparent
   }
   Box(
     modifier = modifier
       // Focus, not OK, switches section: on a TV the section a viewer has walked
       // to is the section they are looking at, and making them confirm it first
       // is a press that does nothing they did not already ask for.
-      .onFocusChanged { if (it.isFocused) onFocused() }
+      .onFocusChanged { if (it.isFocused) { focused = true; onFocused() } else focused = false }
       .clickable(onClick = onFocused)
-      .background(background)
+      .background(background, shape)
+      .border(
+        width = if (focused || active) 2.dp else 0.dp,
+        color = when {
+          focused -> NebulaPalette.VioletBright
+          active -> NebulaPalette.Violet
+          else -> Color.Transparent
+        },
+        shape = shape,
+      )
       .padding(vertical = 10.dp),
     contentAlignment = Alignment.Center,
   ) {
     Text(
       tab.label,
-      color = if (active || focused) Color.White else Color(0xB3FFFFFF),
+      color = when {
+        focused -> OnAccent
+        active -> NebulaPalette.TextHigh
+        else -> NebulaPalette.TextMuted
+      },
       style = MaterialTheme.typography.titleSmall,
       maxLines = 1,
     )
@@ -230,7 +277,7 @@ private fun TrackSection(
   if (rows.isEmpty()) {
     Text(
       emptyMessage,
-      color = Color(0xCCFFFFFF),
+      color = NebulaPalette.TextMuted,
       style = MaterialTheme.typography.bodyMedium,
     )
     return
@@ -241,7 +288,7 @@ private fun TrackSection(
   // request below aims at would not exist yet, and focus would fall back to the
   // tabs instead of landing on the track that is playing.
   val listState = rememberLazyListState(initialFirstVisibleItemIndex = focusIndex)
-  LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+  LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(ROW_GAP)) {
     itemsIndexed(rows, key = { _, row -> row.trackId ?: OFF_ROW_KEY }) { index, row ->
       LabelledRow(
         label = row.label,
@@ -277,7 +324,7 @@ private fun SubtitleSection(
   // As in [TrackSection]: the row the focus request aims at has to have been
   // composed, and a lazy list only composes what is visible.
   val listState = rememberLazyListState(initialFirstVisibleItemIndex = focusIndex)
-  LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+  LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(ROW_GAP)) {
     itemsIndexed(rows, key = { _, row -> "track:${row.trackId ?: OFF_ROW_KEY}" }) { index, row ->
       LabelledRow(
         label = row.label,
@@ -317,9 +364,9 @@ private fun SubtitleSection(
 private fun SectionHeader(text: String) {
   Text(
     text,
-    modifier = Modifier.padding(top = 10.dp, bottom = 2.dp),
-    color = Color(0x99FFFFFF),
-    style = MaterialTheme.typography.labelLarge,
+    modifier = Modifier.padding(top = 14.dp, bottom = 4.dp),
+    color = NebulaPalette.TextFaint,
+    style = MaterialTheme.typography.labelMedium,
   )
 }
 
@@ -332,12 +379,12 @@ private fun LabelledRow(
   onClick: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
-  MenuRow(onClick = onClick, modifier = modifier) { focused ->
-    SelectionMarker(selected)
+  MenuRow(onClick = onClick, selected = selected, modifier = modifier) { focused ->
+    SelectionMarker(selected = selected, focused = focused)
     Column(modifier = Modifier.weight(1f)) {
       Text(
         label,
-        color = Color.White,
+        color = if (focused) OnAccent else NebulaPalette.TextHigh,
         style = MaterialTheme.typography.titleSmall,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
@@ -345,7 +392,7 @@ private fun LabelledRow(
       if (detail.isNotBlank()) {
         Text(
           detail,
-          color = if (focused) Color(0xE6FFFFFF) else Color(0x99FFFFFF),
+          color = if (focused) OnAccentMuted else NebulaPalette.TextMuted,
           style = MaterialTheme.typography.bodySmall,
           maxLines = 1,
           overflow = TextOverflow.Ellipsis,
@@ -390,7 +437,8 @@ private fun OptionsSection(
     )
     Text(
       "Delays are per file; the speed lasts until you leave the player.",
-      color = Color(0x99FFFFFF),
+      modifier = Modifier.padding(top = 6.dp),
+      color = NebulaPalette.TextMuted,
       style = MaterialTheme.typography.bodySmall,
     )
     // Spelled out here rather than left to be discovered: passthrough is the one
@@ -399,7 +447,7 @@ private fun OptionsSection(
     Text(
       "Passthrough sends AC3/DTS/TrueHD to an AV receiver untouched. " +
         "If the sound cuts out, your sink cannot take it - go back to Decode.",
-      color = Color(0x99FFFFFF),
+      color = NebulaPalette.TextMuted,
       style = MaterialTheme.typography.bodySmall,
     )
   }
@@ -422,7 +470,7 @@ private fun AdjusterRow(
     Text(
       label,
       modifier = Modifier.weight(1f),
-      color = Color.White,
+      color = NebulaPalette.TextHigh,
       style = MaterialTheme.typography.titleSmall,
       maxLines = 1,
       overflow = TextOverflow.Ellipsis,
@@ -436,10 +484,16 @@ private fun AdjusterRow(
       value,
       // Wide enough for "Passthrough", which is the longest value any of these
       // rows shows; the label beside it ellipsizes rather than this, because the
-      // value is the part that changes under the press.
-      modifier = Modifier.width(VALUE_WIDTH).padding(horizontal = 8.dp),
-      color = Color.White,
+      // value is the part that changes under the press. Accent-tinted so the eye
+      // goes to the number between the two buttons that move it.
+      modifier = Modifier
+        .width(VALUE_WIDTH)
+        .padding(horizontal = 8.dp)
+        .background(NebulaPalette.Violet.copy(alpha = 0.18f), NebulaShapes.extraSmall)
+        .padding(vertical = 6.dp),
+      color = NebulaPalette.VioletBright,
       style = MaterialTheme.typography.bodyMedium,
+      textAlign = TextAlign.Center,
       maxLines = 1,
       overflow = TextOverflow.Ellipsis,
     )
@@ -452,29 +506,44 @@ private fun StepButton(text: String, onClick: () -> Unit, modifier: Modifier = M
   var focused by remember { mutableStateOf(false) }
   Box(
     modifier = modifier
-      .width(44.dp)
+      .size(42.dp)
       .onFocusChanged { focused = it.isFocused }
       .clickable(onClick = onClick)
-      .background(if (focused) MaterialTheme.colorScheme.primary else Color(0x26FFFFFF))
-      .padding(vertical = 8.dp),
+      .background(
+        if (focused) NebulaPalette.VioletBright else NebulaPalette.SurfaceVariant,
+        CircleShape,
+      )
+      .border(
+        width = if (focused) 2.dp else 1.dp,
+        color = if (focused) NebulaPalette.VioletBright else NebulaPalette.Outline,
+        shape = CircleShape,
+      ),
     contentAlignment = Alignment.Center,
   ) {
-    Text(text, color = Color.White, style = MaterialTheme.typography.titleMedium)
+    Text(
+      text,
+      color = if (focused) OnAccent else NebulaPalette.TextHigh,
+      style = MaterialTheme.typography.titleMedium,
+    )
   }
 }
 
 /**
- * The focusable row shape shared by the track lists. Plain foundation rather than
- * a tv-material Card: the row has to sit legibly on top of video, and the OSD's
- * flat translucent panels are what the rest of the player already looks like.
+ * The focusable row shape shared by the track lists.
+ *
+ * [selected] is styled to survive losing focus: the row that is playing keeps an
+ * accent tint and its tick whatever the D-pad is pointing at, because "which
+ * track am I on" is the question the viewer opened this menu to answer.
  */
 @Composable
 private fun MenuRow(
   onClick: () -> Unit,
   modifier: Modifier = Modifier,
+  selected: Boolean = false,
   content: @Composable RowScope.(focused: Boolean) -> Unit,
 ) {
   var focused by remember { mutableStateOf(false) }
+  val shape = NebulaShapes.small
   Row(
     modifier = modifier
       .fillMaxWidth()
@@ -482,8 +551,24 @@ private fun MenuRow(
       // order in which this observes that row's focus.
       .onFocusChanged { focused = it.isFocused }
       .clickable(onClick = onClick)
-      .background(if (focused) MaterialTheme.colorScheme.primary else Color(0x1AFFFFFF))
-      .padding(horizontal = 12.dp, vertical = 8.dp),
+      .background(
+        when {
+          focused -> NebulaPalette.VioletBright
+          selected -> NebulaPalette.Violet.copy(alpha = 0.20f)
+          else -> NebulaPalette.SurfaceVariant
+        },
+        shape,
+      )
+      .border(
+        width = if (focused) 2.dp else 1.dp,
+        color = when {
+          focused -> NebulaPalette.VioletBright
+          selected -> NebulaPalette.Violet
+          else -> Color.Transparent
+        },
+        shape = shape,
+      )
+      .padding(horizontal = 14.dp, vertical = 10.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
     content(focused)
@@ -492,16 +577,27 @@ private fun MenuRow(
 
 /** Which track is playing right now, in a form that survives a photograph. */
 @Composable
-private fun SelectionMarker(selected: Boolean) {
-  Text(
-    if (selected) "•" else " ",
-    modifier = Modifier.width(20.dp),
-    color = Color.White,
-    style = MaterialTheme.typography.titleMedium,
-  )
+private fun SelectionMarker(selected: Boolean, focused: Boolean) {
+  Box(modifier = Modifier.width(28.dp), contentAlignment = Alignment.CenterStart) {
+    if (selected) {
+      Icon(
+        Icons.Filled.Check,
+        contentDescription = "Selected",
+        tint = if (focused) OnAccent else NebulaPalette.VioletBright,
+        modifier = Modifier.size(18.dp),
+      )
+    }
+  }
 }
 
+/** Content on a focused accent fill, matching what the app's buttons flip to. */
+private val OnAccent = Color(0xFF120A2E)
+
+/** The second line of a focused row: readable on the accent without shouting. */
+private val OnAccentMuted = Color(0xCC120A2E)
+
 private val VALUE_WIDTH = 124.dp
-private const val PANEL_WIDTH_FRACTION = 0.42f
+private val ROW_GAP = 8.dp
+private const val PANEL_WIDTH_FRACTION = 0.44f
 private const val OFF_ROW_KEY = Int.MIN_VALUE
 private const val FOCUS_ATTEMPTS = 5

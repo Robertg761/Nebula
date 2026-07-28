@@ -2,11 +2,14 @@
 <resources>
   <!-- Platform theme, not MaterialComponents/AppCompat: every activity is a
        ComponentActivity rendering Compose, so the only thing the XML theme has
-       to get right is a black window background (no white flash before the
-       first frame). Colors live in tv/ui/theme/Theme.kt. -->
-  <style name="Theme.StremioShell" parent="@android:style/Theme.Material.NoActionBar">
-    <item name="android:windowBackground">@android:color/black</item>
+       to get right is the window background before the first frame. It is
+       Nebula's own near-black rather than @android:color/black, because the
+       first frame paints #06060F and the difference between the two is a
+       visible flash on a panel that has just come up to full brightness.
+       Colors live in tv/ui/theme/Theme.kt. -->
+  <style name="Theme.Nebula" parent="@android:style/Theme.Material.NoActionBar">
+    <item name="android:windowBackground">@color/nebula_void</item>
   </style>
 
-  <style name="Theme.StremioShell.NoActionBar" parent="Theme.StremioShell" />
+  <style name="Theme.Nebula.NoActionBar" parent="Theme.Nebula" />
 </resources>

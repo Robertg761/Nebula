@@ -25,27 +25,55 @@ import android.view.SurfaceView
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableDoubleStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.input.key.KeyEvent as ComposeKeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -54,6 +82,8 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.tv.material3.Button
+import androidx.tv.material3.ButtonDefaults
+import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.stremioshell.host.tv.channel.WatchNextSync
@@ -71,8 +101,24 @@ import com.stremioshell.host.tv.data.subtitles.SubtitlesClient
 import com.stremioshell.host.tv.data.tmdb.EpisodeItem
 import com.stremioshell.host.tv.data.tmdb.MediaType
 import com.stremioshell.host.tv.data.tmdb.TmdbClient
+import com.stremioshell.host.tv.ui.BadgeTone
+import com.stremioshell.host.tv.ui.EmptyState
+import com.stremioshell.host.tv.ui.InitialFocusTarget
+import com.stremioshell.host.tv.ui.NebulaBadge
+import com.stremioshell.host.tv.ui.NebulaButton
+import com.stremioshell.host.tv.ui.NebulaButtonStyle
+import com.stremioshell.host.tv.ui.RequestInitialFocus
 import com.stremioshell.host.tv.ui.Screen
-import com.stremioshell.host.tv.ui.theme.StremioTvTheme
+import com.stremioshell.host.tv.ui.initialFocusTarget
+import com.stremioshell.host.tv.ui.rememberInitialFocusTarget
+import com.stremioshell.host.tv.ui.theme.NebulaAccentBrush
+import com.stremioshell.host.tv.ui.theme.NebulaBottomScrim
+import com.stremioshell.host.tv.ui.theme.NebulaDimens
+import com.stremioshell.host.tv.ui.theme.NebulaPalette
+import com.stremioshell.host.tv.ui.theme.NebulaShapes
+import com.stremioshell.host.tv.ui.theme.NebulaTheme
+import com.stremioshell.host.tv.ui.theme.nebulaButtonBorder
+import com.stremioshell.host.tv.ui.theme.nebulaButtonGlow
 import dev.jdtech.mpv.MPVLib
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -126,9 +172,12 @@ class MpvPlayerActivity : ComponentActivity() {
   // the display refresh rate so film/PAL content plays without pulldown judder.
   private var playbackSurface: Surface? = null
 
-  /** Written on the main thread, read by the worker when it builds the OSD line. */
-  @Volatile
-  private var contentFps = 0f
+  /**
+   * Written on the main thread. Compose state rather than a plain field because the
+   * OSD shows it as a chip: it is read back from the display-mode match, which
+   * lands a beat after the track list the chip beside it comes from.
+   */
+  private var contentFps by mutableFloatStateOf(0f)
 
   /**
    * Whether a track-list read is already queued. Cycling subtitles or audio
@@ -221,8 +270,11 @@ class MpvPlayerActivity : ComponentActivity() {
    * The next episode, resolved from TMDB while the current one plays so the card
    * can appear on the last frame rather than after a round trip. Null means there
    * is nothing to go on to, or the lookup has not landed (or failed).
+   *
+   * Compose state because the transport row offers "Next episode" only once this
+   * is non-null, and the lookup that fills it in lands minutes into the film.
    */
-  private var upNextTarget: UpNextTarget? = null
+  private val upNextTarget = mutableStateOf<UpNextTarget?>(null)
   private var upNextLookupIssued = false
 
   /** Non-null while the up-next card is on screen; also what redirects the remote. */
@@ -288,13 +340,34 @@ class MpvPlayerActivity : ComponentActivity() {
   private val playbackSpeed = mutableDoubleStateOf(1.0)
 
   private val osdVisible = mutableStateOf(true)
-  private val trackInfo = mutableStateOf("")
   private var osdHideAtMs = 0L
 
   /**
-   * A transient line under the OSD's track summary: a subtitle that has just been
-   * added, or one that could not be. Separate from [trackInfo] because that line
-   * is derived from the track list and is rewritten every time it is read.
+   * Which of the OSD's two rows the D-pad is driving. Both rows report their own
+   * focus into it rather than it being set only by the keys that move between
+   * them, so a focus move the OSD did not ask for cannot leave the key map
+   * pointed at a row the viewer is not on.
+   */
+  private val osdRow = mutableStateOf(OsdRow.Scrub)
+
+  /**
+   * Whether focus is inside the OSD. The controls only own the D-pad once it is:
+   * if the focus request never lands, [onKeyDown] still seeks and still opens the
+   * menu, so a viewer is never left with a remote that does nothing.
+   */
+  private var osdHasFocus = false
+
+  /**
+   * The season and episode as the OSD shows them. Mirrored into composition state
+   * because the binge loop moves [season] and [episode] under an OSD that has no
+   * other reason to recompose, and it would go on naming the previous episode.
+   */
+  private val episodeLabel = mutableStateOf<String?>(null)
+
+  /**
+   * A transient line under the OSD's track chips: a subtitle that has just been
+   * added, or one that could not be. Separate from the chips because those are
+   * derived from the track list and are rewritten every time it is read.
    */
   private val osdMessage = mutableStateOf("")
   private var osdMessageAtMs = 0L
@@ -343,10 +416,11 @@ class MpvPlayerActivity : ComponentActivity() {
   private var audioCyclePending = false
 
   /**
-   * Down time of the BACK press that closed the menu, so its own repeats cannot
-   * be read as a second press asking to leave the player.
+   * Down time of the BACK press that has already been spent - on closing the menu,
+   * or on hiding the controls - so its own repeats cannot be read as a second
+   * press asking to leave the player.
    */
-  private var menuCloseBackDownTime = Long.MIN_VALUE
+  private var consumedBackDownTime = Long.MIN_VALUE
 
   /**
    * Non-null once the stream is known to be dead: replaces the spinner with a
@@ -640,6 +714,7 @@ class MpvPlayerActivity : ComponentActivity() {
     posterUrl = intent.getStringExtra(EXTRA_POSTER)
     season = intent.getIntExtra(EXTRA_SEASON, -1).takeIf { it >= 0 }
     episode = intent.getIntExtra(EXTRA_EPISODE, -1).takeIf { it >= 0 }
+    syncEpisodeLabel()
     imdbId = intent.getStringExtra(EXTRA_IMDB_ID)
     bingeGroup = intent.getStringExtra(EXTRA_BINGE_GROUP)
     // A subtitles addon is asked by IMDb id and nothing else, so without one the
@@ -706,7 +781,7 @@ class MpvPlayerActivity : ComponentActivity() {
     createMediaSession()
 
     setContent {
-      StremioTvTheme {
+      NebulaTheme {
         PlayerSurface()
       }
     }
@@ -972,7 +1047,7 @@ class MpvPlayerActivity : ComponentActivity() {
     upNextLookupIssued = true
     lifecycleScope.launch {
       val target = runCatching { withContext(Dispatchers.IO) { resolveNextEpisode() } }.getOrNull()
-      if (!finishing) upNextTarget = target
+      if (!finishing) upNextTarget.value = target
     }
   }
 
@@ -1009,7 +1084,7 @@ class MpvPlayerActivity : ComponentActivity() {
    * have not seen instead of dropping the series off it entirely.
    */
   private fun seedNextEpisodeEntry() {
-    val target = upNextTarget ?: return
+    val target = upNextTarget.value ?: return
     if (tmdbId == 0) return
     val store = watchStore
     val entry = WatchEntry(
@@ -1031,7 +1106,7 @@ class MpvPlayerActivity : ComponentActivity() {
    * exactly as it always did.
    */
   private fun offerUpNext() {
-    val target = upNextTarget
+    val target = upNextTarget.value
     val offer = UpNextPolicy.offer(
       hasNext = target != null,
       paused = pauseRequested,
@@ -1080,7 +1155,7 @@ class MpvPlayerActivity : ComponentActivity() {
    * hence `loadfile ... replace` rather than a new intent.
    */
   private fun playNextEpisode() {
-    val target = upNextTarget ?: return
+    val target = upNextTarget.value ?: return
     if (nextEpisodeStarting || finishing) return
     nextEpisodeStarting = true
     mainHandler.removeCallbacks(upNextTickRunnable)
@@ -1130,10 +1205,11 @@ class MpvPlayerActivity : ComponentActivity() {
     bingeGroup = stream.bingeGroup
     season = target.season
     episode = target.episode
+    syncEpisodeLabel()
     watchKey = watchKeyFor(tmdbId, target.season, target.episode)
     resumeMs = 0L
     endHandled = false
-    upNextTarget = null
+    upNextTarget.value = null
     upNextLookupIssued = false
     playbackStarted = false
     lastErrorMessage = null
@@ -1149,7 +1225,6 @@ class MpvPlayerActivity : ComponentActivity() {
     seeker.reset()
     seekPreviewSec.doubleValue = NO_SEEK
     tracks.value = emptyList()
-    trackInfo.value = ""
     osdMessage.value = ""
     // Per file, like the track list it is derived from: the next episode may be a
     // different release, and it gets its own single chance to say so.
@@ -1307,15 +1382,36 @@ class MpvPlayerActivity : ComponentActivity() {
     PlayerMenu(state, actions)
   }
 
+  /**
+   * The wait, named. A bare spinner over black leaves "buffering" and "seeking"
+   * looking identical, and they are the difference between a stream that is
+   * struggling and one that is doing what it was just asked to.
+   */
   @Composable
   private fun BoxScope.BusyIndicator() {
     val error by playbackError
     val isBuffering by buffering
     val isSeeking by seeking
-    if (error == null && (isBuffering || isSeeking)) {
+    if (error != null || !(isBuffering || isSeeking)) return
+    Row(
+      modifier = Modifier
+        .align(Alignment.Center)
+        .background(NebulaPalette.Surface.copy(alpha = 0.92f), NebulaShapes.large)
+        .border(1.dp, NebulaPalette.Outline, NebulaShapes.large)
+        .padding(horizontal = 24.dp, vertical = 16.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
       androidx.compose.material3.CircularProgressIndicator(
-        color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.align(Alignment.Center),
+        color = NebulaPalette.VioletBright,
+        trackColor = NebulaPalette.Outline,
+        strokeWidth = 3.dp,
+        modifier = Modifier.size(28.dp),
+      )
+      Text(
+        if (isSeeking) "Seeking" else "Buffering",
+        modifier = Modifier.padding(start = 14.dp),
+        color = NebulaPalette.TextMuted,
+        style = MaterialTheme.typography.bodyMedium,
       )
     }
   }
@@ -1328,131 +1424,501 @@ class MpvPlayerActivity : ComponentActivity() {
   private fun BoxScope.PlaybackErrorPanel() {
     val reason by playbackError
     val message = reason ?: return
-    val retryFocus = remember { FocusRequester() }
+    // The only focusable thing the player shows on a dead stream, so nothing else
+    // can hand focus to it. Keyed on the message so a retry that fails differently
+    // takes focus back off the panel it replaced.
+    val retryTarget = rememberInitialFocusTarget()
+    RequestInitialFocus(retryTarget, key = message, label = "player retry")
 
     Column(
       modifier = Modifier
         .align(Alignment.Center)
-        .fillMaxWidth()
-        .background(Color(0xCC000000))
-        .padding(horizontal = 40.dp, vertical = 28.dp),
+        .fillMaxWidth(ERROR_PANEL_WIDTH_FRACTION)
+        .background(NebulaPalette.Surface, NebulaShapes.extraLarge)
+        .border(1.dp, NebulaPalette.Outline, NebulaShapes.extraLarge)
+        .padding(horizontal = 44.dp, vertical = 40.dp),
       horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-      Text("Playback failed", style = MaterialTheme.typography.titleLarge, color = Color.White)
-      Text(
-        message,
-        modifier = Modifier.padding(top = 12.dp),
-        color = Color(0xCCFFFFFF),
-        style = MaterialTheme.typography.bodyMedium,
-        textAlign = TextAlign.Center,
-      )
-      Button(
+      EmptyState(title = "Playback failed", hint = message, icon = Icons.Filled.Warning)
+      NebulaButton(
+        text = "Retry",
         onClick = { retryPlayback() },
-        modifier = Modifier.padding(top = 20.dp).focusRequester(retryFocus),
-      ) {
-        Text("Retry")
-      }
+        style = NebulaButtonStyle.Primary,
+        icon = Icons.Filled.Refresh,
+        modifier = Modifier.padding(top = 26.dp).initialFocusTarget(retryTarget),
+      )
       Text(
         "OK retries from where it stopped   |   BACK tries another stream",
-        modifier = Modifier.padding(top = 18.dp),
-        color = Color(0x99FFFFFF),
-        style = MaterialTheme.typography.bodySmall,
+        modifier = Modifier.padding(top = 20.dp),
+        color = NebulaPalette.TextFaint,
+        style = MaterialTheme.typography.labelMedium,
+        textAlign = TextAlign.Center,
       )
     }
-
-    // The only focusable thing the player ever shows, so nothing else can hand
-    // focus to it. A failed request is not worth reacting to: OK still reaches
-    // [onKeyDown], which retries from there.
-    LaunchedEffect(Unit) { runCatching { retryFocus.requestFocus() } }
   }
 
+  /**
+   * The transport panel: what is playing, how far in, and every control the remote
+   * can reach.
+   *
+   * Genuinely focusable, in two rows, because the remote this app is built for has
+   * no MENU key, no CAPTIONS key and no transport keys at all - so the D-pad
+   * walking these buttons is the only route to the track menu, and a panel that
+   * was purely decorative left half the player unreachable.
+   */
   @Composable
   private fun BoxScope.Osd() {
     val error by playbackError
-    val isPaused by paused
     val show by osdVisible
     val upNext by upNextCard
+    val menuOpen by menuVisible
+    val row by osdRow
     // The transport hints are a lie once the stream is dead, and keep-open pauses
     // at an error end, which would otherwise pin the OSD open behind the panel.
     if (error != null) return
     // Same at the other end: the video has finished, so a full-width transport bar
     // under the up-next card would offer controls that no longer do anything.
     if (upNext != null) return
-    if (!show && !isPaused) return
+    if (!show) return
+
+    val scrubTarget = rememberInitialFocusTarget()
+    val buttonsTarget = rememberInitialFocusTarget()
+    // The menu is these buttons opened out, and it owns the remote while it is up:
+    // leaving the rows focusable behind it would let a press at the end of the
+    // track list walk focus out of the panel and onto a button underneath it.
+    val focusable = !menuOpen
+    RequestInitialFocus(
+      target = scrubTarget,
+      key = row,
+      label = "player scrub bar",
+      enabled = focusable && row == OsdRow.Scrub,
+    )
+    RequestInitialFocus(
+      target = buttonsTarget,
+      key = row,
+      label = "player transport row",
+      enabled = focusable && row == OsdRow.Buttons,
+    )
 
     Column(
       modifier = Modifier
         .align(Alignment.BottomCenter)
         .fillMaxWidth()
-        .background(Color(0xB3000000))
-        .padding(horizontal = 40.dp, vertical = 20.dp),
+        .background(NebulaBottomScrim)
+        .onFocusChanged { osdHasFocus = it.hasFocus }
+        // Ahead of the focus search, so the keys these controls define cannot also
+        // move focus, and ahead of the activity, so they cannot also seek.
+        .onPreviewKeyEvent { onOsdKey(it) }
+        .focusGroup()
+        .padding(
+          start = NebulaDimens.ScreenEdge,
+          end = NebulaDimens.ScreenEdge,
+          top = 56.dp,
+          bottom = 34.dp,
+        ),
+      verticalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
     ) {
-      val suffix = if (season != null) "  S${season}E${episode}" else ""
-      Text("$title$suffix", style = MaterialTheme.typography.titleLarge, color = Color.White)
-      // Own composable so the per-second position updates recompose the
-      // progress row alone, not the surface and OSD chrome around it.
-      ProgressRow()
-      val info = trackInfo.value
-      if (info.isNotBlank()) {
-        Text(info, color = Color(0xCCFFFFFF), style = MaterialTheme.typography.bodySmall)
-      }
-      val message = osdMessage.value
-      if (message.isNotBlank()) {
-        Text(
-          message,
-          color = MaterialTheme.colorScheme.primary,
-          style = MaterialTheme.typography.bodySmall,
-        )
-      }
-      Text(
-        (if (isPaused) "Paused   -   " else "") +
-          "OK play/pause   |   LEFT/RIGHT 10s   |   UP/DOWN 60s   |   MENU audio & subtitles",
-        color = Color(0x99FFFFFF),
-        style = MaterialTheme.typography.bodySmall,
-      )
+      OsdTitleRow()
+      OsdTrackChips()
+      // Above the bar because that is where UP from the bar goes: the layout and
+      // the key map have to agree or the D-pad reads as broken.
+      if (focusable) TransportRow(buttonsTarget)
+      // Own composable so the per-second position updates recompose the scrub row
+      // alone, not the surface and the OSD chrome around it.
+      ScrubRow(scrubTarget, focusable)
+      OsdFooter(row, focusable)
     }
   }
 
   @Composable
-  private fun ProgressRow() {
+  private fun OsdTitleRow() {
+    val episodeText by episodeLabel
+    val isPaused by paused
+    Row(
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+      Text(
+        title,
+        style = MaterialTheme.typography.titleLarge,
+        color = NebulaPalette.TextHigh,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.weight(1f, fill = false),
+      )
+      episodeText?.let { NebulaBadge(it, BadgeTone.Accent) }
+      // A paused film and a stalled one look the same on screen; the badge is what
+      // tells a viewer which of the two they are looking at.
+      if (isPaused) NebulaBadge("Paused", BadgeTone.Warn)
+    }
+  }
+
+  /**
+   * What is playing, as chips. Chips rather than the pipe-separated line this used
+   * to be because the two tracks are things a viewer changes, and a run-on string
+   * is read word by word where three pills are read at a glance.
+   */
+  @Composable
+  private fun OsdTrackChips() {
+    val list by tracks
+    val message by osdMessage
+    val fps = contentFps
+    val audio = MpvTracks.selected(list, TrackKind.Audio)?.osdLabel
+    val subtitle = MpvTracks.selected(list, TrackKind.Subtitle)?.osdLabel
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+      Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        // Weighted, and the frame rate not: a remux's track label runs to a
+        // language, a channel layout and a codec, and unweighted it would push the
+        // shortest and most fixed chip of the three off the end of the row.
+        NebulaBadge(
+          "Audio  ${audio ?: "none"}",
+          modifier = Modifier.weight(1f, fill = false),
+        )
+        NebulaBadge(
+          "Subtitles  ${subtitle ?: "off"}",
+          if (subtitle != null) BadgeTone.Accent else BadgeTone.Neutral,
+          modifier = Modifier.weight(1f, fill = false),
+        )
+        MpvTracks.fpsLabel(fps)?.let { NebulaBadge(it) }
+      }
+      if (message.isNotBlank()) {
+        Text(
+          message,
+          color = NebulaPalette.VioletBright,
+          style = MaterialTheme.typography.bodySmall,
+        )
+      }
+    }
+  }
+
+  /**
+   * The button row: every action the remote has no key for.
+   *
+   * Its own focus group so LEFT/RIGHT walk the buttons under Compose's own focus
+   * search - [onOsdKey] only claims the way back down - and so the row can report
+   * where focus actually is rather than where the key map last aimed it.
+   */
+  @Composable
+  private fun TransportRow(target: InitialFocusTarget) {
+    val isPaused by paused
+    val next by upNextTarget
+    Row(
+      modifier = Modifier
+        .onFocusChanged {
+          if (it.hasFocus) {
+            osdRow.value = OsdRow.Buttons
+            osdHasFocus = true
+          }
+        }
+        .focusGroup(),
+      horizontalArrangement = Arrangement.spacedBy(12.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      TransportButton(
+        label = if (isPaused) "Play" else "Pause",
+        onClick = { togglePause(); showOsd() },
+        modifier = Modifier.initialFocusTarget(target),
+        primary = true,
+        showLabel = false,
+      ) { tint ->
+        if (isPaused) {
+          Icon(
+            Icons.Filled.PlayArrow,
+            contentDescription = null,
+            tint = tint,
+            modifier = Modifier.size(24.dp),
+          )
+        } else {
+          PauseGlyph(tint)
+        }
+      }
+      TransportButton(
+        label = "Restart",
+        onClick = { seekToSec(0.0); showOsd() },
+        showLabel = false,
+      ) { tint ->
+        Icon(
+          Icons.Filled.Refresh,
+          contentDescription = null,
+          tint = tint,
+          modifier = Modifier.size(22.dp),
+        )
+      }
+      TransportButton(
+        label = "Audio & subtitles",
+        onClick = { openMenu(PlayerMenuTab.Audio) },
+      ) { tint ->
+        Icon(
+          Icons.AutoMirrored.Filled.List,
+          contentDescription = null,
+          tint = tint,
+          modifier = Modifier.size(20.dp),
+        )
+      }
+      TransportButton(
+        label = "Playback options",
+        onClick = { openMenu(PlayerMenuTab.Options) },
+      ) { tint ->
+        Icon(
+          Icons.Filled.Settings,
+          contentDescription = null,
+          tint = tint,
+          modifier = Modifier.size(20.dp),
+        )
+      }
+      // Offered only once the lookup has actually produced an episode: a button
+      // that answers "there is nothing next" after the press is worse than no
+      // button, and on a film there is never anything next.
+      if (next != null) {
+        TransportButton(
+          label = "Next episode",
+          onClick = { skipToNextEpisode() },
+        ) { tint -> SkipNextGlyph(tint) }
+      }
+    }
+  }
+
+  /**
+   * One transport button. [showLabel] false is for the two whose glyph needs no
+   * word - play/pause and restart - and is what keeps the row inside the overscan
+   * margin, where five fully labelled pills do not fit.
+   */
+  @Composable
+  private fun TransportButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    primary: Boolean = false,
+    showLabel: Boolean = true,
+    glyph: @Composable (Color) -> Unit,
+  ) {
+    var focused by remember { mutableStateOf(false) }
+    val shape = NebulaShapes.large
+    Button(
+      onClick = onClick,
+      colors = ButtonDefaults.colors(
+        containerColor = if (primary) NebulaPalette.Violet else NebulaPalette.SurfaceVariant,
+        contentColor = if (primary) Color.White else NebulaPalette.TextHigh,
+        focusedContainerColor = NebulaPalette.VioletBright,
+        focusedContentColor = ON_ACCENT,
+      ),
+      shape = ButtonDefaults.shape(shape = shape),
+      border = nebulaButtonBorder(shape),
+      glow = nebulaButtonGlow(),
+      scale = ButtonDefaults.scale(focusedScale = 1.05f),
+      contentPadding = PaddingValues(
+        horizontal = if (showLabel) 20.dp else 16.dp,
+        vertical = 12.dp,
+      ),
+      modifier = modifier
+        .onFocusChanged { focused = it.isFocused || it.hasFocus }
+        // The glyph is the whole button when there is no label, so the name has to
+        // reach a screen reader some other way.
+        .then(if (showLabel) Modifier else Modifier.semantics { contentDescription = label }),
+    ) {
+      glyph(
+        when {
+          focused -> ON_ACCENT
+          primary -> Color.White
+          else -> NebulaPalette.TextHigh
+        },
+      )
+      if (showLabel) {
+        Box(Modifier.width(10.dp))
+        Text(label, style = MaterialTheme.typography.labelLarge, maxLines = 1)
+      }
+    }
+  }
+
+  /** Two rounded bars: material-icons-core ships no pause glyph. */
+  @Composable
+  private fun PauseGlyph(tint: Color) {
+    Canvas(modifier = Modifier.size(20.dp)) {
+      val barWidth = size.width * 0.30f
+      val radius = CornerRadius(barWidth * 0.45f)
+      drawRoundRect(tint, Offset.Zero, Size(barWidth, size.height), radius)
+      drawRoundRect(tint, Offset(size.width - barWidth, 0f), Size(barWidth, size.height), radius)
+    }
+  }
+
+  /** Triangle into a bar, for the same reason as [PauseGlyph]. */
+  @Composable
+  private fun SkipNextGlyph(tint: Color) {
+    Canvas(modifier = Modifier.size(20.dp)) {
+      val barWidth = size.width * 0.18f
+      val triangleWidth = size.width - barWidth - size.width * 0.12f
+      drawPath(
+        Path().apply {
+          moveTo(0f, 0f)
+          lineTo(triangleWidth, size.height / 2f)
+          lineTo(0f, size.height)
+          close()
+        },
+        tint,
+      )
+      drawRoundRect(
+        tint,
+        Offset(size.width - barWidth, 0f),
+        Size(barWidth, size.height),
+        CornerRadius(barWidth * 0.45f),
+      )
+    }
+  }
+
+  /**
+   * The scrub bar, and the row focus lands on first: LEFT/RIGHT seek from here,
+   * which is the one thing a viewer does mid-film without wanting to read anything.
+   */
+  @Composable
+  private fun ScrubRow(target: InitialFocusTarget, focusable: Boolean) {
+    val actual by timePosSec
+    val preview by seekPreviewSec
+    val duration by durationSec
+    val speed by playbackSpeed
+    var focused by remember { mutableStateOf(false) }
+    // A seek that has not landed yet: the position under the thumb is where the
+    // presses have got to, not where mpv is.
+    val scrubbing = preview >= 0
+    val position = if (scrubbing) preview else actual
+    val fraction = if (duration > 0) (position / duration).toFloat().coerceIn(0f, 1f) else 0f
+    val shape = NebulaShapes.large
+    Row(
+      modifier = Modifier
+        .fillMaxWidth()
+        .onFocusChanged {
+          focused = it.isFocused
+          if (it.isFocused) {
+            osdRow.value = OsdRow.Scrub
+            osdHasFocus = true
+          }
+        }
+        .initialFocusTarget(if (focusable) target else null)
+        .focusable(enabled = focusable)
+        .background(
+          if (focused) NebulaPalette.Violet.copy(alpha = 0.14f) else Color.Transparent,
+          shape,
+        )
+        .border(2.dp, if (focused) NebulaPalette.VioletBright else Color.Transparent, shape)
+        .padding(horizontal = 16.dp, vertical = 10.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Text(
+        formatTime(position),
+        modifier = Modifier.width(TIME_WIDTH),
+        color = if (scrubbing) NebulaPalette.VioletBright else NebulaPalette.TextHigh,
+        style = MaterialTheme.typography.bodyMedium,
+        maxLines = 1,
+      )
+      ScrubBar(
+        fraction = fraction,
+        focused = focused,
+        scrubbing = scrubbing,
+        modifier = Modifier.weight(1f).padding(horizontal = 16.dp),
+      )
+      // Mid-seek the useful number is how far the presses have moved, not how much
+      // film is left: the viewer is aiming, and the target is what they are aiming
+      // at. Fixed width either side so neither ever shifts the bar.
+      val trailing = if (scrubbing) {
+        formatSignedTime(preview - actual)
+      } else {
+        PlaybackTimeline.remainingSec(position, duration, speed)
+          ?.let { "-${formatTime(it)}" }
+          .orEmpty()
+      }
+      Text(
+        trailing,
+        modifier = Modifier.width(TIME_WIDTH),
+        color = if (scrubbing) NebulaPalette.VioletBright else NebulaPalette.TextMuted,
+        style = MaterialTheme.typography.bodyMedium,
+        textAlign = TextAlign.End,
+        maxLines = 1,
+      )
+    }
+  }
+
+  /**
+   * The bar itself. [BoxWithConstraints] rather than a fraction-width thumb because
+   * the thumb has to stay inside the track at both ends, and a zero-width box with
+   * a circle in it hangs half of that circle off the left of the bar at 0:00.
+   */
+  @Composable
+  private fun ScrubBar(
+    fraction: Float,
+    focused: Boolean,
+    scrubbing: Boolean,
+    modifier: Modifier = Modifier,
+  ) {
+    val thumbSize = if (focused || scrubbing) 18.dp else 12.dp
+    BoxWithConstraints(
+      modifier = modifier.height(24.dp),
+      contentAlignment = Alignment.CenterStart,
+    ) {
+      val track = maxWidth
+      Box(
+        modifier = Modifier
+          .fillMaxWidth()
+          .height(SCRUB_BAR_HEIGHT)
+          .background(NebulaPalette.Outline, CircleShape),
+      )
+      Box(
+        modifier = Modifier
+          .fillMaxWidth(fraction)
+          .height(SCRUB_BAR_HEIGHT)
+          .background(NebulaAccentBrush, CircleShape),
+      )
+      Box(
+        modifier = Modifier
+          .offset(x = (track - thumbSize) * fraction)
+          .size(thumbSize)
+          .background(
+            if (scrubbing) NebulaPalette.VioletBright else NebulaPalette.TextHigh,
+            CircleShape,
+          ),
+      )
+    }
+  }
+
+  /** What the keys do from here, and when the film ends by the clock on the wall. */
+  @Composable
+  private fun OsdFooter(row: OsdRow, focusable: Boolean) {
     val actual by timePosSec
     val preview by seekPreviewSec
     val duration by durationSec
     val speed by playbackSpeed
     val position = if (preview >= 0) preview else actual
-    // Recomposed once a second by [position], which is also what keeps the end
-    // time below current without a clock of its own.
+    // Recomposed once a second by [position], which is what keeps the end time
+    // current without a clock of its own.
     val remaining = PlaybackTimeline.remainingSec(position, duration, speed)
-    Row(
-      modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
-      verticalAlignment = Alignment.CenterVertically,
-    ) {
-      Text(formatTime(position), color = Color.White, style = MaterialTheme.typography.bodyMedium)
-      Box(
-        modifier = Modifier
-          .weight(1f)
-          .padding(horizontal = 14.dp)
-          .height(5.dp)
-          .background(Color(0x66FFFFFF)),
-      ) {
-        val fraction = if (duration > 0) (position / duration).toFloat().coerceIn(0f, 1f) else 0f
-        Box(
-          modifier = Modifier
-            .fillMaxWidth(fraction)
-            .height(5.dp)
-            .background(MaterialTheme.colorScheme.primary),
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Text(
+        // The menu has its own hint line and is the thing being read while it is
+        // open; two sets of instructions on one screen contradict each other.
+        if (!focusable) {
+          ""
+        } else if (row == OsdRow.Buttons) {
+          "OK selects   |   LEFT/RIGHT moves   |   DOWN to the bar   |   BACK hides"
+        } else {
+          "OK play/pause   |   LEFT/RIGHT 10s   |   UP for controls   |   DOWN hides"
+        },
+        modifier = Modifier.weight(1f),
+        color = NebulaPalette.TextFaint,
+        style = MaterialTheme.typography.labelMedium,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+      if (remaining != null) {
+        val endsAt = PlaybackTimeline.endsAtEpochMs(System.currentTimeMillis(), remaining)
+        Text(
+          "Ends at ${formatClockTime(endsAt)}",
+          modifier = Modifier.padding(start = 16.dp),
+          color = NebulaPalette.TextFaint,
+          style = MaterialTheme.typography.labelMedium,
+          maxLines = 1,
         )
       }
-      Text(formatTime(duration), color = Color.White, style = MaterialTheme.typography.bodyMedium)
-    }
-    if (remaining != null) {
-      val endsAt = PlaybackTimeline.endsAtEpochMs(System.currentTimeMillis(), remaining)
-      Text(
-        "-${formatTime(remaining)}   |   Ends at ${formatClockTime(endsAt)}",
-        modifier = Modifier.padding(top = 4.dp),
-        color = Color(0xCCFFFFFF),
-        style = MaterialTheme.typography.bodySmall,
-      )
     }
   }
 
@@ -1563,7 +2029,7 @@ class MpvPlayerActivity : ComponentActivity() {
           KeyEvent.KEYCODE_BACK,
           KeyEvent.KEYCODE_MENU,
           KeyEvent.KEYCODE_CAPTIONS -> {
-            if (keyCode == KeyEvent.KEYCODE_BACK) menuCloseBackDownTime = event.downTime
+            if (keyCode == KeyEvent.KEYCODE_BACK) consumedBackDownTime = event.downTime
             closeMenu()
             return true
           }
@@ -1597,7 +2063,22 @@ class MpvPlayerActivity : ComponentActivity() {
     // menu and then, on the repeats that arrived after it had closed, leave the
     // film as well. Repeats of a press carry its original down time, so the press
     // that closed the menu can be recognised and ignored for the rest of its life.
-    if (keyCode == KeyEvent.KEYCODE_BACK && event.downTime == menuCloseBackDownTime) return true
+    if (keyCode == KeyEvent.KEYCODE_BACK && event.downTime == consumedBackDownTime) return true
+    // The controls are up and hold focus, so their own key map has already had
+    // these. What arrives here is what that map left to Compose's focus search and
+    // the search could not use either - a RIGHT off the end of the button row.
+    // Seeking on it would move the film while the viewer was only moving the
+    // highlight, which is the one thing a focusable OSD must not do.
+    if (osdVisible.value && osdHasFocus) {
+      if (keyCode == KeyEvent.KEYCODE_BACK) {
+        // BACK puts the controls away rather than leaving the film. The second
+        // press, with nothing on screen, is the one that exits.
+        consumedBackDownTime = event.downTime
+        hideOsd()
+        return true
+      }
+      if (keyCode in DPAD_KEYS) return true
+    }
     // A held key repeats around twenty times a second. Only the seek keys have
     // anything to do with that — [requestSeek] folds repeats into the coalescer —
     // and for the rest a repeat is meaningless: resting a thumb on OK toggled
@@ -1624,13 +2105,29 @@ class MpvPlayerActivity : ComponentActivity() {
         return requestSeek(-10.0, event.repeatCount > 0)
       KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD ->
         return requestSeek(10.0, event.repeatCount > 0)
-      KeyEvent.KEYCODE_DPAD_UP -> return requestSeek(60.0, event.repeatCount > 0)
-      KeyEvent.KEYCODE_DPAD_DOWN -> return requestSeek(-60.0, event.repeatCount > 0)
+      // Were ±60s, which nothing asked for on a remote whose LEFT/RIGHT already
+      // seek and can be held. The vertical axis is worth far more as the way in to
+      // the controls: on the remote this app is built for it is the only way in.
+      KeyEvent.KEYCODE_DPAD_UP -> {
+        showOsd(OsdRow.Buttons)
+        return true
+      }
+      KeyEvent.KEYCODE_DPAD_DOWN -> {
+        showOsd(OsdRow.Scrub)
+        return true
+      }
       // Was `cycle sub`, which on a fifteen-track remux meant pressing MENU up to
       // sixteen times to get back to the subtitles you started with, and left
       // audio tracks reachable only from a key most TV remotes do not have.
       KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_CAPTIONS -> {
         openMenu()
+        return true
+      }
+      // For the remotes that have it, and for HDMI-CEC. Does nothing on a film or
+      // before the lookup has found anything, which is what [skipToNextEpisode]
+      // reports rather than silently swallowing the press.
+      KeyEvent.KEYCODE_MEDIA_NEXT -> {
+        skipToNextEpisode()
         return true
       }
       // Kept for the remotes that do have it: one press, one audio track on, no
@@ -1647,6 +2144,63 @@ class MpvPlayerActivity : ComponentActivity() {
       }
     }
     return super.onKeyDown(keyCode, event)
+  }
+
+  /**
+   * The controls' own key map, ahead of Compose's focus search and of the
+   * activity's transport handling.
+   *
+   * It has to run as a preview from the panel's root: the scrub row is a
+   * full-width focusable node, and a plain key handler on it would see LEFT only
+   * after the focus search had already decided to walk sideways out of it.
+   */
+  private fun onOsdKey(event: ComposeKeyEvent): Boolean {
+    if (event.type != KeyEventType.KeyDown) return false
+    val native = event.nativeKeyEvent
+    val isRepeat = native.repeatCount > 0
+    noteInteraction()
+    // Any press is a viewer with the remote in hand, including the ones handed on
+    // to Compose below, so the countdown to hiding starts again from all of them.
+    armOsdHide()
+    if (osdRow.value == OsdRow.Buttons) {
+      return when (native.keyCode) {
+        // Back down to the bar, which is where the layout puts it.
+        KeyEvent.KEYCODE_DPAD_DOWN -> {
+          showOsd(OsdRow.Scrub)
+          true
+        }
+        // Nothing above the buttons, and swallowing it stops the focus search
+        // walking out of the panel onto whatever else the window holds.
+        KeyEvent.KEYCODE_DPAD_UP -> true
+        // LEFT, RIGHT and OK belong to the row itself: the focus search moves the
+        // highlight and the button under it handles the press.
+        else -> false
+      }
+    }
+    return when (native.keyCode) {
+      KeyEvent.KEYCODE_DPAD_LEFT -> requestSeek(-10.0, isRepeat)
+      KeyEvent.KEYCODE_DPAD_RIGHT -> requestSeek(10.0, isRepeat)
+      KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+        // Repeats dropped: a thumb resting on OK would otherwise toggle pause a
+        // dozen times a second.
+        if (!isRepeat) {
+          togglePause()
+          showOsd()
+        }
+        true
+      }
+      KeyEvent.KEYCODE_DPAD_UP -> {
+        showOsd(OsdRow.Buttons)
+        true
+      }
+      // Out of the controls altogether, which is the quickest way back to an
+      // unobstructed picture without waiting out the auto-hide.
+      KeyEvent.KEYCODE_DPAD_DOWN -> {
+        hideOsd()
+        true
+      }
+      else -> false
+    }
   }
 
   /**
@@ -1948,12 +2502,11 @@ class MpvPlayerActivity : ComponentActivity() {
   }
 
   /**
-   * Publishes a freshly read track list: the OSD's summary line, and the lists
-   * the menu is showing.
+   * Publishes a freshly read track list: the OSD's track chips, and the lists the
+   * menu is showing.
    */
   private fun applyTracks(parsed: List<MpvTrack>) {
     tracks.value = parsed
-    trackInfo.value = MpvTracks.osdLine(parsed, contentFps)
     maybeWarnDolbyVision(parsed)
     // Only ever set by the audio-cycle key, so this cannot learn a preference
     // from the track mpv chose on its own at file open.
@@ -2016,14 +2569,39 @@ class MpvPlayerActivity : ComponentActivity() {
     showOsd()
   }
 
-  private fun openMenu() {
+  /**
+   * [tab] is which of the two transport buttons was pressed, so the menu opens on
+   * what the viewer asked for rather than always on the track list and a second
+   * press to reach the rest.
+   */
+  private fun openMenu(tab: PlayerMenuTab = PlayerMenuTab.Audio) {
     if (!transportAllowed()) return
-    menuTab.value = PlayerMenuTab.Audio
+    menuTab.value = tab
     menuVisible.value = true
     // The list may be stale (or empty, if the menu is opened before the first
     // frame), and the OSD stays up for as long as the menu does.
     refreshTracks()
     showOsd()
+  }
+
+  /**
+   * Jumps to the next episode without waiting for the credits, from the transport
+   * button or a remote's skip key. Says so when there is nothing to jump to,
+   * because on a film and on a last episode the press is otherwise silent.
+   *
+   * Saves first: [startNextEpisode] moves the watch key, so a save after it would
+   * record this episode's position against the next one - the same reason the
+   * binge path saves before it hands over.
+   */
+  private fun skipToNextEpisode() {
+    if (!transportAllowed()) return
+    if (upNextTarget.value == null) {
+      showOsdMessage("No next episode")
+      return
+    }
+    saveWatchState(SaveReason.Stopped)
+    playNextEpisode()
+    showOsdMessage("Starting next episode")
   }
 
   private fun closeMenu() {
@@ -2360,18 +2938,55 @@ class MpvPlayerActivity : ComponentActivity() {
     showOsd()
   }
 
-  private fun showOsd() {
+  /**
+   * Brings the controls up and restarts the auto-hide. [row] null leaves the
+   * focused row where it was, which is what every incidental caller wants - a
+   * seek, a track change, an OSD message all mean "and show this", not "and move
+   * the viewer's place in the controls".
+   */
+  private fun showOsd(row: OsdRow? = null) {
+    if (row != null) osdRow.value = row
     osdVisible.value = true
+    armOsdHide()
+  }
+
+  /**
+   * (Re)starts the countdown to the controls hiding themselves.
+   *
+   * Re-arms rather than gives up when the moment is wrong, so the OSD comes down
+   * on its own once the reason is gone: a pause the viewer never explicitly ended
+   * — resumed from a media key, or by audio focus coming back — used to leave the
+   * panel over the picture for the rest of the film.
+   */
+  private fun armOsdHide() {
     val hideAt = SystemClock.uptimeMillis() + OSD_TIMEOUT_MS
     osdHideAtMs = hideAt
     mainHandler.postDelayed({
-      // The menu is a deliberate stop in the middle of a film, and the OSD's
-      // position is part of what makes a track choice make sense, so the
-      // auto-hide waits for the menu to close — [closeMenu] re-arms it.
-      if (osdHideAtMs == hideAt && !paused.value && !menuVisible.value) {
-        osdVisible.value = false
+      if (osdHideAtMs != hideAt) return@postDelayed
+      // A paused film says so nowhere else on screen; the menu is a deliberate
+      // stop, and the position under it is part of what makes a track choice make
+      // sense; and the up-next card owns the screen once the video has ended.
+      if (paused.value || menuVisible.value || upNextCard.value != null) {
+        armOsdHide()
+        return@postDelayed
       }
+      hideOsd()
     }, OSD_TIMEOUT_MS)
+  }
+
+  /**
+   * Puts the controls away. Clears [osdHasFocus] with them: the focused node goes
+   * with the panel, and leaving the flag set would have the activity swallow
+   * D-pad presses that now have nothing to act on.
+   */
+  private fun hideOsd() {
+    osdHideAtMs = Long.MIN_VALUE
+    osdVisible.value = false
+    osdHasFocus = false
+    // Back to the bar, so the controls always reopen on the row where LEFT/RIGHT
+    // seek. Coming back up on the buttons because that is where they were last
+    // left would silently change what the viewer's next press does.
+    osdRow.value = OsdRow.Scrub
   }
 
   /**
@@ -2560,8 +3175,29 @@ class MpvPlayerActivity : ComponentActivity() {
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
   }
 
+  /** How far a pending seek has travelled, which is what a scrub is aiming with. */
+  private fun formatSignedTime(deltaSec: Double): String {
+    val sign = if (deltaSec < 0) "-" else "+"
+    return sign + formatTime(kotlin.math.abs(deltaSec))
+  }
+
+  /**
+   * Held rather than derived in the composition because [season] and [episode] are
+   * plain fields the binge loop rewrites, and a plain field cannot tell Compose it
+   * has changed - the badge used to keep the previous episode's number for the
+   * whole of the next one.
+   */
+  private fun syncEpisodeLabel() {
+    episodeLabel.value = season?.let { "S${it}E$episode" }
+  }
+
   companion object {
-    private const val OSD_TIMEOUT_MS = 4_000L
+    /**
+     * How long the controls stay up with nobody pressing anything. Longer than the
+     * old four seconds because they are now something to read and walk around
+     * rather than a bar that flashed by.
+     */
+    private const val OSD_TIMEOUT_MS = 5_000L
     private const val SEEK_DEBOUNCE_MS = 350L
     private const val SEEK_REPEAT_MIN_MS = 120L
 
@@ -2679,10 +3315,22 @@ class MpvPlayerActivity : ComponentActivity() {
     private val SEEK_KEYS = setOf(
       KeyEvent.KEYCODE_DPAD_LEFT,
       KeyEvent.KEYCODE_DPAD_RIGHT,
-      KeyEvent.KEYCODE_DPAD_UP,
-      KeyEvent.KEYCODE_DPAD_DOWN,
       KeyEvent.KEYCODE_MEDIA_REWIND,
       KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
+    )
+
+    /**
+     * The keys the controls claim while they hold focus, so that whatever the
+     * panel's own map and Compose's focus search both declined dies there instead
+     * of falling through to the transport underneath.
+     */
+    private val DPAD_KEYS = setOf(
+      KeyEvent.KEYCODE_DPAD_LEFT,
+      KeyEvent.KEYCODE_DPAD_RIGHT,
+      KeyEvent.KEYCODE_DPAD_UP,
+      KeyEvent.KEYCODE_DPAD_DOWN,
+      KeyEvent.KEYCODE_DPAD_CENTER,
+      KeyEvent.KEYCODE_ENTER,
     )
 
     /** What accepts the up-next offer, when the card is up. */
@@ -2718,6 +3366,7 @@ class MpvPlayerActivity : ComponentActivity() {
       KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
       KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
       KeyEvent.KEYCODE_MEDIA_REWIND,
+      KeyEvent.KEYCODE_MEDIA_NEXT,
       KeyEvent.KEYCODE_MENU,
       KeyEvent.KEYCODE_CAPTIONS,
       KeyEvent.KEYCODE_MEDIA_AUDIO_TRACK,
@@ -2775,3 +3424,23 @@ class MpvPlayerActivity : ComponentActivity() {
     }
   }
 }
+
+/**
+ * Which row of the controls the D-pad is in.
+ *
+ * Tracked rather than inferred from focus because it is also where the controls
+ * should open: UP from a bare picture goes straight to the buttons, DOWN to the
+ * bar, and both have to be decided before anything is on screen to focus.
+ */
+private enum class OsdRow { Scrub, Buttons }
+
+/** Dark ink for the bright violet a focused control fills with. */
+private val ON_ACCENT = Color(0xFF120A2E)
+
+/** Fixed either side of the scrub bar so a changing digit never nudges the bar. */
+private val TIME_WIDTH = 96.dp
+
+private val SCRUB_BAR_HEIGHT = 8.dp
+
+/** Wide enough for an addon's error text, narrow enough to read across a room. */
+private const val ERROR_PANEL_WIDTH_FRACTION = 0.62f

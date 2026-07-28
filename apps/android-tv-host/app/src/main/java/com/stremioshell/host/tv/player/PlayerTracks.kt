@@ -206,18 +206,15 @@ object MpvTracks {
     rows.indexOfFirst { it.selected }.takeIf { it >= 0 } ?: 0
 
   /**
-   * The OSD's one-line summary, e.g.
-   * "Audio: English (TRUEHD)   |   Subtitles: off   |   23.976 fps".
+   * The OSD's frame-rate chip, e.g. "23.976 fps" or "25 fps", or null when mpv has
+   * not reported one yet - the chip is dropped rather than showing "0 fps".
+   *
+   * Trailing zeroes go because the three decimals only exist for 23.976 and 29.97;
+   * every whole rate would otherwise read as "25.000 fps".
    */
-  fun osdLine(tracks: List<MpvTrack>, fps: Float): String {
-    val audio = selected(tracks, TrackKind.Audio)?.osdLabel ?: "none"
-    val sub = selected(tracks, TrackKind.Subtitle)?.osdLabel ?: "off"
-    val fpsNote = if (fps > 0f) {
-      "   |   ${String.format(Locale.ROOT, "%.3f", fps).trimEnd('0').trimEnd('.')} fps"
-    } else {
-      ""
-    }
-    return "Audio: $audio   |   Subtitles: $sub$fpsNote"
+  fun fpsLabel(fps: Float): String? {
+    if (fps <= 0f) return null
+    return String.format(Locale.ROOT, "%.3f", fps).trimEnd('0').trimEnd('.') + " fps"
   }
 
   private fun MpvTrack.toRow() = TrackRow(

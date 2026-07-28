@@ -1,6 +1,6 @@
 # Android TV Host
 
-This folder contains the Android TV app for Stremio Shell TV: a native Jetpack
+This folder contains Nebula, the Android TV app: a native Jetpack
 Compose (TV) app talking to TMDB for catalog metadata, a Stremio addon (Comet)
 for streams, and libmpv for playback. There is no WebView shell any more - it
 was deleted in favour of the native app, along with the JS host bridge, the
@@ -16,6 +16,13 @@ bundled web assets and the JsSandbox core runtime.
   refresh-rate matching, up-next).
 - `com.stremioshell.host.update` - GitHub-release self-updater (`-tv-` named
   APK asset) plus the background update worker.
+
+## Bundled font
+
+`res/font/nebula_*.ttf` is Outfit (regular/medium/semibold/bold), bundled rather
+than downloaded because a TV app cannot count on Google Play Services fonts. It
+is licensed under the SIL Open Font License 1.1; the license text ships in
+`licenses/Outfit-OFL.txt`.
 
 ## Build and run
 

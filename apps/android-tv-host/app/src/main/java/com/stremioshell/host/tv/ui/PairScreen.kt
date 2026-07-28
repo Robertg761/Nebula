@@ -9,8 +9,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -20,16 +23,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
-import androidx.compose.runtime.DisposableEffect
-import androidx.tv.material3.Button
+import androidx.tv.material3.Border
 import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.Surface
+import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
 import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.pairing.encodeQrBitmap
+import com.stremioshell.host.tv.ui.theme.NebulaPalette
+import com.stremioshell.host.tv.ui.theme.NebulaShapes
+import androidx.compose.foundation.BorderStroke
 
 @Composable
 fun PairScreen(viewModel: TvAppViewModel, onPaired: () -> Unit) {
@@ -50,25 +56,54 @@ fun PairScreen(viewModel: TvAppViewModel, onPaired: () -> Unit) {
   RequestInitialFocus(target = cancelFocus, key = Unit, label = "Pair cancel")
 
   Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-    Column(
-      horizontalAlignment = Alignment.CenterHorizontally,
-      verticalArrangement = Arrangement.spacedBy(18.dp),
+    Surface(
+      shape = NebulaShapes.extraLarge,
+      colors = SurfaceDefaults.colors(containerColor = NebulaPalette.Surface),
+      border = Border(
+        border = BorderStroke(1.dp, NebulaPalette.Outline),
+        shape = NebulaShapes.extraLarge,
+      ),
+      modifier = Modifier.width(880.dp),
     ) {
-      when (val s = state) {
-        is TvAppViewModel.PairingState.Ready -> ReadyContent(s.url)
-        is TvAppViewModel.PairingState.Failed -> Text(
-          s.message,
-          style = MaterialTheme.typography.titleMedium,
-          textAlign = TextAlign.Center,
-        )
-        else -> PairingProgress()
-      }
-      Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Button(onClick = goBack, modifier = Modifier.initialFocusTarget(cancelFocus)) {
-          Text("Cancel")
-        }
-        if (state is TvAppViewModel.PairingState.Failed) {
-          Button(onClick = { viewModel.startPairing() }) { Text("Retry") }
+      Column(modifier = Modifier.padding(40.dp)) {
+        ScreenHeader("Set up with your phone")
+        Row(
+          modifier = Modifier.padding(top = 28.dp),
+          horizontalArrangement = Arrangement.spacedBy(36.dp),
+        ) {
+          Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(18.dp),
+          ) {
+            when (val s = state) {
+              is TvAppViewModel.PairingState.Ready -> ReadyInstructions(s.url)
+              is TvAppViewModel.PairingState.Failed -> Text(
+                s.message,
+                style = MaterialTheme.typography.titleMedium,
+                color = NebulaPalette.Danger,
+              )
+              else -> PairingProgress()
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+              NebulaButton(
+                text = "Cancel",
+                onClick = goBack,
+                style = NebulaButtonStyle.Ghost,
+                modifier = Modifier.initialFocusTarget(cancelFocus),
+              )
+              if (state is TvAppViewModel.PairingState.Failed) {
+                NebulaButton(
+                  text = "Retry",
+                  onClick = { viewModel.startPairing() },
+                  style = NebulaButtonStyle.Primary,
+                )
+              }
+            }
+          }
+          val ready = state as? TvAppViewModel.PairingState.Ready
+          if (ready != null) {
+            QrPanel(ready.url)
+          }
         }
       }
     }
@@ -77,57 +112,68 @@ fun PairScreen(viewModel: TvAppViewModel, onPaired: () -> Unit) {
 
 @Composable
 private fun PairingProgress() {
-  Column(
-    horizontalAlignment = Alignment.CenterHorizontally,
-    verticalArrangement = Arrangement.spacedBy(14.dp),
-  ) {
+  Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
     CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-    Text("Starting pairing...", style = MaterialTheme.typography.bodyMedium)
+    Text(
+      "Starting pairing...",
+      style = MaterialTheme.typography.bodyMedium,
+      color = NebulaPalette.TextMuted,
+    )
   }
 }
 
 @Composable
-private fun ReadyContent(url: String) {
+private fun ReadyInstructions(url: String) {
+  Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    Text(
+      "Scan this code with your phone's camera, then paste your TMDB key and addon URLs there.",
+      style = MaterialTheme.typography.bodyLarge,
+      color = NebulaPalette.TextMuted,
+    )
+    // Read out loud across a room, not just scanned - the token-bearing path is long, so it is
+    // set apart as its own chip rather than run into the sentence around it.
+    Text(
+      "or open this in your phone's browser",
+      style = MaterialTheme.typography.bodySmall,
+      color = NebulaPalette.TextFaint,
+    )
+    Text(
+      url,
+      style = MaterialTheme.typography.bodyMedium,
+      color = NebulaPalette.TextHigh,
+      modifier = Modifier
+        .background(NebulaPalette.SurfaceVariant, NebulaShapes.small)
+        .padding(horizontal = 16.dp, vertical = 12.dp),
+    )
+    Text(
+      "Your phone must be on the same Wi-Fi as this TV.",
+      style = MaterialTheme.typography.bodySmall,
+      color = NebulaPalette.TextFaint,
+    )
+  }
+}
+
+@Composable
+private fun QrPanel(url: String) {
   // Encode off the main thread; 520x520 pixel fill would otherwise hitch.
   val qr: ImageBitmap? by produceState<ImageBitmap?>(initialValue = null, url) {
     value = withContext(Dispatchers.Default) { encodeQrBitmap(url, 520).asImageBitmap() }
   }
-  Column(
-    horizontalAlignment = Alignment.CenterHorizontally,
-    verticalArrangement = Arrangement.spacedBy(18.dp),
+  Box(
+    modifier = Modifier
+      .background(Color.White, RoundedCornerShape(20.dp))
+      .padding(20.dp),
+    contentAlignment = Alignment.Center,
   ) {
-    Text("Set up with your phone", style = MaterialTheme.typography.headlineMedium)
-    Text(
-      "Scan this code with your phone's camera, then paste your TMDB key and addon URLs there.",
-      style = MaterialTheme.typography.bodyLarge,
-      textAlign = TextAlign.Center,
-      modifier = Modifier.padding(horizontal = 40.dp),
-    )
     val bitmap = qr
     if (bitmap != null) {
       Image(
         bitmap = bitmap,
         contentDescription = "Pairing QR code",
-        modifier = Modifier
-          .size(260.dp)
-          .background(Color.White)
-          .padding(10.dp),
+        modifier = Modifier.size(260.dp),
       )
     } else {
       Box(modifier = Modifier.size(260.dp))
     }
-    // The URL carries the one-time pairing token, so it is long enough to need wrapping.
-    Text(
-      "or open  $url  in your phone browser",
-      style = MaterialTheme.typography.bodyMedium,
-      color = MaterialTheme.colorScheme.onSurfaceVariant,
-      textAlign = TextAlign.Center,
-      modifier = Modifier.padding(horizontal = 40.dp),
-    )
-    Text(
-      "Your phone must be on the same Wi-Fi as this TV.",
-      style = MaterialTheme.typography.bodySmall,
-      color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
   }
 }

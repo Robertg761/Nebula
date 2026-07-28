@@ -1,6 +1,7 @@
 package com.stremioshell.host.tv.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -12,6 +13,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.runtime.Composable
@@ -25,6 +27,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -39,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.FilterChip
 import androidx.tv.material3.FilterChipDefaults
+import androidx.tv.material3.Glow
 import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
@@ -48,9 +52,21 @@ import com.stremioshell.host.tv.data.tmdb.MediaItem
 import com.stremioshell.host.tv.data.tmdb.MediaType
 import com.stremioshell.host.tv.data.tmdb.SearchFilter
 import com.stremioshell.host.tv.data.tmdb.SearchResults
+import com.stremioshell.host.tv.ui.theme.NebulaDimens
+import com.stremioshell.host.tv.ui.theme.NebulaPalette
+import com.stremioshell.host.tv.ui.theme.NebulaShapes
+import com.stremioshell.host.tv.ui.theme.nebulaFocusBorder
 
 /** How long typing has to pause before the query costs a TMDB request. */
 private const val SEARCH_DEBOUNCE_MS = 400L
+
+/**
+ * Ink for anything sitting on an accent fill.
+ *
+ * Near-black rather than the palette's own text colours: violet at full strength is bright enough
+ * that TextHigh on top of it fails contrast at three metres. Same value the primary button uses.
+ */
+private val OnAccent = Color(0xFF120A2E)
 
 @OptIn(FlowPreview::class)
 @Composable
@@ -112,19 +128,21 @@ fun SearchScreen(viewModel: TvAppViewModel, onItemClick: (MediaType, Int) -> Uni
     SearchPresentation.resolve(typed = query, requested = requested, state = results, filter = filter)
   }
 
-  Column(modifier = Modifier.fillMaxSize().padding(horizontal = 48.dp, vertical = 24.dp)) {
-    OutlinedTextField(
+  // Edge padding is carried by the children rather than by this column, so the results grid can pad
+  // its own contents instead: a lazy list clips to its bounds, and the focus ring sits outside the
+  // card it belongs to.
+  Column(modifier = Modifier.fillMaxSize().padding(vertical = 28.dp)) {
+    ScreenHeader(
+      title = "Search",
+      modifier = Modifier.padding(start = NebulaDimens.ScreenEdge, bottom = 22.dp),
+    )
+
+    SearchField(
       value = query,
       onValueChange = { query = it },
-      singleLine = true,
-      placeholder = { Text("Search movies and shows") },
-      colors = OutlinedTextFieldDefaults.colors(
-        focusedTextColor = Color.White,
-        unfocusedTextColor = Color.White,
-        focusedBorderColor = MaterialTheme.colorScheme.primary,
-      ),
       modifier = Modifier
         .fillMaxWidth()
+        .padding(horizontal = NebulaDimens.ScreenEdge)
         .initialFocusTarget(queryField)
         // A material3 text field traps the D-pad on TV, so move focus down explicitly before the
         // field consumes the key (same workaround as SettingsScreen's verticalFieldNav). The chips
@@ -138,18 +156,19 @@ fun SearchScreen(viewModel: TvAppViewModel, onItemClick: (MediaType, Int) -> Uni
       firstChipFocus = filterRowFocus,
       resultsFocus = resultsFocus,
       firstResultFocus = firstResultFocus,
-      modifier = Modifier.padding(top = 18.dp, bottom = 18.dp),
+      modifier = Modifier.padding(start = NebulaDimens.ScreenEdge, top = 20.dp, bottom = 20.dp),
     )
 
     when (ui) {
-      SearchUi.Idle -> CenteredMessage(
+      SearchUi.Idle -> CenteredEmptyState(
         "Search movies and shows",
         "Start typing - results appear as you go.",
       )
       SearchUi.Searching -> CenteredLoading("Searching...")
-      is SearchUi.Empty -> CenteredMessage(ui.title, ui.hint)
+      is SearchUi.Empty -> CenteredEmptyState(ui.title, ui.hint)
       // Retry re-runs the query directly: the debounce only fires on a *change* to the field, so
-      // nothing would retry a failure on its own.
+      // nothing would retry a failure on its own. Kept as FailureMessage rather than an empty
+      // state because its Retry button is the only focusable a failed search has.
       is SearchUi.Failed -> FailureMessage(
         ui.message,
         onRetry = {
@@ -163,14 +182,23 @@ fun SearchScreen(viewModel: TvAppViewModel, onItemClick: (MediaType, Int) -> Uni
         Text(
           text = if (ui.refreshing) "Searching..." else SearchResults.countLabel(ui.items.size),
           style = MaterialTheme.typography.labelMedium,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
-          modifier = Modifier.padding(bottom = 12.dp),
+          color = NebulaPalette.TextMuted,
+          modifier = Modifier.padding(start = NebulaDimens.ScreenEdge, bottom = 12.dp),
         )
         LazyVerticalGrid(
-          columns = GridCells.Adaptive(minSize = 140.dp),
-          horizontalArrangement = Arrangement.spacedBy(16.dp),
-          verticalArrangement = Arrangement.spacedBy(20.dp),
-          contentPadding = PaddingValues(bottom = 32.dp),
+          columns = GridCells.Adaptive(minSize = NebulaDimens.PosterWidth),
+          horizontalArrangement = Arrangement.spacedBy(NebulaDimens.CardGap),
+          // Wider apart down the page than across it: a focused card grows about its own centre,
+          // and a grid is the one place where that growth lands on another card's caption.
+          verticalArrangement = Arrangement.spacedBy(28.dp),
+          // The slack is in the padding, not the arrangement: a focused card's ring and glow spill
+          // past its bounds and a lazy grid clips to its own edges.
+          contentPadding = PaddingValues(
+            start = NebulaDimens.ScreenEdge,
+            end = NebulaDimens.ScreenEdge,
+            top = 10.dp,
+            bottom = 40.dp,
+          ),
           modifier = Modifier.focusRequester(resultsFocus).restoreRowFocus(),
         ) {
           items(ui.items.size, key = { ui.items[it].key }) { index ->
@@ -214,6 +242,54 @@ fun SearchScreen(viewModel: TvAppViewModel, onItemClick: (MediaType, Int) -> Uni
 }
 
 /**
+ * The query field.
+ *
+ * A stock text field is the one control on this screen Material draws its own way, and next to the
+ * cards it reads as part of a different app - so the fill, the corner and the border all come from
+ * the palette instead. The focused border is Material's own 2dp indicator recoloured; nothing here
+ * changes how the field behaves, which is deliberate given what its key handling is holding
+ * together.
+ */
+@Composable
+private fun SearchField(value: String, onValueChange: (String) -> Unit, modifier: Modifier = Modifier) {
+  OutlinedTextField(
+    value = value,
+    onValueChange = onValueChange,
+    singleLine = true,
+    shape = NebulaShapes.large,
+    textStyle = MaterialTheme.typography.bodyLarge,
+    leadingIcon = {
+      Icon(
+        Icons.Filled.Search,
+        // Decorative: the placeholder beside it says what the field is for.
+        contentDescription = null,
+        tint = NebulaPalette.TextMuted,
+        modifier = Modifier.size(22.dp),
+      )
+    },
+    placeholder = {
+      Text(
+        "Search movies and shows",
+        style = MaterialTheme.typography.bodyLarge,
+        color = NebulaPalette.TextMuted,
+      )
+    },
+    colors = OutlinedTextFieldDefaults.colors(
+      focusedTextColor = NebulaPalette.TextHigh,
+      unfocusedTextColor = NebulaPalette.TextHigh,
+      // Lifts a step on focus, so the field reads as live even from across the room where a
+      // border alone is a hairline.
+      focusedContainerColor = NebulaPalette.SurfaceVariant,
+      unfocusedContainerColor = NebulaPalette.Surface,
+      focusedBorderColor = NebulaPalette.VioletBright,
+      unfocusedBorderColor = NebulaPalette.Outline,
+      cursorColor = NebulaPalette.VioletBright,
+    ),
+    modifier = modifier,
+  )
+}
+
+/**
  * The type filter above the results.
  *
  * Chips rather than tabs: the results below are the same destination narrowed, not a different one,
@@ -236,7 +312,7 @@ private fun SearchFilterRow(
   modifier: Modifier = Modifier,
 ) {
   Row(
-    horizontalArrangement = Arrangement.spacedBy(12.dp),
+    horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
     modifier = modifier
       // Down out of the chips aims into the grid rather than letting the default focus search pick
       // its way into a lazy one. When there is no grid - the empty, failed and idle states - both
@@ -252,6 +328,7 @@ private fun SearchFilterRow(
         }
       },
   ) {
+    val chipShape = FilterChipDefaults.ContainerShape
     SearchFilter.values().forEachIndexed { index, option ->
       val isSelected = option == selected
       // One FilterChip per option whatever the selection, rather than swapping composable types on
@@ -259,6 +336,31 @@ private fun SearchFilterRow(
       FilterChip(
         selected = isSelected,
         onClick = { onSelect(option) },
+        // Selection is the accent fill and focus is the ring, so the two never have to be told
+        // apart by brightness - the remote can be parked on "Movies" while "Shows" is the filter
+        // actually applied, and that pair has to be readable at a glance.
+        colors = FilterChipDefaults.colors(
+          containerColor = NebulaPalette.SurfaceVariant,
+          contentColor = NebulaPalette.TextMuted,
+          focusedContainerColor = NebulaPalette.SurfaceVariant,
+          focusedContentColor = NebulaPalette.TextHigh,
+          pressedContainerColor = NebulaPalette.SurfaceVariant,
+          pressedContentColor = NebulaPalette.TextHigh,
+          selectedContainerColor = NebulaPalette.Violet,
+          selectedContentColor = OnAccent,
+          focusedSelectedContainerColor = NebulaPalette.VioletBright,
+          focusedSelectedContentColor = OnAccent,
+          pressedSelectedContainerColor = NebulaPalette.VioletBright,
+          pressedSelectedContentColor = OnAccent,
+        ),
+        border = FilterChipDefaults.border(
+          focusedBorder = nebulaFocusBorder(chipShape),
+          focusedSelectedBorder = nebulaFocusBorder(chipShape),
+        ),
+        glow = FilterChipDefaults.glow(
+          focusedGlow = Glow(elevationColor = NebulaPalette.Violet, elevation = 10.dp),
+          focusedSelectedGlow = Glow(elevationColor = NebulaPalette.Violet, elevation = 10.dp),
+        ),
         // A tick as well as the container colour: the focused chip is also filled, so colour alone
         // does not say which one is actually applied.
         leadingIcon = if (!isSelected) null else {
@@ -272,9 +374,20 @@ private fun SearchFilterRow(
         },
         modifier = if (index == 0) Modifier.focusRequester(firstChipFocus) else Modifier,
       ) {
-        Text(option.label)
+        Text(option.label, style = MaterialTheme.typography.labelLarge)
       }
     }
+  }
+}
+
+/**
+ * The shared [CenteredMessage] carries no icon, and a bare line of text alone in the middle of the
+ * screen reads as something having gone wrong rather than as a prompt.
+ */
+@Composable
+private fun CenteredEmptyState(title: String, hint: String?) {
+  Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    EmptyState(title = title, hint = hint, icon = Icons.Filled.Search)
   }
 }
 

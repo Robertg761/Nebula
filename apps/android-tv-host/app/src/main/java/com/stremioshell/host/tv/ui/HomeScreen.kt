@@ -2,12 +2,14 @@ package com.stremioshell.host.tv.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -19,6 +21,10 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -33,7 +39,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -45,7 +50,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.tv.material3.Button
+import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
@@ -59,6 +64,14 @@ import com.stremioshell.host.tv.data.tmdb.DetailsMetadata
 import com.stremioshell.host.tv.data.tmdb.HeroPick
 import com.stremioshell.host.tv.data.tmdb.MediaItem
 import com.stremioshell.host.tv.data.tmdb.MediaType
+import com.stremioshell.host.tv.ui.theme.NebulaAccentBrush
+import com.stremioshell.host.tv.ui.theme.NebulaBottomScrim
+import com.stremioshell.host.tv.ui.theme.NebulaDimens
+import com.stremioshell.host.tv.ui.theme.NebulaHeroScrim
+import com.stremioshell.host.tv.ui.theme.NebulaPalette
+import com.stremioshell.host.tv.ui.theme.NebulaShapes
+import com.stremioshell.host.tv.ui.theme.nebulaCardBorder
+import com.stremioshell.host.tv.ui.theme.nebulaCardGlow
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -148,20 +161,40 @@ fun HomeScreen(
   if (needsSetup) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
       Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("Welcome", style = MaterialTheme.typography.displaySmall)
+        // The wordmark, set the way the launcher banner sets it - a first run is the one moment
+        // the app has to introduce itself, and it is also the only screen with room to do it.
         Text(
-          "Connect your TMDB account and Comet addon to start streaming.",
-          style = MaterialTheme.typography.bodyLarge,
-          modifier = Modifier.padding(top = 10.dp, bottom = 24.dp),
+          text = "NEBULA",
+          style = MaterialTheme.typography.displayMedium,
+          letterSpacing = 14.sp,
+          color = NebulaPalette.TextHigh,
         )
-        Button(onClick = onPairWithPhone, modifier = Modifier.initialFocusTarget(firstContentFocus)) {
-          Text("Set up with phone")
-        }
-        Button(
-          onClick = onOpenSettings,
-          modifier = Modifier.padding(top = 12.dp),
-        ) {
-          Text("Enter manually")
+        Box(
+          modifier = Modifier
+            .padding(top = 12.dp)
+            .size(width = 128.dp, height = 4.dp)
+            .background(NebulaAccentBrush, RoundedCornerShape(2.dp))
+            .clearAndSetSemantics {},
+        )
+        Text(
+          "Add your TMDB key and a stream addon, and this screen becomes your catalog.",
+          style = MaterialTheme.typography.bodyLarge,
+          color = NebulaPalette.TextMuted,
+          modifier = Modifier.padding(top = 22.dp, bottom = 34.dp),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
+          NebulaButton(
+            text = "Set up with phone",
+            onClick = onPairWithPhone,
+            style = NebulaButtonStyle.Primary,
+            icon = Icons.Filled.Phone,
+            modifier = Modifier.initialFocusTarget(firstContentFocus),
+          )
+          NebulaButton(
+            text = "Enter manually",
+            onClick = onOpenSettings,
+            icon = Icons.Filled.Edit,
+          )
         }
       }
     }
@@ -187,8 +220,8 @@ fun HomeScreen(
   // ~18% down, so up/down is consistent instead of jamming rows at the edge.
   CompositionLocalProvider(LocalBringIntoViewSpec provides FocusLineBringIntoViewSpec) {
     LazyColumn(
-      verticalArrangement = Arrangement.spacedBy(28.dp),
-      contentPadding = PaddingValues(top = 32.dp, bottom = 48.dp),
+      verticalArrangement = Arrangement.spacedBy(NebulaDimens.RailGap),
+      contentPadding = PaddingValues(top = 36.dp, bottom = 56.dp),
       modifier = Modifier
         .fillMaxSize()
         // Each row already remembers its card; this is what makes the column remember the row, so
@@ -307,12 +340,27 @@ fun HomeScreen(
  */
 @Composable
 private fun RailsStatusRow(message: String, onRetry: (() -> Unit)?) {
-  Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 48.dp)) {
-    Text(message, style = MaterialTheme.typography.bodyLarge)
+  Column(
+    modifier = Modifier
+      .fillMaxWidth()
+      .padding(horizontal = NebulaDimens.ScreenEdge)
+      .background(NebulaPalette.Surface, NebulaShapes.medium)
+      .padding(horizontal = 24.dp, vertical = 20.dp),
+  ) {
+    Text(
+      text = message,
+      style = MaterialTheme.typography.bodyMedium,
+      // Muted rather than the error colour: by the time this row renders there is already usable
+      // content above it, so a red bar would overstate what went wrong.
+      color = NebulaPalette.TextMuted,
+    )
     if (onRetry != null) {
-      Button(onClick = onRetry, modifier = Modifier.padding(top = 12.dp)) {
-        Text("Retry")
-      }
+      NebulaButton(
+        text = "Retry",
+        onClick = onRetry,
+        icon = Icons.Filled.Refresh,
+        modifier = Modifier.padding(top = 14.dp),
+      )
     }
   }
 }
@@ -325,15 +373,15 @@ private val FocusLineBringIntoViewSpec = object : BringIntoViewSpec {
   }
 }
 
-/**
- * Billboard height. Roughly 55% of a 1080p TV's 540dp-tall viewport: it leads the screen the way a
- * 10-foot layout expects while still leaving the top of the first row visible, so it is obvious that
- * pressing down goes somewhere.
- */
-private val HERO_HEIGHT = 300.dp
-
 /** Keeps the billboard's copy off the interesting half of the backdrop. */
 private const val HERO_TEXT_WIDTH_FRACTION = 0.55f
+
+/**
+ * Splits [DetailsMetadata]'s joined line back into the facts it was built from, so the billboard can
+ * set them as chips. Reading the formatter's output rather than re-deriving the fields keeps the
+ * ordering and omission rules in the one tested place they belong.
+ */
+private val HERO_METADATA_SEPARATOR = Regex("""\s*•\s*""")
 
 /** True for the four D-pad arrows, which is all we need to detect deliberate navigation. */
 private fun Key.isDirectional(): Boolean =
@@ -357,9 +405,13 @@ private fun HeroBillboard(
   focusTarget: InitialFocusTarget?,
 ) {
   val metadata = DetailsMetadata.ofItem(featured)
+  val chips = remember(metadata) {
+    metadata.split(HERO_METADATA_SEPARATOR).map { it.trim() }.filter { it.isNotEmpty() }
+  }
+  val score = remember(featured.rating) { DetailsMetadata.scoreLabel(featured.rating) }
   Box(
     modifier = Modifier
-      .padding(horizontal = 48.dp)
+      .padding(horizontal = NebulaDimens.ScreenEdge)
       .initialFocusTarget(focusTarget),
   ) {
     Card(
@@ -367,10 +419,13 @@ private fun HeroBillboard(
       // No focus scale: a banner this wide would grow past the screen edges, and TV overscan
       // would clip the border that says it is focused.
       scale = CardDefaults.scale(focusedScale = 1f),
+      shape = CardDefaults.shape(shape = NebulaShapes.large),
+      border = nebulaCardBorder(NebulaShapes.large),
+      glow = nebulaCardGlow(),
       // One focusable banner, so it announces as one sentence rather than as an image followed by
       // four loose lines of text. The synopsis is left out on purpose: it is read in full one
       // screen later, and here it would stand between the viewer and every rail below.
-      modifier = Modifier.fillMaxWidth().height(HERO_HEIGHT)
+      modifier = Modifier.fillMaxWidth().height(NebulaDimens.HeroHeight)
         .semantics(mergeDescendants = true) {
           contentDescription = A11yLabels.hero(featured.title, metadata)
         },
@@ -384,55 +439,59 @@ private fun HeroBillboard(
           contentDescription = null,
           modifier = Modifier.fillMaxSize(),
         )
-        // TMDB backdrops are full-frame stills with no safe area for text, so the left side is
-        // darkened rather than trusting the image.
-        Box(
-          modifier = Modifier
-            .fillMaxSize()
-            .background(
-              Brush.horizontalGradient(
-                0.0f to MaterialTheme.colorScheme.surface,
-                0.45f to MaterialTheme.colorScheme.surface.copy(alpha = 0.82f),
-                1.0f to Color.Transparent,
-              ),
-            ),
-        )
+        // TMDB backdrops are full-frame stills with no safe area for text, so the readable side is
+        // manufactured rather than trusted to the image. Two passes: the horizontal wash carries
+        // the copy, the vertical one settles the banner into the rail beneath it instead of
+        // ending at a hard line.
+        Box(modifier = Modifier.fillMaxSize().background(NebulaHeroScrim))
+        Box(modifier = Modifier.fillMaxSize().background(NebulaBottomScrim))
         Column(
           modifier = Modifier
             .align(Alignment.BottomStart)
             .fillMaxWidth(HERO_TEXT_WIDTH_FRACTION)
-            .padding(start = 32.dp, end = 24.dp, bottom = 28.dp),
+            .padding(start = 36.dp, end = 24.dp, bottom = 32.dp),
         ) {
           Text(
             text = featured.title,
             style = MaterialTheme.typography.displaySmall,
+            color = NebulaPalette.TextHigh,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
           )
-          if (metadata.isNotBlank()) {
-            Text(
-              text = metadata,
-              style = MaterialTheme.typography.labelLarge,
-              modifier = Modifier.padding(top = 8.dp),
-            )
+          if (chips.isNotEmpty()) {
+            Row(
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+              modifier = Modifier.padding(top = 12.dp),
+            ) {
+              chips.forEach { chip ->
+                NebulaBadge(
+                  text = chip,
+                  // The score is the one fact a viewer scans for, so it is the only chip that
+                  // gets to be coloured; the rest would just be noise in violet.
+                  tone = if (chip == score) BadgeTone.Accent else BadgeTone.Neutral,
+                )
+              }
+            }
           }
           if (featured.overview.isNotBlank()) {
             Text(
               text = featured.overview,
               style = MaterialTheme.typography.bodyMedium,
+              color = NebulaPalette.TextMuted,
               maxLines = 3,
               overflow = TextOverflow.Ellipsis,
-              modifier = Modifier.padding(top = 10.dp),
+              modifier = Modifier.padding(top = 14.dp),
             )
           }
           Text(
             text = "View details  ›",
             style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onPrimary,
+            // Dark ink on the accent gradient, the same pairing a focused NebulaButton uses.
+            color = Color(0xFF120A2E),
             modifier = Modifier
-              .padding(top = 18.dp)
-              .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(50))
-              .padding(horizontal = 22.dp, vertical = 9.dp),
+              .padding(top = 20.dp)
+              .background(NebulaAccentBrush, RoundedCornerShape(50))
+              .padding(horizontal = 24.dp, vertical = 10.dp),
           )
         }
       }
@@ -467,16 +526,14 @@ private fun MediaRowFocusable(
       .collect { last -> if (last >= 0) reportLastVisible(last) }
   }
   Column(modifier = Modifier.fillMaxWidth()) {
-    Text(
-      text = title,
-      style = MaterialTheme.typography.titleLarge,
-      modifier = Modifier.padding(start = 48.dp, bottom = 12.dp),
-    )
+    RailHeading(title)
     LazyRow(
       state = listState,
       modifier = Modifier.restoreRowFocus(),
-      contentPadding = PaddingValues(horizontal = 48.dp),
-      horizontalArrangement = Arrangement.spacedBy(16.dp),
+      // Vertical slack because a lazy row clips its children, and a focused card's ring and glow
+      // both sit outside the card's own bounds.
+      contentPadding = PaddingValues(horizontal = NebulaDimens.ScreenEdge, vertical = 8.dp),
+      horizontalArrangement = Arrangement.spacedBy(NebulaDimens.CardGap),
     ) {
       items(items.size, key = { items[it].key }) { index ->
         val item = items[index]
@@ -502,14 +559,17 @@ private fun MediaRowFocusable(
 @Composable
 private fun LoadingMoreCard() {
   Box(
+    // Poster-shaped and poster-sized, so the rail's rhythm does not break where the page ends.
     modifier = Modifier
-      .width(140.dp)
-      .height(200.dp)
-      .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp)),
+      .width(NebulaDimens.PosterWidth)
+      .height(NebulaDimens.PosterHeight)
+      .background(NebulaPalette.Surface, NebulaDimens.PosterShape)
+      .border(1.dp, NebulaPalette.Outline, NebulaDimens.PosterShape),
     contentAlignment = Alignment.Center,
   ) {
     CircularProgressIndicator(
-      color = MaterialTheme.colorScheme.primary,
+      color = NebulaPalette.Violet,
+      trackColor = NebulaPalette.Outline,
       modifier = Modifier.size(28.dp),
     )
   }
@@ -529,15 +589,11 @@ private fun WatchlistRow(
   firstCardFocus: InitialFocusTarget?,
 ) {
   Column(modifier = Modifier.fillMaxWidth()) {
-    Text(
-      text = "My List",
-      style = MaterialTheme.typography.titleLarge,
-      modifier = Modifier.padding(start = 48.dp, bottom = 12.dp),
-    )
+    RailHeading("My List")
     LazyRow(
       modifier = Modifier.restoreRowFocus(),
-      contentPadding = PaddingValues(horizontal = 48.dp),
-      horizontalArrangement = Arrangement.spacedBy(16.dp),
+      contentPadding = PaddingValues(horizontal = NebulaDimens.ScreenEdge, vertical = 8.dp),
+      horizontalArrangement = Arrangement.spacedBy(NebulaDimens.CardGap),
     ) {
       items(entries.size, key = { entries[it].key }) { index ->
         val entry = entries[index]
@@ -561,26 +617,25 @@ private fun ContinueWatchingRow(
   firstCardFocus: InitialFocusTarget?,
 ) {
   Column {
-    Text(
-      text = "Continue Watching",
-      style = MaterialTheme.typography.titleLarge,
-      modifier = Modifier.padding(start = 48.dp, bottom = 12.dp),
-    )
+    RailHeading("Continue Watching")
     LazyRow(
       modifier = Modifier.restoreRowFocus(),
-      contentPadding = PaddingValues(horizontal = 48.dp),
-      horizontalArrangement = Arrangement.spacedBy(16.dp),
+      contentPadding = PaddingValues(horizontal = NebulaDimens.ScreenEdge, vertical = 8.dp),
+      horizontalArrangement = Arrangement.spacedBy(NebulaDimens.CardGap),
     ) {
       items(entries.size, key = { entries[it].key }) { index ->
         val entry = entries[index]
-        Column(modifier = Modifier.width(140.dp)) {
+        Column(modifier = Modifier.width(NebulaDimens.PosterWidth)) {
           Card(
             onClick = { onResumeClick(entry) },
             onLongClick = { onOptions(entry) },
-            scale = CardDefaults.scale(focusedScale = 1.08f),
+            scale = CardDefaults.scale(focusedScale = NebulaDimens.FocusScale),
+            shape = CardDefaults.shape(shape = NebulaDimens.PosterShape),
+            border = nebulaCardBorder(),
+            glow = nebulaCardGlow(),
             // The bar across the bottom of the card is the only thing that says how far in this
             // is, and a bar has nothing to announce, so the position rides in the description.
-            modifier = Modifier.width(140.dp).height(200.dp)
+            modifier = Modifier.width(NebulaDimens.PosterWidth).height(NebulaDimens.PosterHeight)
               .initialFocusTarget(if (index == 0) firstCardFocus else null)
               .semantics(mergeDescendants = true) {
                 contentDescription = A11yLabels.continueWatching(
@@ -598,36 +653,77 @@ private fun ContinueWatchingRow(
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
               ) {
-                Text(entry.title, maxLines = 3, modifier = Modifier.padding(8.dp))
+                Text(
+                  text = entry.title,
+                  style = MaterialTheme.typography.titleSmall,
+                  color = NebulaPalette.TextMuted,
+                  maxLines = 4,
+                  overflow = TextOverflow.Ellipsis,
+                  modifier = Modifier.padding(8.dp),
+                )
               }
-              // Watched-progress bar pinned to the card bottom.
+              // The bar needs something to sit on: over a pale poster foot a thin violet line
+              // simply disappears.
               Box(
                 modifier = Modifier
                   .align(Alignment.BottomStart)
                   .fillMaxWidth()
-                  .height(5.dp)
-                  .background(MaterialTheme.colorScheme.surfaceVariant),
-              ) {
-                Box(
-                  modifier = Modifier
-                    .fillMaxWidth(entry.progress)
-                    .height(5.dp)
-                    .background(MaterialTheme.colorScheme.primary),
-                )
-              }
+                  .height(48.dp)
+                  .background(NebulaBottomScrim),
+              )
+              NebulaProgressBar(
+                progress = entry.progress,
+                height = 4.dp,
+                modifier = Modifier
+                  .align(Alignment.BottomStart)
+                  .fillMaxWidth()
+                  .padding(horizontal = 8.dp)
+                  .padding(bottom = 8.dp),
+              )
             }
           }
-          val suffix = if (entry.season != null) " S${entry.season}E${entry.episode}" else ""
           Text(
-            text = entry.title + suffix,
+            text = entry.title,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             style = MaterialTheme.typography.bodySmall,
+            color = NebulaPalette.TextHigh,
             // Visual echo of the card's description; left readable it is announced twice.
-            modifier = Modifier.padding(top = 14.dp).clearAndSetSemantics {},
+            modifier = Modifier.padding(top = 12.dp).clearAndSetSemantics {},
           )
+          val caption = remember(entry) {
+            listOfNotNull(
+              entry.season?.let { "S${it}E${entry.episode}" },
+              remainingLabel(entry),
+            ).joinToString(" · ")
+          }
+          if (caption.isNotEmpty()) {
+            Text(
+              text = caption,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+              style = MaterialTheme.typography.labelSmall,
+              color = NebulaPalette.TextMuted,
+              modifier = Modifier.padding(top = 3.dp).clearAndSetSemantics {},
+            )
+          }
         }
       }
     }
   }
+}
+
+/**
+ * "22m left" for a part-watched video, "Watched" once it is finished, null when the duration was
+ * never recorded - which is the case for anything played before durations were stored, and is why
+ * this returns null rather than a confident "0m left".
+ */
+private fun remainingLabel(entry: WatchEntry): String? {
+  if (entry.watched) return "Watched"
+  if (entry.durationMs <= 0) return null
+  val remainingMs = entry.durationMs - entry.positionMs
+  if (remainingMs <= 0) return null
+  // Rounded up, so the last fifty seconds of a video read as "1m left" rather than "0m left".
+  val minutes = ((remainingMs + 59_999) / 60_000).toInt()
+  return if (minutes >= 60) "${minutes / 60}h ${minutes % 60}m left" else "${minutes}m left"
 }

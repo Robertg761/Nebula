@@ -2,6 +2,7 @@ package com.stremioshell.host.tv.ui
 
 import android.util.Log
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,9 +13,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -43,15 +47,22 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.tv.material3.Button
+import androidx.tv.material3.Border
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
+import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Surface
+import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
 import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.tv.data.tmdb.MediaItem
+import com.stremioshell.host.tv.ui.theme.NebulaDimens
+import com.stremioshell.host.tv.ui.theme.NebulaPalette
+import com.stremioshell.host.tv.ui.theme.NebulaShapes
+import com.stremioshell.host.tv.ui.theme.nebulaCardBorder
+import com.stremioshell.host.tv.ui.theme.nebulaCardGlow
 
 /** Tag for the focus-recovery logs the QA matrix expects in a diagnostics capture. */
 private const val FOCUS_TAG = "TvFocus"
@@ -243,17 +254,20 @@ fun MediaCard(
   subtitle: String? = null,
   onLongClick: (() -> Unit)? = null,
 ) {
-  Column(modifier = modifier.width(140.dp)) {
+  Column(modifier = modifier.width(NebulaDimens.PosterWidth)) {
     Card(
       onClick = onClick,
       onLongClick = onLongClick,
       // Modest focus scale so the poster does not grow over its own title.
-      scale = CardDefaults.scale(focusedScale = 1.08f),
+      scale = CardDefaults.scale(focusedScale = NebulaDimens.FocusScale),
+      shape = CardDefaults.shape(shape = NebulaDimens.PosterShape),
+      border = nebulaCardBorder(),
+      glow = nebulaCardGlow(),
       // The card is the node the remote - and therefore TalkBack - lands on; the title under it
       // is a sibling it never visits, so without this a rail announces as a row of "unlabeled".
       // Built in the lambda rather than in composition: it only runs when something is actually
       // reading the screen.
-      modifier = Modifier.width(140.dp).height(200.dp)
+      modifier = Modifier.width(NebulaDimens.PosterWidth).height(NebulaDimens.PosterHeight)
         .semantics(mergeDescendants = true) {
           contentDescription = A11yLabels.card(item.title, subtitle, manageable = onLongClick != null)
         },
@@ -265,7 +279,16 @@ fun MediaCard(
         contentDescription = null,
         modifier = Modifier.fillMaxSize(),
       ) {
-        Text(item.title, maxLines = 3, style = MaterialTheme.typography.bodyMedium)
+        // Artless titles get the title set as a poster rather than as a caption on a grey slab,
+        // so a rail with a few missing images still reads as a rail.
+        Text(
+          text = item.title,
+          maxLines = 4,
+          overflow = TextOverflow.Ellipsis,
+          style = MaterialTheme.typography.titleSmall,
+          color = NebulaPalette.TextMuted,
+          modifier = Modifier.padding(horizontal = 10.dp),
+        )
       }
     }
     Text(
@@ -273,8 +296,9 @@ fun MediaCard(
       maxLines = 1,
       overflow = TextOverflow.Ellipsis,
       style = MaterialTheme.typography.bodySmall,
+      color = NebulaPalette.TextHigh,
       // Clears the focused card's scaled-up bottom edge.
-      modifier = Modifier.padding(top = 14.dp).width(140.dp)
+      modifier = Modifier.padding(top = 12.dp).width(NebulaDimens.PosterWidth)
         // Visual echo of the card's own description; left in the tree it is read a second time.
         .clearAndSetSemantics {},
     )
@@ -284,8 +308,9 @@ fun MediaCard(
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
         style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(top = 2.dp).width(140.dp).clearAndSetSemantics {},
+        color = NebulaPalette.TextMuted,
+        modifier = Modifier.padding(top = 3.dp).width(NebulaDimens.PosterWidth)
+          .clearAndSetSemantics {},
       )
     }
   }
@@ -295,15 +320,13 @@ fun MediaCard(
 fun MediaRow(title: String, items: List<MediaItem>, onItemClick: (MediaItem) -> Unit) {
   if (items.isEmpty()) return
   Column(modifier = Modifier.fillMaxWidth()) {
-    Text(
-      text = title,
-      style = MaterialTheme.typography.titleLarge,
-      modifier = Modifier.padding(start = 48.dp, bottom = 12.dp),
-    )
+    RailHeading(title)
     LazyRow(
       modifier = Modifier.restoreRowFocus(),
-      contentPadding = PaddingValues(horizontal = 48.dp),
-      horizontalArrangement = Arrangement.spacedBy(16.dp),
+      // Vertical slack in the padding, not the arrangement: a focused card scales up and its glow
+      // spills past its bounds, and a LazyRow clips to its own edges.
+      contentPadding = PaddingValues(horizontal = NebulaDimens.ScreenEdge, vertical = 8.dp),
+      horizontalArrangement = Arrangement.spacedBy(NebulaDimens.CardGap),
     ) {
       items(items, key = { it.key }) { item ->
         MediaCard(item = item, onClick = { onItemClick(item) })
@@ -316,17 +339,7 @@ fun MediaRow(title: String, items: List<MediaItem>, onItemClick: (MediaItem) -> 
 @Composable
 fun CenteredMessage(text: String, hint: String? = null) {
   Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-      Text(text, style = MaterialTheme.typography.titleMedium)
-      if (hint != null) {
-        Text(
-          text = hint,
-          style = MaterialTheme.typography.bodyMedium,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
-          modifier = Modifier.padding(top = 10.dp),
-        )
-      }
-    }
+    EmptyState(title = text, hint = hint)
   }
 }
 
@@ -340,11 +353,25 @@ fun CenteredMessage(text: String, hint: String? = null) {
 fun FailureMessage(message: String, onRetry: (() -> Unit)?) {
   Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-      Text(message, style = MaterialTheme.typography.titleMedium)
+      Icon(
+        Icons.Filled.Warning,
+        // Decorative: the message under it is the actual content.
+        contentDescription = null,
+        tint = MaterialTheme.colorScheme.error,
+        modifier = Modifier.size(44.dp).padding(bottom = 14.dp),
+      )
+      Text(
+        text = message,
+        style = MaterialTheme.typography.titleMedium,
+        color = NebulaPalette.TextHigh,
+      )
       if (onRetry != null) {
-        Button(onClick = onRetry, modifier = Modifier.padding(top = 16.dp)) {
-          Text("Retry")
-        }
+        NebulaButton(
+          text = "Retry",
+          onClick = onRetry,
+          style = NebulaButtonStyle.Primary,
+          modifier = Modifier.padding(top = 20.dp),
+        )
       }
     }
   }
@@ -354,8 +381,18 @@ fun FailureMessage(message: String, onRetry: (() -> Unit)?) {
 fun CenteredLoading(text: String) {
   Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-      CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-      Text(text, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 14.dp))
+      CircularProgressIndicator(
+        color = MaterialTheme.colorScheme.primary,
+        trackColor = NebulaPalette.Outline,
+        strokeWidth = 3.dp,
+        modifier = Modifier.size(40.dp),
+      )
+      Text(
+        text = text,
+        style = MaterialTheme.typography.bodyMedium,
+        color = NebulaPalette.TextMuted,
+        modifier = Modifier.padding(top = 18.dp),
+      )
     }
   }
 }
@@ -393,25 +430,49 @@ fun CardOptionsDialog(
   ) {
     RequestInitialFocus(target = firstOption, key = focusKey, label = focusLabel)
 
-    Surface(modifier = Modifier.width(520.dp)) {
+    Surface(
+      shape = NebulaShapes.extraLarge,
+      colors = SurfaceDefaults.colors(containerColor = NebulaPalette.Surface),
+      // A hairline is the only thing separating a dialog from the page behind it once both are
+      // near-black; without it the sheet has no edge at all on a dark scene.
+      border = Border(
+        border = BorderStroke(1.dp, NebulaPalette.Outline),
+        shape = NebulaShapes.extraLarge,
+      ),
+      modifier = Modifier.width(540.dp),
+    ) {
       Column(
-        modifier = Modifier.padding(32.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        modifier = Modifier.padding(34.dp),
+        verticalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
       ) {
-        Text(title, style = MaterialTheme.typography.headlineSmall)
-        Text(message, style = MaterialTheme.typography.bodyMedium)
+        Text(
+          text = title,
+          style = MaterialTheme.typography.headlineSmall,
+          maxLines = 2,
+          overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+          text = message,
+          style = MaterialTheme.typography.bodyMedium,
+          color = NebulaPalette.TextMuted,
+          modifier = Modifier.padding(bottom = 6.dp),
+        )
         actions.forEachIndexed { index, action ->
-          Button(
+          NebulaButton(
+            text = action.label,
             onClick = action.onClick,
+            // The first option is the one the dialog exists for, so it carries the weight.
+            style = if (index == 0) NebulaButtonStyle.Primary else NebulaButtonStyle.Secondary,
             modifier = Modifier.fillMaxWidth()
               .initialFocusTarget(if (index == 0) firstOption else null),
-          ) {
-            Text(action.label)
-          }
+          )
         }
-        Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
-          Text("Cancel")
-        }
+        NebulaButton(
+          text = "Cancel",
+          onClick = onDismiss,
+          style = NebulaButtonStyle.Ghost,
+          modifier = Modifier.fillMaxWidth(),
+        )
       }
     }
   }

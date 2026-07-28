@@ -18,14 +18,19 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.BorderStroke
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
-import androidx.tv.material3.Button
+import androidx.tv.material3.Border
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Surface
+import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
 import com.stremioshell.host.BuildConfig
 import com.stremioshell.host.R
+import com.stremioshell.host.tv.ui.theme.NebulaDimens
+import com.stremioshell.host.tv.ui.theme.NebulaPalette
+import com.stremioshell.host.tv.ui.theme.NebulaShapes
 import com.stremioshell.host.update.UpdatePromptCoordinator
 import com.stremioshell.host.update.UpdatePromptPolicy
 import kotlinx.coroutines.Dispatchers
@@ -111,31 +116,44 @@ private fun UpdateReadyDialog(
       label = "Update prompt confirm button",
     )
 
-    Surface(modifier = Modifier.width(560.dp)) {
+    Surface(
+      shape = NebulaShapes.extraLarge,
+      colors = SurfaceDefaults.colors(containerColor = NebulaPalette.Surface),
+      // A hairline is the only thing separating a dialog from the page behind it once both are
+      // near-black; without it the sheet has no edge at all on a dark scene.
+      border = Border(
+        border = BorderStroke(1.dp, NebulaPalette.Outline),
+        shape = NebulaShapes.extraLarge,
+      ),
+      modifier = Modifier.width(560.dp),
+    ) {
       Column(
-        modifier = Modifier.padding(32.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        modifier = Modifier.padding(34.dp),
+        verticalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
       ) {
         Text("Update $version ready", style = MaterialTheme.typography.headlineSmall)
         Text(
           if (needsUnknownSourcesPermission) {
-            "Stremio Shell $version has been downloaded. Android needs one-time permission " +
-              "to install apps from Stremio Shell before it can be installed."
+            "Nebula $version has been downloaded. Android needs one-time permission " +
+              "to install apps from Nebula before it can be installed."
           } else {
-            "Stremio Shell $version has been downloaded and is ready to install."
+            "Nebula $version has been downloaded and is ready to install."
           },
           style = MaterialTheme.typography.bodyMedium,
+          color = NebulaPalette.TextMuted,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-          Button(
+          NebulaButton(
+            text = if (needsUnknownSourcesPermission) "Enable installs" else "Install",
             onClick = onConfirm,
+            style = NebulaButtonStyle.Primary,
             modifier = Modifier.initialFocusTarget(confirmFocus),
-          ) {
-            Text(if (needsUnknownSourcesPermission) "Enable installs" else "Install")
-          }
-          Button(onClick = onLater) {
-            Text("Later")
-          }
+          )
+          NebulaButton(
+            text = "Later",
+            onClick = onLater,
+            style = NebulaButtonStyle.Ghost,
+          )
         }
       }
     }

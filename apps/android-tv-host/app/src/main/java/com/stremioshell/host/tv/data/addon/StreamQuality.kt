@@ -15,14 +15,9 @@ data class StreamQuality(
   val dolbyVision: Boolean = false,
   val sizeBytes: Long? = null,
 ) {
-  /** Short labels for a picker row, most significant first. */
-  val badges: List<String>
-    get() = buildList {
-      resolutionLabel()?.let { add(it) }
-      if (dolbyVision) add("DV")
-      if (hdr) add("HDR")
-      formattedSize()?.let { add(it) }
-    }
+  // Deliberately no combined badge list: the picker row colours the badges by whether they are a
+  // reason to pick the release or just a fact about it, and a flat list of strings cannot say
+  // which is which. The row builds its own from the two labels below.
 
   fun resolutionLabel(): String? = when (val height = resolutionHeight) {
     null -> null

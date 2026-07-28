@@ -5,17 +5,28 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -24,9 +35,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -35,8 +47,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Button
+import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
+import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
@@ -50,18 +64,34 @@ import com.stremioshell.host.tv.data.tmdb.CastMember
 import com.stremioshell.host.tv.data.tmdb.DetailsMetadata
 import com.stremioshell.host.tv.data.tmdb.EpisodeItem
 import com.stremioshell.host.tv.data.tmdb.MediaDetails
-import com.stremioshell.host.tv.data.tmdb.MediaItem
 import com.stremioshell.host.tv.data.tmdb.MediaType
+import com.stremioshell.host.tv.ui.theme.NebulaAccentBrush
+import com.stremioshell.host.tv.ui.theme.NebulaBackdropScrim
+import com.stremioshell.host.tv.ui.theme.NebulaDimens
+import com.stremioshell.host.tv.ui.theme.NebulaPalette
+import com.stremioshell.host.tv.ui.theme.NebulaShapes
+import com.stremioshell.host.tv.ui.theme.nebulaButtonBorder
+import com.stremioshell.host.tv.ui.theme.nebulaButtonGlow
+import com.stremioshell.host.tv.ui.theme.nebulaCardBorder
+import com.stremioshell.host.tv.ui.theme.nebulaCardGlow
 import java.time.LocalDate
 
 /** Lines of synopsis shown before the "More" affordance takes over. */
 private const val OVERVIEW_COLLAPSED_LINES = 4
 
 /**
- * Lazy items that always sit above the episodes: the header and the season row. Only used to
- * scroll a resumed episode into view, and the season row is a precondition for having one at all.
+ * Lazy items that always sit above the episodes: the header, and the episode section's own item -
+ * the "Episodes" heading and the season row deliberately share one, so this offset stays a constant
+ * two rather than moving with the heading. Only used to scroll a resumed episode into view, and the
+ * season row is a precondition for having one at all.
  */
 private const val EPISODE_ITEM_OFFSET = 2
+
+/** Splits [DetailsMetadata]'s one line back into the facts it joined, for the badge row. */
+private val METADATA_SEPARATOR = Regex("""\s*•\s*""")
+
+/** Extra air above a rail, so "Cast" starts a new section rather than reading as one more row. */
+private val SECTION_GAP = 18.dp
 
 @Composable
 fun DetailsScreen(
@@ -196,7 +226,7 @@ fun DetailsScreen(
       if (media.item.backdropUrl != null) {
         val context = LocalContext.current
         AsyncImage(
-          // The backdrop is one large, dimmed panel, where the app-wide RGB_565 decode shows as
+          // The backdrop is one large, scrimmed panel, where the app-wide RGB_565 decode shows as
           // banding steps across its gradients. allowRgb565 is the load-bearing override: the
           // decoder downgrades an ARGB_8888 request back to 565 for JPEGs while that flag is on.
           // Only this image opts out - posters stay 565, which is what keeps rows cheap.
@@ -209,25 +239,35 @@ fun DetailsScreen(
           },
           contentDescription = null,
           contentScale = ContentScale.Crop,
-          modifier = Modifier.fillMaxSize().alpha(0.25f),
+          modifier = Modifier.fillMaxSize(),
         )
+        // A wash rather than a flat dim: an evenly dimmed backdrop is equally in the way of the
+        // title at the top and the episode list at the bottom, so it ends up dimmed until it is
+        // no longer worth showing. This one is nearly clear where the artwork is the point and
+        // resolves into the page colour behind everything that scrolls over it.
+        Box(modifier = Modifier.fillMaxSize().background(NebulaBackdropScrim))
       }
 
       LazyColumn(
         state = listState,
-        contentPadding = PaddingValues(horizontal = 48.dp, vertical = 32.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
+        // Horizontal padding lives on the items, not here: the rails below full-bleed to the
+        // screen edge and RailHeading brings its own overscan margin.
+        contentPadding = PaddingValues(top = 56.dp, bottom = 48.dp),
+        verticalArrangement = Arrangement.spacedBy(NebulaDimens.CardGap),
         modifier = Modifier.fillMaxSize(),
       ) {
         item(key = "header") {
-          Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(media.item.title, style = MaterialTheme.typography.displaySmall)
-            // Remembered because this header recomposes on every watch-state update, and the
-            // metadata line only changes when the title does.
-            val meta = remember(media) { DetailsMetadata.of(media) }
-            if (meta.isNotEmpty()) {
-              Text(meta, style = MaterialTheme.typography.bodyMedium)
-            }
+          Column(
+            verticalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
+            modifier = Modifier.padding(horizontal = NebulaDimens.ScreenEdge),
+          ) {
+            Text(
+              media.item.title,
+              style = MaterialTheme.typography.displaySmall,
+              color = NebulaPalette.TextHigh,
+              modifier = Modifier.fillMaxWidth(0.72f),
+            )
+            MetadataBadges(media, modifier = Modifier.fillMaxWidth(0.62f))
             ExpandableOverview(
               text = media.item.overview,
               // Keyed on the title so opening another one starts collapsed, and so the flag
@@ -240,6 +280,7 @@ fun DetailsScreen(
               Text(
                 "No IMDb id found for this title; streams are unavailable.",
                 style = MaterialTheme.typography.bodySmall,
+                color = NebulaPalette.TextMuted,
               )
             }
             if (media.imdbId != null && media.item.type == MediaType.Movie) {
@@ -286,7 +327,7 @@ fun DetailsScreen(
               // Saving for later is offered on every title, including the ones with nothing
               // to play from the header: a series with no resume point is the main reason a
               // viewer wants the button at all.
-              Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+              Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
                 WatchlistButton(media.item.title, inWatchlist, toggleWatchlist)
               }
             }
@@ -295,20 +336,25 @@ fun DetailsScreen(
                 Text(
                   "No seasons were returned for this title.",
                   style = MaterialTheme.typography.bodySmall,
+                  color = NebulaPalette.TextMuted,
                 )
               }
               // Keeps the screen navigable when there is nothing to play: without these the
               // whole route has no focusable node and only BACK works.
-              Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(
+              Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
+                NebulaButton(
+                  text = "Back",
                   onClick = goBack,
+                  // Nothing else on this screen can be pressed, so leaving is the primary action.
+                  style = NebulaButtonStyle.Primary,
+                  icon = Icons.AutoMirrored.Filled.ArrowBack,
                   modifier = Modifier.initialFocusTarget(primaryFocus),
-                ) {
-                  Text("Back")
-                }
-                Button(onClick = { viewModel.loadDetails(type, tmdbId) }) {
-                  Text("Retry")
-                }
+                )
+                NebulaButton(
+                  text = "Retry",
+                  onClick = { viewModel.loadDetails(type, tmdbId) },
+                  icon = Icons.Filled.Refresh,
+                )
               }
             }
           }
@@ -316,24 +362,34 @@ fun DetailsScreen(
 
         if (hasSeasonRow) {
           item(key = "seasons") {
-            LazyRow(
-              modifier = Modifier.restoreRowFocus(),
-              horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-              items(media.seasons, key = { it.seasonNumber }) { season ->
-                Button(
-                  onClick = {
-                    pickedSeason = season.seasonNumber
-                    resumeAimArmed = false
-                  },
-                  modifier = (if (season.seasonNumber == selectedSeason) Modifier else Modifier.alpha(0.6f))
+            Column(modifier = Modifier.padding(top = SECTION_GAP)) {
+              RailHeading("Episodes")
+              LazyRow(
+                modifier = Modifier.restoreRowFocus(),
+                // Slack in the padding rather than the arrangement: a focused chip scales up and
+                // spills its glow, and a LazyRow clips to its own edges.
+                contentPadding = PaddingValues(
+                  horizontal = NebulaDimens.ScreenEdge,
+                  vertical = 8.dp,
+                ),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+              ) {
+                items(media.seasons, key = { it.seasonNumber }) { season ->
+                  SeasonChip(
+                    label = season.label,
+                    selected = season.seasonNumber == selectedSeason,
+                    onClick = {
+                      pickedSeason = season.seasonNumber
+                      resumeAimArmed = false
+                    },
                     // The *selected* season, not the first: a resume arrival opens on S4 and
                     // focus has to follow it. Yields to a header Resume button when there is one.
-                    .initialFocusTarget(
-                      if (!hasHeaderAction && season.seasonNumber == selectedSeason) primaryFocus else null,
-                    ),
-                ) {
-                  Text(season.label)
+                    focusTarget = if (!hasHeaderAction && season.seasonNumber == selectedSeason) {
+                      primaryFocus
+                    } else {
+                      null
+                    },
+                  )
                 }
               }
             }
@@ -343,14 +399,30 @@ fun DetailsScreen(
           // a 24-episode season used to compose every row up front, and a season switch paid for
           // all 24 before the first one appeared.
           when (val loaded = episodes) {
-            is LoadState.Loading -> item(key = "episodes-status") { Text("Loading episodes...") }
+            is LoadState.Loading -> item(key = "episodes-status") {
+              Text(
+                "Loading episodes...",
+                style = MaterialTheme.typography.bodyMedium,
+                color = NebulaPalette.TextMuted,
+                modifier = Modifier.padding(horizontal = NebulaDimens.ScreenEdge),
+              )
+            }
             // A bare error message would be unreachable by the D-pad, so failures offer Retry.
             is LoadState.Failed -> item(key = "episodes-status") {
-              Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(loaded.message)
-                Button(onClick = { viewModel.loadSeason(media.item.tmdbId, selectedSeason) }) {
-                  Text("Retry")
-                }
+              Column(
+                verticalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
+                modifier = Modifier.padding(horizontal = NebulaDimens.ScreenEdge),
+              ) {
+                Text(
+                  loaded.message,
+                  style = MaterialTheme.typography.bodyMedium,
+                  color = NebulaPalette.TextMuted,
+                )
+                NebulaButton(
+                  text = "Retry",
+                  onClick = { viewModel.loadSeason(media.item.tmdbId, selectedSeason) },
+                  icon = Icons.Filled.Refresh,
+                )
               }
             }
             is LoadState.Ready -> items(
@@ -384,7 +456,17 @@ fun DetailsScreen(
           item(key = "cast") { CastRow(media.cast) }
         }
         if (media.similar.isNotEmpty()) {
-          item(key = "similar") { SimilarRow(media.similar, onItemClick) }
+          // The Home rail as-is, so recommendations are browsed with exactly the card, spacing and
+          // focus restoration the viewer already learned one screen back.
+          item(key = "similar") {
+            Box(modifier = Modifier.padding(top = SECTION_GAP)) {
+              MediaRow(
+                title = "More like this",
+                items = media.similar,
+                onItemClick = { onItemClick(it.type, it.tmdbId) },
+              )
+            }
+          }
         }
       }
     }
@@ -392,7 +474,91 @@ fun DetailsScreen(
 }
 
 /**
- * One episode row.
+ * The facts under the title, one chip apiece.
+ *
+ * Split back out of [DetailsMetadata]'s single line rather than reassembled from its parts: which
+ * fields a given title actually has, and the order they read in, is the rule that object exists to
+ * own and that its tests pin down. A chip row that rebuilt it would be a second copy of that rule,
+ * free to drift.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun MetadataBadges(details: MediaDetails, modifier: Modifier = Modifier) {
+  // Remembered because this header recomposes on every watch-state update, and the metadata only
+  // changes when the title does.
+  val line = remember(details) { DetailsMetadata.of(details) }
+  val chips = remember(line, details.item.rating) {
+    val score = DetailsMetadata.scoreLabel(details.item.rating)
+    line.split(METADATA_SEPARATOR)
+      // Genres arrive as one comma-joined field, and no other fact in the line carries a comma:
+      // as chips they read better one apiece than as a single wide pill.
+      .flatMap { it.split(", ") }
+      .map { it.trim() }
+      .filter { it.isNotEmpty() }
+      .map { it to (it == score) }
+  }
+  if (chips.isEmpty()) return
+  FlowRow(
+    horizontalArrangement = Arrangement.spacedBy(8.dp),
+    verticalArrangement = Arrangement.spacedBy(8.dp),
+    // Six chips announced one at a time is six stops for a fact each; spoken, this is one line,
+    // and A11yLabels turns its visual separators into the pauses TalkBack needs.
+    modifier = modifier.clearAndSetSemantics { contentDescription = A11yLabels.spoken(line) },
+  ) {
+    chips.forEach { (text, isScore) ->
+      // The score is the one fact a viewer scans for, so it is the only one that gets colour.
+      NebulaBadge(text, tone = if (isScore) BadgeTone.Accent else BadgeTone.Neutral)
+    }
+  }
+}
+
+/**
+ * One season in the selector.
+ *
+ * Selection is carried by the fill, not by opacity: the row used to mark the unselected seasons
+ * with 0.6 alpha, which at three metres is indistinguishable from "this season's label is a bit
+ * grey". Focus is the ring and the glow on top, so a focused chip still says which season is the
+ * one being shown.
+ */
+@Composable
+private fun SeasonChip(
+  label: String,
+  selected: Boolean,
+  onClick: () -> Unit,
+  focusTarget: InitialFocusTarget?,
+) {
+  val shape = NebulaShapes.large
+  val colors = if (selected) {
+    ButtonDefaults.colors(
+      containerColor = NebulaPalette.Violet,
+      contentColor = NebulaPalette.TextHigh,
+      focusedContainerColor = NebulaPalette.VioletBright,
+      focusedContentColor = NebulaPalette.Void,
+    )
+  } else {
+    ButtonDefaults.colors(
+      containerColor = NebulaPalette.SurfaceVariant,
+      contentColor = NebulaPalette.TextMuted,
+      // Focus brightens without going violet, which would read as a second selected season.
+      focusedContainerColor = NebulaPalette.Outline,
+      focusedContentColor = NebulaPalette.TextHigh,
+    )
+  }
+  Button(
+    onClick = onClick,
+    colors = colors,
+    shape = ButtonDefaults.shape(shape = shape),
+    border = nebulaButtonBorder(shape),
+    glow = nebulaButtonGlow(),
+    scale = ButtonDefaults.scale(focusedScale = 1.05f),
+    modifier = Modifier.initialFocusTarget(focusTarget),
+  ) {
+    Text(label, style = MaterialTheme.typography.labelLarge, maxLines = 1)
+  }
+}
+
+/**
+ * One episode row: the still, then everything known about it.
  *
  * @param entry this episode's watch record, if it has one: the tick, the progress bar and the
  *   time left all come from it.
@@ -416,27 +582,44 @@ private fun EpisodeRow(
     "Watched".takeIf { entry?.watched == true },
     entry?.minutesLeft()?.let { "$it min left" },
   ).joinToString("  -  ")
+  val accent = if (isResumeTarget) NebulaPalette.VioletBright else NebulaPalette.TextHigh
   Card(
     onClick = { if (!upcoming) onPlay() },
+    shape = CardDefaults.shape(shape = NebulaShapes.medium),
+    colors = CardDefaults.colors(
+      containerColor = NebulaPalette.Surface,
+      contentColor = NebulaPalette.TextHigh,
+      focusedContainerColor = NebulaPalette.SurfaceVariant,
+      focusedContentColor = NebulaPalette.TextHigh,
+    ),
+    border = nebulaCardBorder(NebulaShapes.medium),
+    glow = nebulaCardGlow(),
+    // A row is most of the screen wide, so it lifts less than a poster does or it would grow
+    // straight through the overscan margin.
+    scale = CardDefaults.scale(focusedScale = NebulaDimens.FocusScaleWide),
     // The row is the focusable node, and its number, tick and progress bar are shapes rather than
     // anything a screen reader can reach. The synopsis is deliberately left out: two truncated
     // lines of flavour would stand between the viewer and the next episode.
-    modifier = Modifier.fillMaxWidth(0.8f)
+    modifier = Modifier.padding(horizontal = NebulaDimens.ScreenEdge)
+      .fillMaxWidth(0.8f)
       .then(if (upcoming) Modifier.alpha(0.6f) else Modifier)
       .initialFocusTarget(focusTarget)
       .semantics(mergeDescendants = true) {
         contentDescription = A11yLabels.episodeRow(episode.episodeNumber, episode.name, marker)
       },
   ) {
-    Row(modifier = Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+    Row(
+      modifier = Modifier.padding(14.dp),
+      horizontalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
       // Accent bar rather than a Card border: tv-material3 swaps the border out for
       // focusedBorder, so a border marker would vanish the moment focus lands here.
       if (isResumeTarget) {
         Box(
           modifier = Modifier
             .width(4.dp)
-            .height(90.dp)
-            .background(MaterialTheme.colorScheme.primary),
+            .height(NebulaDimens.StillHeight)
+            .background(NebulaAccentBrush, RoundedCornerShape(2.dp)),
         )
       }
       // Null keeps its no-op: an absent still should not reserve an empty slot next to the
@@ -445,49 +628,55 @@ private fun EpisodeRow(
         ArtworkImage(
           url = episode.stillUrl,
           contentDescription = null,
-          modifier = Modifier.width(160.dp).height(90.dp),
+          modifier = Modifier
+            .width(NebulaDimens.StillWidth)
+            .height(NebulaDimens.StillHeight)
+            .clip(NebulaDimens.PosterShape),
         )
       }
-      Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
+      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
           // The tick is the whole point of keeping a finished episode's record: a season list
           // that never says what you have seen is the reason "which one was I on" is a question
-          // at all.
-          buildString {
-            if (entry?.watched == true) append("✓  ")
-            append("E${episode.episodeNumber}  ${episode.name}")
-          },
-          style = MaterialTheme.typography.titleMedium,
-          color = if (isResumeTarget) MaterialTheme.colorScheme.primary else Color.Unspecified,
-        )
+          // at all. It rides beside the title rather than on the still, because an episode with
+          // no artwork still has to be able to say it has been watched.
+          if (entry?.watched == true) {
+            Icon(
+              Icons.Filled.CheckCircle,
+              // Decorative: the row's own description already carries "Watched".
+              contentDescription = null,
+              tint = NebulaPalette.Success,
+              modifier = Modifier.size(18.dp),
+            )
+          }
+          Text(
+            "E${episode.episodeNumber}  ${episode.name}",
+            style = MaterialTheme.typography.titleMedium,
+            color = accent,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
         Text(
           episode.overview,
           style = MaterialTheme.typography.bodySmall,
+          color = NebulaPalette.TextMuted,
           maxLines = 2,
           overflow = TextOverflow.Ellipsis,
         )
         // Watched progress, so a part-way episode reads the same here as it does on its
         // Continue Watching card.
         if (entry != null && entry.durationMs > 0) {
-          Box(
-            modifier = Modifier
-              .fillMaxWidth(0.6f)
-              .height(4.dp)
-              .background(MaterialTheme.colorScheme.surfaceVariant),
-          ) {
-            Box(
-              modifier = Modifier
-                .fillMaxWidth(entry.progress)
-                .height(4.dp)
-                .background(MaterialTheme.colorScheme.primary),
-            )
-          }
+          NebulaProgressBar(entry.progress, modifier = Modifier.fillMaxWidth(0.6f))
         }
         if (marker.isNotEmpty()) {
           Text(
             marker,
-            style = MaterialTheme.typography.bodySmall,
-            color = if (isResumeTarget) MaterialTheme.colorScheme.primary else Color.Unspecified,
+            style = MaterialTheme.typography.labelMedium,
+            color = if (isResumeTarget) NebulaPalette.VioletBright else NebulaPalette.TextFaint,
           )
         }
       }
@@ -515,15 +704,19 @@ private fun ExpandableOverview(text: String, stateKey: String) {
   Text(
     text,
     style = MaterialTheme.typography.bodyLarge,
+    color = NebulaPalette.TextMuted,
     maxLines = if (expanded) Int.MAX_VALUE else OVERVIEW_COLLAPSED_LINES,
     overflow = TextOverflow.Ellipsis,
     onTextLayout = { if (it.hasVisualOverflow) overflowed = true },
     modifier = Modifier.fillMaxWidth(0.7f),
   )
   if (overflowed) {
-    Button(onClick = { expanded = !expanded }) {
-      Text(if (expanded) "Less" else "More")
-    }
+    // Ghost: reading more of the synopsis is an aside, and this button sits directly above Play.
+    NebulaButton(
+      text = if (expanded) "Less" else "More",
+      onClick = { expanded = !expanded },
+      style = NebulaButtonStyle.Ghost,
+    )
   }
 }
 
@@ -536,21 +729,27 @@ private fun ExpandableOverview(text: String, stateKey: String) {
  */
 @Composable
 private fun CastRow(cast: List<CastMember>) {
-  Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-    Text("Cast", style = MaterialTheme.typography.titleLarge)
+  Column(modifier = Modifier.padding(top = SECTION_GAP)) {
+    RailHeading("Cast")
     LazyRow(
       modifier = Modifier.restoreRowFocus(),
-      horizontalArrangement = Arrangement.spacedBy(16.dp),
+      contentPadding = PaddingValues(horizontal = NebulaDimens.ScreenEdge, vertical = 8.dp),
+      horizontalArrangement = Arrangement.spacedBy(NebulaDimens.CardGap),
     ) {
       // Index in the key: TMDB credits the same person twice on plenty of titles (an actor who
       // also voices something), and a duplicate key crashes a lazy list outright.
       items(cast.size, key = { "${cast[it].id}:$it" }) { index ->
         val member = cast[index]
-        Column(modifier = Modifier.width(CAST_CARD_WIDTH)) {
+        Column(modifier = Modifier.width(NebulaDimens.PortraitWidth)) {
           Card(
             onClick = {},
-            scale = CardDefaults.scale(focusedScale = 1.08f),
-            modifier = Modifier.width(CAST_CARD_WIDTH).height(160.dp)
+            shape = CardDefaults.shape(shape = NebulaDimens.PosterShape),
+            border = nebulaCardBorder(),
+            glow = nebulaCardGlow(),
+            scale = CardDefaults.scale(focusedScale = NebulaDimens.FocusScale),
+            modifier = Modifier
+              .width(NebulaDimens.PortraitWidth)
+              .height(NebulaDimens.PortraitHeight)
               .semantics(mergeDescendants = true) {
                 contentDescription = A11yLabels.castMember(member.name, member.character)
               },
@@ -564,8 +763,9 @@ private fun CastRow(cast: List<CastMember>) {
               Text(
                 member.name,
                 maxLines = 3,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(6.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = NebulaPalette.TextMuted,
+                modifier = Modifier.padding(horizontal = 8.dp),
               )
             }
           }
@@ -573,7 +773,8 @@ private fun CastRow(cast: List<CastMember>) {
             member.name,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodySmall,
+            color = NebulaPalette.TextHigh,
             // Clears the focused card's scaled-up bottom edge, as on the poster rows. Semantics
             // cleared for the same reason as the poster captions: the card already says this.
             modifier = Modifier.padding(top = 12.dp).clearAndSetSemantics {},
@@ -583,8 +784,9 @@ private fun CastRow(cast: List<CastMember>) {
               member.character,
               maxLines = 1,
               overflow = TextOverflow.Ellipsis,
-              style = MaterialTheme.typography.bodySmall,
-              modifier = Modifier.alpha(0.7f).clearAndSetSemantics {},
+              style = MaterialTheme.typography.labelSmall,
+              color = NebulaPalette.TextMuted,
+              modifier = Modifier.padding(top = 3.dp).clearAndSetSemantics {},
             )
           }
         }
@@ -592,26 +794,6 @@ private fun CastRow(cast: List<CastMember>) {
     }
   }
 }
-
-/** Recommendations, on the same poster card the Home rails use. */
-@Composable
-private fun SimilarRow(items: List<MediaItem>, onItemClick: (MediaType, Int) -> Unit) {
-  Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-    Text("More like this", style = MaterialTheme.typography.titleLarge)
-    LazyRow(
-      modifier = Modifier.restoreRowFocus(),
-      horizontalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-      items(items.size, key = { "${items[it].type}:${items[it].tmdbId}" }) { index ->
-        val item = items[index]
-        MediaCard(item = item, onClick = { onItemClick(item.type, item.tmdbId) })
-      }
-    }
-  }
-}
-
-/** Narrower than a poster card: a headshot is portrait, but not 2:3. */
-private val CAST_CARD_WIDTH = 120.dp
 
 /**
  * Whole minutes left in a saved position, or null when there is no position to be part
@@ -645,9 +827,14 @@ private fun PlayActions(
   onToggleWatchlist: () -> Unit,
   playDescription: String? = null,
 ) {
-  Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-    Button(
+  Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
+    NebulaButton(
+      text = playLabel,
       onClick = { onPlay(false) },
+      // The one thing the viewer came here to press, and the only violet on the page that is not
+      // a focus ring.
+      style = NebulaButtonStyle.Primary,
+      icon = Icons.Filled.PlayArrow,
       modifier = Modifier.initialFocusTarget(focusTarget)
         .then(
           if (playDescription == null) {
@@ -656,11 +843,13 @@ private fun PlayActions(
             Modifier.semantics(mergeDescendants = true) { contentDescription = playDescription }
           },
         ),
-    ) {
-      Text(playLabel)
-    }
+    )
     if (offerStartOver) {
-      Button(onClick = { onPlay(true) }) { Text("Start over") }
+      NebulaButton(
+        text = "Start over",
+        onClick = { onPlay(true) },
+        icon = Icons.Filled.Refresh,
+      )
     }
     WatchlistButton(title, inWatchlist, onToggleWatchlist)
   }
@@ -672,16 +861,17 @@ private fun PlayActions(
  */
 @Composable
 private fun WatchlistButton(title: String, inWatchlist: Boolean, onToggle: () -> Unit) {
-  Button(
+  NebulaButton(
+    text = if (inWatchlist) "In My List" else "Add to My List",
     onClick = onToggle,
-    // The visible label is a tick and a dash - state, then action, in a shorthand that reads as
-    // neither out loud. Spoken, it has to say what pressing it will do, and to what.
+    icon = if (inWatchlist) Icons.Filled.Check else Icons.Filled.Add,
+    // The visible label is a tick and a state - what pressing it does is left to the icon, which
+    // reads at a glance and not at all out loud. Spoken, it has to say what will happen, and to
+    // what.
     modifier = Modifier.semantics(mergeDescendants = true) {
       contentDescription = A11yLabels.watchlistButton(title, inWatchlist)
     },
-  ) {
-    Text(if (inWatchlist) "✓ In My List - Remove" else "+ Add to My List")
-  }
+  )
 }
 
 @Composable
@@ -690,5 +880,6 @@ private fun ResumeHint(entry: WatchEntry) {
   Text(
     "$minsLeft min left - picks up where you stopped",
     style = MaterialTheme.typography.bodySmall,
+    color = NebulaPalette.TextMuted,
   )
 }
