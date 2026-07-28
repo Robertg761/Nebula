@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.1] - 2026-07-27
+Two fixes to the new player controls, both found on a Google TV Streamer.
+
+- The controls no longer disappear while you are looking at them. The panel hid itself five seconds after opening whether or not the highlight was sitting on a button, so pausing to decide cost you the panel - and the next press seeked the film instead of moving the highlight. It now stays for fifteen seconds once it holds focus, and every press restarts that.
+- LEFT and RIGHT no longer fall out of the button row. The scrub bar underneath is full width, so the focus search preferred it to nothing at the ends of the row and dropped focus onto it, seeking as it went. The ends of the row are now dead ends.
+
 ## [0.6.0] - 2026-07-27
 The app is now called **Nebula**, and it looks like it: a full visual overhaul onto one design system, its own logo and launcher banner, and a player whose every control is reachable from a Google TV Streamer remote.
 

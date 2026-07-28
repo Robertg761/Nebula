@@ -60,6 +60,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -354,6 +358,9 @@ class MpvPlayerActivity : ComponentActivity() {
    * Whether focus is inside the OSD. The controls only own the D-pad once it is:
    * if the focus request never lands, [onKeyDown] still seeks and still opens the
    * menu, so a viewer is never left with a remote that does nothing.
+   *
+   * Set through [setOsdFocus], which re-times the auto-hide around it; [hideOsd]
+   * is the one exception, having no countdown left to re-time.
    */
   private var osdHasFocus = false
 
@@ -1505,7 +1512,7 @@ class MpvPlayerActivity : ComponentActivity() {
         .align(Alignment.BottomCenter)
         .fillMaxWidth()
         .background(NebulaBottomScrim)
-        .onFocusChanged { osdHasFocus = it.hasFocus }
+        .onFocusChanged { setOsdFocus(it.hasFocus) }
         // Ahead of the focus search, so the keys these controls define cannot also
         // move focus, and ahead of the activity, so they cannot also seek.
         .onPreviewKeyEvent { onOsdKey(it) }
@@ -1600,7 +1607,15 @@ class MpvPlayerActivity : ComponentActivity() {
    * Its own focus group so LEFT/RIGHT walk the buttons under Compose's own focus
    * search - [onOsdKey] only claims the way back down - and so the row can report
    * where focus actually is rather than where the key map last aimed it.
+   *
+   * Sideways exits are cancelled because the search does not respect the row's
+   * ends: the scrub bar underneath is full-width, so a LEFT off the first button
+   * found it a better candidate than nothing and dropped focus onto it, and the
+   * press after that seeked. Cancelling leaves the key unhandled, which is what
+   * [onKeyDown] swallows once the panel holds focus, so the ends of the row are
+   * dead ends rather than a way out.
    */
+  @OptIn(ExperimentalComposeUiApi::class)
   @Composable
   private fun TransportRow(target: InitialFocusTarget) {
     val isPaused by paused
@@ -1610,7 +1625,16 @@ class MpvPlayerActivity : ComponentActivity() {
         .onFocusChanged {
           if (it.hasFocus) {
             osdRow.value = OsdRow.Buttons
-            osdHasFocus = true
+            setOsdFocus(true)
+          }
+        }
+        .focusProperties {
+          exit = { direction ->
+            if (direction == FocusDirection.Left || direction == FocusDirection.Right) {
+              FocusRequester.Cancel
+            } else {
+              FocusRequester.Default
+            }
           }
         }
         .focusGroup(),
@@ -1792,7 +1816,7 @@ class MpvPlayerActivity : ComponentActivity() {
           focused = it.isFocused
           if (it.isFocused) {
             osdRow.value = OsdRow.Scrub
-            osdHasFocus = true
+            setOsdFocus(true)
           }
         }
         .initialFocusTarget(if (focusable) target else null)
@@ -2959,7 +2983,13 @@ class MpvPlayerActivity : ComponentActivity() {
    * panel over the picture for the rest of the film.
    */
   private fun armOsdHide() {
-    val hideAt = SystemClock.uptimeMillis() + OSD_TIMEOUT_MS
+    // Longer once the panel holds focus: five seconds is the right life for a bar
+    // that only reports the position, and far too short for a row of buttons a
+    // viewer is reading before choosing one. Losing the panel mid-decision is
+    // worse than it lingering, because the next press then seeks the film instead
+    // of moving the highlight.
+    val timeout = if (osdHasFocus) OSD_FOCUSED_TIMEOUT_MS else OSD_TIMEOUT_MS
+    val hideAt = SystemClock.uptimeMillis() + timeout
     osdHideAtMs = hideAt
     mainHandler.postDelayed({
       if (osdHideAtMs != hideAt) return@postDelayed
@@ -2971,7 +3001,20 @@ class MpvPlayerActivity : ComponentActivity() {
         return@postDelayed
       }
       hideOsd()
-    }, OSD_TIMEOUT_MS)
+    }, timeout)
+  }
+
+  /**
+   * Records focus arriving in or leaving the controls, and re-times the auto-hide
+   * to match: focus lands a frame or two *after* whatever brought the panel up
+   * armed the short countdown, so without this a press of UP would put the
+   * buttons on screen and then take them away five seconds later however plainly
+   * the highlight said the viewer was using them.
+   */
+  private fun setOsdFocus(hasFocus: Boolean) {
+    if (osdHasFocus == hasFocus) return
+    osdHasFocus = hasFocus
+    if (osdVisible.value) armOsdHide()
   }
 
   /**
@@ -3198,6 +3241,9 @@ class MpvPlayerActivity : ComponentActivity() {
      * rather than a bar that flashed by.
      */
     private const val OSD_TIMEOUT_MS = 5_000L
+
+    /** The auto-hide once the panel holds focus; see [armOsdHide]. */
+    private const val OSD_FOCUSED_TIMEOUT_MS = 15_000L
     private const val SEEK_DEBOUNCE_MS = 350L
     private const val SEEK_REPEAT_MIN_MS = 120L
 

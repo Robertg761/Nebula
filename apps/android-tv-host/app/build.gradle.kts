@@ -37,8 +37,8 @@ android {
     applicationId = "com.stremioshell.host.tv"
     minSdk = 26
     targetSdk = 34
-    versionCode = 16
-    versionName = "0.6.0"
+    versionCode = 17
+    versionName = "0.6.1"
     // app_name lives in res/values/strings.xml alone; a generated resValue of the same name used
     // to shadow it, so the launcher label and the in-app copy could disagree.
     buildConfigField("String", "GITHUB_RELEASE_OWNER", "\"$githubReleaseOwner\"")
