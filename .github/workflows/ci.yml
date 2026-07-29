@@ -2,32 +2,64 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
   workflow_dispatch:
   schedule:
     - cron: "0 8 * * 1"
 
-# The repo is a single Android app: no Node/pnpm step anywhere, because there
-# is no JS workspace left to lint, typecheck or bundle into the APK.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# The repo is a single Android app. Node is not part of the build: the two
+# dependency-free JavaScript files are release metadata helpers only.
 jobs:
-  android-host:
-    runs-on: ubuntu-latest
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Checkout without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Reject newly introduced high-severity dependencies
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4
+        with:
+          fail-on-severity: high
+
+  android-host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate Gradle wrapper integrity
+        uses: gradle/actions/wrapper-validation@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+      - name: Set up JDK 17
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
           distribution: temurin
           java-version: "17"
           cache: gradle
-      - name: Android JVM tests, lint, and debug assemble
+      - name: JVM tests, lint, debug APK, and Baseline Profile producer
         run: |
           cd apps/android-tv-host
           chmod +x ./gradlew
-          ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :baselineprofile:assembleBenchmarkRelease
-      - name: Upload Android host artifacts
+          ./gradlew \
+            :app:testDebugUnitTest \
+            :app:lintDebug \
+            :app:assembleDebug \
+            :baselineprofile:assembleBenchmarkRelease
+      - name: Upload Android host evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: android-host
           path: |
@@ -35,3 +67,49 @@ jobs:
             apps/android-tv-host/app/build/reports/tests/testDebugUnitTest/
             apps/android-tv-host/app/build/reports/lint-results-debug.*
           if-no-files-found: ignore
+          retention-days: 14
+
+  tv-instrumentation:
+    name: TV instrumentation (${{ matrix.api }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [26, 34]
+    steps:
+      - name: Checkout without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up JDK 17
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - name: Allow the Android emulator to use KVM
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm
+          fi
+      - name: Install Android TV emulator image
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "emulator" \
+            "system-images;android-${{ matrix.api }};android-tv;x86"
+      - name: Run credential-free Android TV instrumentation
+        env:
+          NEBULA_EMULATOR_GPU: host
+        run: ./scripts/run-tv-instrumentation.sh "${{ matrix.api }}"
+      - name: Upload Android TV instrumentation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tv-instrumentation-api-${{ matrix.api }}
+          path: |
+            apps/android-tv-host/app/build/reports/androidTests/connected/
+            apps/android-tv-host/app/build/outputs/androidTest-results/connected/
+            apps/android-tv-host/app/build/outputs/tv-emulator/
+          if-no-files-found: ignore
+          retention-days: 14

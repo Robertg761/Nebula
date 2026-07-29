@@ -58,8 +58,12 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -75,6 +79,7 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.stremioshell.host.tv.LoadState
+import com.stremioshell.host.R
 import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.WatchlistEntry
@@ -196,6 +201,8 @@ fun DetailsScreen(
   // part-watched ones, so it cannot use the Continue Watching projection.
   val watching by viewModel.watchEntries.collectAsState()
   val watchlistKeys by viewModel.watchlistKeys.collectAsState()
+  val context = LocalContext.current
+  var trailerFeedback by rememberSaveable(type, tmdbId) { mutableStateOf<String?>(null) }
   // Recomputed only when the calendar can actually change. Refreshing on resume covers a TV that
   // slept across midnight; the timer covers one left open on Details overnight.
   var today by remember { mutableStateOf(LocalDate.now()) }
@@ -224,7 +231,7 @@ fun DetailsScreen(
 
   LoadStateContent(
     details,
-    loadingText = "Loading details...",
+    loadingText = stringResource(R.string.details_loading),
     onRetry = { viewModel.loadDetails(type, tmdbId) },
     // The shape of the page that is arriving, not a spinner in the middle of a black screen: the
     // viewer just pressed OK on a card carrying a title and a poster, and the app used to throw
@@ -303,12 +310,12 @@ fun DetailsScreen(
           season = null,
           episode = null,
           label = when {
-            resume != null -> "Resume"
-            entry?.watched == true -> "Watch again"
+            resume != null -> stringResource(R.string.action_resume)
+            entry?.watched == true -> stringResource(R.string.action_watch_again)
             // Was "Find Streams": plumbing language on the only violet button on the page, beside
             // a play glyph that flatly disagreed with it. Picking a stream is how this app plays a
             // film, not what the viewer came here to do.
-            else -> "Play"
+            else -> stringResource(R.string.action_play)
           },
           resume = resume,
           spoken = null,
@@ -319,22 +326,46 @@ fun DetailsScreen(
       // something sitting at 0:00.
       showResume != null -> {
         val resumable = showResume.positionMs > 0
-        val verb = if (resumable) "Resume" else "Play"
+        val season = checkNotNull(showResume.season)
+        val episode = checkNotNull(showResume.episode)
+        val spokenEpisode = stringResource(
+          R.string.details_spoken_season_episode,
+          season,
+          episode,
+        )
         HeaderPlay(
-          season = showResume.season,
-          episode = showResume.episode,
-          label = "$verb S${showResume.season}E${showResume.episode}",
+          season = season,
+          episode = episode,
+          label = if (resumable) {
+            stringResource(R.string.details_action_resume_episode, season, episode)
+          } else {
+            stringResource(R.string.details_action_play_episode, season, episode)
+          },
           resume = showResume.takeIf { resumable },
-          spoken = A11yLabels.episodeCode(showResume.season, showResume.episode)?.let { "$verb $it" },
+          spoken = if (resumable) {
+            stringResource(R.string.details_spoken_resume_episode, spokenEpisode)
+          } else {
+            stringResource(R.string.details_spoken_play_episode, spokenEpisode)
+          },
         )
       }
       hasSeasonRow && firstUnplayed != null -> HeaderPlay(
         season = firstUnplayed.seasonNumber,
         episode = firstUnplayed.episodeNumber,
-        label = "Play S${firstUnplayed.seasonNumber}E${firstUnplayed.episodeNumber}",
+        label = stringResource(
+          R.string.details_action_play_episode,
+          firstUnplayed.seasonNumber,
+          firstUnplayed.episodeNumber,
+        ),
         resume = null,
-        spoken = A11yLabels.episodeCode(firstUnplayed.seasonNumber, firstUnplayed.episodeNumber)
-          ?.let { "Play $it" },
+        spoken = stringResource(
+          R.string.details_spoken_play_episode,
+          stringResource(
+            R.string.details_spoken_season_episode,
+            firstUnplayed.seasonNumber,
+            firstUnplayed.episodeNumber,
+          ),
+        ),
       )
       else -> null
     }
@@ -415,7 +446,7 @@ fun DetailsScreen(
 
     Box(modifier = Modifier.fillMaxSize()) {
       if (media.item.backdropUrl != null) {
-        val context = LocalContext.current
+        val imageContext = LocalContext.current
         // One alpha on one node, once per screen - the cheapest animation there is, and a
         // full-bleed image that cuts in at full opacity is the most jarring frame in the whole
         // browsing flow. Held as a State and read inside the layer block so the fade invalidates
@@ -431,8 +462,8 @@ fun DetailsScreen(
           // banding steps across its gradients. allowRgb565 is the load-bearing override: the
           // decoder downgrades an ARGB_8888 request back to 565 for JPEGs while that flag is on.
           // Only this image opts out - posters stay 565, which is what keeps rows cheap.
-          model = remember(context, media.item.backdropUrl) {
-            ImageRequest.Builder(context)
+          model = remember(imageContext, media.item.backdropUrl) {
+            ImageRequest.Builder(imageContext)
               .data(media.item.backdropUrl)
               .bitmapConfig(Bitmap.Config.ARGB_8888)
               .allowRgb565(false)
@@ -520,14 +551,14 @@ fun DetailsScreen(
                 // the addon lookup's: "IMDb id" is a fact about how streams are found, not about
                 // the film. The same class of message shipped on Streams as a bare line and read
                 // as the screen's error message.
-                HeaderNotice("We can't look up streams for this title yet - TMDB has no IMDb id for it.")
+                HeaderNotice(stringResource(R.string.details_stream_lookup_unavailable))
               } else if (needsFallbackAction && media.item.type == MediaType.Show) {
                 HeaderNotice(
                   when {
-                    episodesPending -> "Checking this season for playable episodes…"
-                    allEpisodesUpcoming -> "The listed episodes have not aired yet."
-                    media.seasons.isEmpty() -> "No seasons have been listed for this title yet."
-                    else -> "No playable episodes are available for this season."
+                    episodesPending -> stringResource(R.string.details_checking_episodes)
+                    allEpisodesUpcoming -> stringResource(R.string.details_episodes_not_aired)
+                    media.seasons.isEmpty() -> stringResource(R.string.details_no_seasons)
+                    else -> stringResource(R.string.details_no_playable_episodes)
                   },
                 )
               }
@@ -550,10 +581,23 @@ fun DetailsScreen(
                 title = media.item.title,
                 inWatchlist = inWatchlist,
                 onToggleWatchlist = toggleWatchlist,
+                trailerAvailable = TrailerLaunchPolicy.request(media.trailerYoutubeKey) != null,
+                onTrailer = {
+                  trailerFeedback = when (
+                    TrailerExternalLauncher.launch(context, media.trailerYoutubeKey)
+                  ) {
+                    TrailerLaunchResult.Opened -> null
+                    TrailerLaunchResult.InvalidVideo ->
+                      context.getString(R.string.details_trailer_invalid)
+                    TrailerLaunchResult.NoHandler ->
+                      context.getString(R.string.details_trailer_no_handler)
+                  }
+                },
                 modifier = Modifier.padding(
                   top = if (resumeMinutes != null) NebulaSpace.sm else NebulaSpace.xl,
                 ),
               )
+              trailerFeedback?.let { HeaderNotice(it, announce = true) }
             }
           }
 
@@ -563,7 +607,7 @@ fun DetailsScreen(
               // list rather than as the control for it: at the list's own 16dp it was closer to
               // the first episode than the episodes are to each other.
               Column(modifier = Modifier.padding(top = SECTION_GAP, bottom = NebulaSpace.sm)) {
-                RailHeading("Episodes")
+                RailHeading(stringResource(R.string.details_episodes_heading))
                 CompositionLocalProvider(LocalBringIntoViewSpec provides railSpec) {
                   LazyRow(
                     modifier = Modifier.restoreRowFocus(),
@@ -611,7 +655,7 @@ fun DetailsScreen(
                     color = NebulaPalette.TextMuted,
                   )
                   NebulaButton(
-                    text = "Retry",
+                    text = stringResource(R.string.action_retry),
                     onClick = { viewModel.loadSeason(media.item.tmdbId, selectedSeason) },
                     icon = Icons.Filled.Refresh,
                   )
@@ -654,7 +698,7 @@ fun DetailsScreen(
             item(key = "similar") {
               Box(modifier = Modifier.padding(top = SECTION_GAP)) {
                 MediaRow(
-                  title = "More like this",
+                  title = stringResource(R.string.details_more_like_this),
                   items = media.similar,
                   onItemClick = { onItemClick(it.type, it.tmdbId) },
                 )
@@ -798,11 +842,21 @@ private fun DetailsSkeleton() {
  * and both want lifting into the shared controls.
  */
 @Composable
-private fun HeaderNotice(text: String, modifier: Modifier = Modifier) {
+private fun HeaderNotice(
+  text: String,
+  modifier: Modifier = Modifier,
+  announce: Boolean = false,
+) {
+  val announcement = if (announce) {
+    Modifier.semantics { liveRegion = LiveRegionMode.Assertive }
+  } else {
+    Modifier
+  }
   Row(
     horizontalArrangement = Arrangement.spacedBy(NebulaSpace.sm),
     verticalAlignment = Alignment.CenterVertically,
     modifier = modifier
+      .then(announcement)
       .padding(top = NebulaSpace.lg)
       .fillMaxWidth(HEADER_COPY_WIDTH)
       .background(NebulaPalette.Surface, NebulaShapes.medium)
@@ -932,6 +986,13 @@ private fun EpisodeRow(
 ) {
   val airLabel = AirDate.label(episode.airDate)
   val minutesLeft = entry?.minutesLeft()
+  val minutesLeftLabel = minutesLeft?.let {
+    pluralStringResource(
+      R.plurals.details_minutes_left,
+      it.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+      it,
+    )
+  }
   // Still built, and still joined with the separator A11yLabels turns into spoken pauses: this
   // string is what TalkBack reads. What the eye gets is the chip row at the foot of the text
   // column, because as one faint hyphen-joined sentence it was the least readable thing in the row
@@ -939,10 +1000,12 @@ private fun EpisodeRow(
   val marker = listOfNotNull(
     // "Airs <date>" rather than a bare date, because that is the whole explanation for why
     // pressing OK on this row does nothing.
-    airLabel?.let { if (upcoming) "Airs $it" else it },
-    "Resume here".takeIf { isResumeTarget },
-    "Watched".takeIf { entry?.watched == true },
-    minutesLeft?.let { "$it min left" },
+    airLabel?.let {
+      if (upcoming) stringResource(R.string.details_airs_date, it) else it
+    },
+    stringResource(R.string.details_resume_here).takeIf { isResumeTarget },
+    stringResource(R.string.details_watched).takeIf { entry?.watched == true },
+    minutesLeftLabel,
   ).joinToString("  -  ")
   val watched = entry?.watched == true
   val titleColor = when {
@@ -963,7 +1026,20 @@ private fun EpisodeRow(
   // well made a watched season a wall of violet pulling the eye toward the episodes the viewer
   // least needs. The bar is now what it says it is: how far in am I.
   val partWatched = entry != null && entry.durationMs > 0 && !entry.watched && entry.positionMs > 0
-  val description = A11yLabels.episodeRow(episode.episodeNumber, episode.name, marker)
+  val description = if (marker.isBlank()) {
+    stringResource(
+      R.string.details_episode_description,
+      episode.episodeNumber,
+      episode.name,
+    )
+  } else {
+    stringResource(
+      R.string.details_episode_description_with_status,
+      episode.episodeNumber,
+      episode.name,
+      A11yLabels.spoken(marker),
+    )
+  }
   val rowModifier = Modifier
     .padding(horizontal = NebulaDimens.ScreenEdge)
     .fillMaxWidth(EPISODE_ROW_WIDTH)
@@ -1083,11 +1159,20 @@ private fun EpisodeRow(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.padding(top = NebulaSpace.xxs),
           ) {
-            if (isResumeTarget) NebulaBadge("Resume here", tone = BadgeTone.Accent)
-            if (minutesLeft != null) NebulaBadge("$minutesLeft min left", tone = BadgeTone.Neutral)
+            if (isResumeTarget) {
+              NebulaBadge(stringResource(R.string.details_resume_here), tone = BadgeTone.Accent)
+            }
+            if (minutesLeftLabel != null) {
+              NebulaBadge(minutesLeftLabel, tone = BadgeTone.Neutral)
+            }
             // Amber, not red: an episode that has not aired yet is a caveat, not a failure, and
             // this chip is the whole explanation for why OK does nothing on this row.
-            if (upcoming && airLabel != null) NebulaBadge("Airs $airLabel", tone = BadgeTone.Warn)
+            if (upcoming && airLabel != null) {
+              NebulaBadge(
+                stringResource(R.string.details_airs_date, airLabel),
+                tone = BadgeTone.Warn,
+              )
+            }
             // An aired date is a plain fact, so it stays plain type - but at TextMuted (7.9:1)
             // rather than the TextFaint it used to share with everything else on this line.
             if (!upcoming && airLabel != null) {
@@ -1214,7 +1299,11 @@ private fun ExpandableOverview(text: String, stateKey: String) {
   if (overflowed) {
     // Ghost: reading more of the synopsis is an aside, and this button sits directly above Play.
     NebulaButton(
-      text = if (expanded) "Less" else "More",
+      text = if (expanded) {
+        stringResource(R.string.action_less)
+      } else {
+        stringResource(R.string.action_more)
+      },
       onClick = { expanded = !expanded },
       style = NebulaButtonStyle.Ghost,
       modifier = Modifier.padding(top = NebulaSpace.xxs),
@@ -1277,7 +1366,7 @@ private fun FocusableInfoSurface(
 @Composable
 private fun CastRow(cast: List<CastMember>, railSpec: BringIntoViewSpec) {
   Column(modifier = Modifier.padding(top = SECTION_GAP)) {
-    RailHeading("Cast")
+    RailHeading(stringResource(R.string.details_cast_heading))
     CompositionLocalProvider(LocalBringIntoViewSpec provides railSpec) {
       LazyRow(
         modifier = Modifier.restoreRowFocus(),
@@ -1290,7 +1379,15 @@ private fun CastRow(cast: List<CastMember>, railSpec: BringIntoViewSpec) {
           val member = cast[index]
           Column(modifier = Modifier.width(NebulaDimens.PortraitWidth)) {
             FocusableInfoSurface(
-              description = A11yLabels.castMember(member.name, member.character),
+              description = if (member.character.isBlank()) {
+                member.name
+              } else {
+                stringResource(
+                  R.string.details_cast_member_as,
+                  member.name,
+                  member.character.trim(),
+                )
+              },
               shape = NebulaDimens.PosterShape,
               focusedScale = NebulaDimens.FocusScale,
               modifier = Modifier
@@ -1354,10 +1451,15 @@ private fun WatchEntry.minutesLeft(): Long? =
 @Composable
 private fun ResumeProgress(entry: WatchEntry?, minutesLeft: Long) {
   if (entry == null) return
+  val minutesLabel = pluralStringResource(
+    R.plurals.details_minutes_left,
+    minutesLeft.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+    minutesLeft,
+  )
   Column(modifier = Modifier.padding(top = NebulaSpace.xl)) {
     NebulaProgressBar(entry.progress, modifier = Modifier.fillMaxWidth(0.42f))
     Text(
-      "$minutesLeft min left",
+      minutesLabel,
       style = MaterialTheme.typography.labelMedium,
       color = NebulaPalette.TextMuted,
       modifier = Modifier.padding(top = NebulaSpace.xs),
@@ -1374,6 +1476,7 @@ private fun ResumeProgress(entry: WatchEntry?, minutesLeft: Long) {
  * one thing a viewer reaches for when they are not going to press Play, so it should be
  * one press right of it rather than one press down and past the season buttons.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun HeaderActions(
   play: HeaderPlay?,
@@ -1384,18 +1487,21 @@ private fun HeaderActions(
   title: String,
   inWatchlist: Boolean,
   onToggleWatchlist: () -> Unit,
+  trailerAvailable: Boolean,
+  onTrailer: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
   // Read out of the model first: a smart cast that has to survive into the semantics lambda is
   // easier to lose than a local.
   val currentPlay = play
   val spoken = currentPlay?.spoken
-  Row(
+  FlowRow(
     horizontalArrangement = Arrangement.spacedBy(NebulaSpace.sm),
+    verticalArrangement = Arrangement.spacedBy(NebulaSpace.sm),
     modifier = modifier,
   ) {
     NebulaButton(
-      text = currentPlay?.label ?: "Back",
+      text = currentPlay?.label ?: stringResource(R.string.action_back),
       onClick = {
         if (currentPlay == null) onBack() else onPlay(false)
       },
@@ -1420,16 +1526,23 @@ private fun HeaderActions(
     // from 0:00, and a first episode has never been played at all.
     if (currentPlay?.resume != null) {
       NebulaButton(
-        text = "Start over",
+        text = stringResource(R.string.action_start_over),
         onClick = { onPlay(true) },
         icon = Icons.Filled.Refresh,
       )
     }
     if (currentPlay == null && onRetry != null) {
       NebulaButton(
-        text = "Retry",
+        text = stringResource(R.string.action_retry),
         onClick = onRetry,
         icon = Icons.Filled.Refresh,
+      )
+    }
+    if (trailerAvailable) {
+      NebulaButton(
+        text = stringResource(R.string.action_watch_trailer),
+        onClick = onTrailer,
+        icon = Icons.Filled.PlayArrow,
       )
     }
     WatchlistButton(title, inWatchlist, onToggleWatchlist)
@@ -1450,8 +1563,17 @@ private fun WatchlistButton(
   onToggle: () -> Unit,
   focusTarget: InitialFocusTarget? = null,
 ) {
+  val watchlistDescription = if (inWatchlist) {
+    stringResource(R.string.details_remove_title_from_list, title)
+  } else {
+    stringResource(R.string.details_add_title_to_list, title)
+  }
   NebulaButton(
-    text = if (inWatchlist) "In My List" else "Add to My List",
+    text = if (inWatchlist) {
+      stringResource(R.string.action_in_my_list)
+    } else {
+      stringResource(R.string.action_add_to_my_list)
+    },
     onClick = onToggle,
     icon = if (inWatchlist) Icons.Filled.Check else Icons.Filled.Add,
     // The visible label is a tick and a state - what pressing it does is left to the icon, which
@@ -1459,7 +1581,7 @@ private fun WatchlistButton(
     // what.
     modifier = Modifier.initialFocusTarget(focusTarget)
       .semantics(mergeDescendants = true) {
-        contentDescription = A11yLabels.watchlistButton(title, inWatchlist)
+        contentDescription = watchlistDescription
       },
   )
 }

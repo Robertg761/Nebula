@@ -2,6 +2,7 @@ package com.stremioshell.host.tv.data.tmdb
 
 import com.stremioshell.host.tv.data.HttpFetcher
 import com.stremioshell.host.tv.data.OkHttpFetcher
+import com.stremioshell.host.tv.data.decodeJsonOffMain
 import java.net.URLEncoder
 import java.util.Locale
 import kotlinx.serialization.json.Json
@@ -20,6 +21,16 @@ class TmdbClient(
   private val locale: Locale = Locale.getDefault(),
 ) {
   private val json = Json { ignoreUnknownKeys = true }
+
+  /**
+   * Requires a live authenticated response for Settings and phone-pairing validation.
+   *
+   * Catalog reads intentionally accept stale cache entries, but a connection check must not tell
+   * the viewer a credential works merely because that key populated the cache on an earlier day.
+   */
+  suspend fun probeCredentials() {
+    fetcher.getFresh(url("configuration"))
+  }
 
   suspend fun trending(type: MediaType, page: Int = 1): MediaPage {
     val path = if (type == MediaType.Movie) "trending/movie/week" else "trending/tv/week"
@@ -50,16 +61,29 @@ class TmdbClient(
     return pagedItems(path, type, page, query)
   }
 
-  suspend fun search(query: String): List<MediaItem> {
+  /** First-page compatibility API used by existing callers. */
+  suspend fun search(query: String): List<MediaItem> = searchPage(query).items
+
+  /** One page of mixed movie/show search results, with TMDB's paging counters preserved. */
+  suspend fun searchPage(query: String, page: Int = 1): MediaPage {
     val encoded = URLEncoder.encode(query, Charsets.UTF_8.name())
-    val body = fetcher.getAllowingStale(url("search/multi", "query=$encoded&include_adult=false"))
-    return json.decodeFromString<TmdbPagedResults>(body).results.mapNotNull { entry ->
+    val requestedPage = page.coerceAtLeast(1)
+    val body = fetcher.getAllowingStale(
+      url("search/multi", "query=$encoded&include_adult=false&page=$requestedPage"),
+    )
+    val decoded = decode<TmdbPagedResults>(body)
+    val items = decoded.results.mapNotNull { entry ->
       when (entry.mediaType) {
         "movie" -> entry.toItem(MediaType.Movie)
         "tv" -> entry.toItem(MediaType.Show)
         else -> null
       }
     }
+    return MediaPage(
+      items = items,
+      page = decoded.page,
+      totalPages = decoded.totalPages,
+    )
   }
 
   /**
@@ -83,7 +107,7 @@ class TmdbClient(
           TmdbLocale.imageLanguages(locale).joinToString(",") { it ?: "null" },
       ),
     )
-    val details = json.decodeFromString<TmdbDetailsResponse>(body)
+    val details = decode<TmdbDetailsResponse>(body)
     // Certifications live under a different key per media type, and in a different shape: shows
     // carry one rating per country, movies carry a list of releases per country.
     val certifications = if (isMovie) {
@@ -152,7 +176,7 @@ class TmdbClient(
 
   suspend fun season(tmdbId: Int, seasonNumber: Int): List<EpisodeItem> {
     val body = fetcher.getAllowingStale(url("tv/$tmdbId/season/$seasonNumber"))
-    return json.decodeFromString<TmdbSeasonResponse>(body).episodes.map { episode ->
+    return decode<TmdbSeasonResponse>(body).episodes.map { episode ->
       EpisodeItem(
         seasonNumber = episode.seasonNumber,
         episodeNumber = episode.episodeNumber,
@@ -173,7 +197,7 @@ class TmdbClient(
     val paged = listOfNotNull(query?.ifBlank { null }, "page=${page.coerceAtLeast(1)}")
       .joinToString("&")
     val body = fetcher.getAllowingStale(url(path, paged))
-    val decoded = json.decodeFromString<TmdbPagedResults>(body)
+    val decoded = decode<TmdbPagedResults>(body)
     return MediaPage(
       items = decoded.results.map { it.toItem(type) },
       page = decoded.page,
@@ -186,6 +210,9 @@ class TmdbClient(
     val encodedKey = URLEncoder.encode(apiKey, Charsets.UTF_8.name())
     return "$baseUrl/$path?api_key=$encodedKey&language=${TmdbLocale.languageTag(locale)}$extra"
   }
+
+  private suspend inline fun <reified T> decode(body: String): T =
+    decodeJsonOffMain { json.decodeFromString<T>(body) }
 
   private fun TmdbEntry.toItem(type: MediaType): MediaItem {
     return MediaItem(

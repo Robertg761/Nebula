@@ -2,6 +2,7 @@ package com.stremioshell.host.tv.player
 
 import com.stremioshell.host.tv.data.addon.AddonStreamSubtitle
 import com.stremioshell.host.tv.data.subtitles.AddonSubtitle
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -9,7 +10,7 @@ import org.junit.Test
 
 class ExternalSubtitlesTest {
   @Test
-  fun `embedded stream subtitles are bounded deduplicated http urls`() {
+  fun `embedded stream subtitles are bounded deduplicated public https urls`() {
     val valid = (1..100).map {
       AddonStreamSubtitle(url = "https://subs.example/$it.srt", lang = "eng")
     }
@@ -38,7 +39,7 @@ class ExternalSubtitlesTest {
         AddonStreamSubtitle(url = overlongUrl),
         AddonStreamSubtitle(
           id = "i".repeat(EmbeddedSubtitles.MAX_ID_LENGTH + 20),
-          url = "http://subs.example/good.srt",
+          url = "https://subs.example/good.srt",
           lang = "l".repeat(EmbeddedSubtitles.MAX_LANGUAGE_LENGTH + 20),
         ),
       ),
@@ -56,7 +57,7 @@ class ExternalSubtitlesTest {
     assertEquals(ExternalSubtitles.PER_LANGUAGE + 2, options.size)
     assertEquals(
       listOf("eng-1", "eng-2", "eng-3", "fra-1", "fra-2"),
-      options.map { it.url },
+      optionIds(options),
     )
   }
 
@@ -113,7 +114,7 @@ class ExternalSubtitlesTest {
 
     val options = ExternalSubtitles.options(duplicated, preferredLanguage = "eng")
 
-    assertEquals(listOf("same", "other"), options.map { it.url })
+    assertEquals(listOf("same", "other"), optionIds(options))
   }
 
   @Test
@@ -127,7 +128,7 @@ class ExternalSubtitlesTest {
 
     val options = ExternalSubtitles.options(entries, preferredLanguage = "")
 
-    assertEquals(listOf("a", "b", "c"), options.map { it.url })
+    assertEquals(listOf("a", "b", "c"), optionIds(options))
   }
 
   @Test
@@ -137,17 +138,51 @@ class ExternalSubtitlesTest {
       preferredLanguage = "",
     )
 
-    assertEquals(listOf("a"), options.map { it.url })
+    assertEquals(listOf("a"), optionIds(options))
   }
 
   @Test
   fun `urls are trimmed, so padding cannot smuggle a duplicate through`() {
     val options = ExternalSubtitles.options(
-      listOf(subtitle("eng", "a"), AddonSubtitle(id = "2", url = " a ", lang = "eng")),
+      listOf(
+        subtitle("eng", "a"),
+        AddonSubtitle(id = "2", url = " ${subtitleUrl("a")} ", lang = "eng"),
+      ),
       preferredLanguage = "",
     )
 
-    assertEquals(listOf("a"), options.map { it.url })
+    assertEquals(listOf("a"), optionIds(options))
+  }
+
+  @Test
+  fun `embedded and fetched subtitle options reject cleartext and non public targets`() {
+    val unsafeEmbedded = listOf(
+      AddonStreamSubtitle(url = "http://subs.example/cleartext.srt"),
+      AddonStreamSubtitle(url = "https://127.0.0.1/loopback.srt"),
+      AddonStreamSubtitle(url = "https://127.1/abbreviated.srt"),
+    )
+    assertTrue(EmbeddedSubtitles.sanitize(unsafeEmbedded).isEmpty())
+
+    val fetched = listOf(
+      AddonSubtitle(id = "1", url = "http://subs.example/cleartext.srt", lang = "eng"),
+      AddonSubtitle(id = "2", url = "https://10.0.0.1/private.srt", lang = "eng"),
+      AddonSubtitle(id = "3", url = "https://192.168.1/private.srt", lang = "eng"),
+      subtitle("eng", "safe"),
+    )
+    assertEquals(listOf("safe"), optionIds(ExternalSubtitles.options(fetched, "eng")))
+  }
+
+  @Test
+  fun `subtitle redirects are canonicalized and every target is revalidated`() {
+    val from = "https://SUBS.EXAMPLE/base/file.srt".toHttpUrl()
+
+    assertEquals(
+      "https://subs.example/next/file.srt",
+      SubtitleUrlPolicy.redirectUrlOrNull(from, "../next/file.srt"),
+    )
+    assertNull(SubtitleUrlPolicy.redirectUrlOrNull(from, "http://subs.example/file.srt"))
+    assertNull(SubtitleUrlPolicy.redirectUrlOrNull(from, "https://127.0.0.1/file.srt"))
+    assertNull(SubtitleUrlPolicy.redirectUrlOrNull(from, "https://10.1/file.srt"))
   }
 
   @Test
@@ -270,5 +305,11 @@ class ExternalSubtitlesTest {
     }
 
   private fun subtitle(lang: String, url: String) =
-    AddonSubtitle(id = url, url = url, lang = lang)
+    AddonSubtitle(id = url, url = subtitleUrl(url), lang = lang)
+
+  private fun subtitleUrl(id: String): String =
+    if (id.startsWith("https://")) id else "https://subs.example/$id.srt"
+
+  private fun optionIds(options: List<ExternalSubtitleOption>): List<String> =
+    options.map { it.url.substringAfterLast('/').removeSuffix(".srt") }
 }

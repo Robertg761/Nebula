@@ -6,6 +6,7 @@ import coil.ImageLoaderFactory
 import coil.memory.MemoryCache
 import com.stremioshell.host.tv.channel.WatchNextSync
 import com.stremioshell.host.tv.data.SharedHttpClient
+import com.stremioshell.host.tv.diagnostics.NebulaDiagnostics
 
 /**
  * Tunes Coil for a low-RAM TV: RGB_565 halves poster memory (posters are
@@ -15,6 +16,7 @@ import com.stremioshell.host.tv.data.SharedHttpClient
 class StremioTvApplication : Application(), ImageLoaderFactory {
   override fun onCreate() {
     super.onCreate()
+    NebulaDiagnostics.initialize(this)
     // The shared OkHttp client's disk cache needs a Context, and this is the first point in the
     // process where one exists - well before any screen can ask for data.
     SharedHttpClient.init(this)

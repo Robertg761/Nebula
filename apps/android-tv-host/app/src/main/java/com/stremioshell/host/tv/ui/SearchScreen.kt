@@ -17,7 +17,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.LocalTextSelectionColors
@@ -25,6 +27,7 @@ import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.runtime.Composable
@@ -41,6 +44,7 @@ import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
@@ -56,6 +60,8 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -70,12 +76,14 @@ import androidx.tv.material3.Glow
 import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.stremioshell.host.R
+import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.data.WatchlistEntry
 import com.stremioshell.host.tv.data.tmdb.MediaItem
 import com.stremioshell.host.tv.data.tmdb.MediaType
 import com.stremioshell.host.tv.data.tmdb.SearchFilter
-import com.stremioshell.host.tv.data.tmdb.SearchResults
+import com.stremioshell.host.tv.data.tmdb.SearchPaging
 import com.stremioshell.host.tv.ui.theme.NebulaDimens
 import com.stremioshell.host.tv.ui.theme.NebulaIcon
 import com.stremioshell.host.tv.ui.theme.NebulaPalette
@@ -121,6 +129,7 @@ fun SearchScreen(
 ) {
   val results by viewModel.searchResults.collectAsState()
   val requested by viewModel.searchQuery.collectAsState()
+  val paging by viewModel.searchPaging.collectAsState()
   val apiKey by viewModel.tmdbApiKey.collectAsState()
   val voiceQuery by viewModel.voiceQuery.collectAsState()
   // Membership only, the same flow the Details toggle reads: saving from here and saving from
@@ -162,7 +171,9 @@ fun SearchScreen(
   // The grid as a whole, so stepping back down into it can return to the card the viewer was on
   // rather than rewinding to the first result every time they touch the chips.
   val resultsFocus = remember { FocusRequester() }
+  val gridState = rememberLazyGridState()
   val keyboard = LocalSoftwareKeyboardController.current
+  val loadingMoreDescription = stringResource(R.string.search_loading_more_description)
 
   // A bare search-key launch is an explicit request to type, including when Search is already the
   // current destination. The monotonically increasing request from TvApp makes repeated presses
@@ -263,6 +274,34 @@ fun SearchScreen(
     }
   }
 
+  // Page before the focused card reaches the end. Existing cards keep their indices while the
+  // next page arrives, so this never moves focus; a failure stays as a deliberate retry control
+  // instead of repeatedly hammering a network that is already down.
+  LaunchedEffect(ui, paging) {
+    val visibleResults = (ui as? SearchUi.Results)?.items
+    // A Movies/Shows filter can legitimately have no match on page one. Keep walking the bounded
+    // TMDB window before declaring the filtered search empty.
+    if (visibleResults == null) {
+      if (ui is SearchUi.Empty && SearchPaging.canLoad(paging)) {
+        viewModel.loadNextSearchPage()
+      }
+      return@LaunchedEffect
+    }
+    snapshotFlow {
+      gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+    }
+      .distinctUntilChanged()
+      .collect { lastVisible ->
+        if (SearchPaging.shouldPrefetch(paging, visibleResults.size, lastVisible)) {
+          viewModel.loadNextSearchPage()
+        }
+      }
+  }
+
+  LaunchedEffect(requested) {
+    if (requested.isNotBlank()) gridState.scrollToItem(0)
+  }
+
   // Edge padding is carried by the children rather than by this column, so the results grid can pad
   // its own contents instead: a lazy list clips to its bounds, and the focus ring sits outside the
   // card it belongs to. No bottom padding - the grid's own bottom slack is the only one wanted, and
@@ -277,7 +316,7 @@ fun SearchScreen(
     ) {
       // No start padding here: ScreenHeader hangs its accent tick in the margin and pads itself, so
       // its *text* lands on the same content line as the posters below.
-      ScreenHeader(title = "Search")
+      ScreenHeader(title = stringResource(R.string.nav_search))
       SearchField(
         value = query,
         onValueChange = {
@@ -324,7 +363,7 @@ fun SearchScreen(
       // exactly how focus gets stranded. It hands focus back to the field on the way out, which is
       // also what stops the D-pad dying on the button as it goes disabled.
       NebulaButton(
-        text = "Clear",
+        text = stringResource(R.string.action_clear),
         onClick = {
           cancelResultFocusIntent()
           query = ""
@@ -340,7 +379,11 @@ fun SearchScreen(
       // staleness is said in colour instead, which costs no layout.
       if (ui is SearchUi.Results) {
         Text(
-          text = SearchResults.countLabel(ui.items.size),
+          text = pluralStringResource(
+            R.plurals.search_results_count,
+            ui.items.size,
+            ui.items.size,
+          ),
           style = MaterialTheme.typography.labelMedium,
           color = if (ui.refreshing) NebulaPalette.TextFaint else NebulaPalette.TextMuted,
         )
@@ -354,22 +397,46 @@ fun SearchScreen(
       // here - material-icons-core has no microphone glyph, and one vector is not worth pulling in
       // material-icons-extended for.
       SearchUi.Idle -> CenteredEmptyState(
-        title = "What do you want to watch?",
-        hint = "Type a title, or press the mic key on your remote.",
+        title = stringResource(R.string.search_idle_title),
+        hint = stringResource(R.string.search_idle_hint),
       )
       // Not a centred spinner: the first search of a session used to hard-cut from a centred prompt
       // to a centred ring to a top-anchored grid, three layouts in the same region inside 400ms.
       SearchUi.Searching -> SearchStatusAnchor(
-        title = "Searching…",
+        title = stringResource(R.string.search_searching),
         target = statusFocus,
         background = { SearchSkeleton() },
       )
-      is SearchUi.Empty -> SearchStatusAnchor(
-        title = ui.title,
-        hint = ui.hint,
-        icon = Icons.Filled.Search,
-        target = statusFocus,
-      )
+      is SearchUi.Empty -> when {
+        paging.loading -> SearchStatusAnchor(
+          title = loadingMoreDescription,
+          target = statusFocus,
+        )
+        paging.error != null -> FailureMessage(
+          paging.error.orEmpty(),
+          onRetry = {
+            runCatching { queryField.requester.requestFocus() }
+            viewModel.retryNextSearchPage()
+          },
+        )
+        else -> SearchStatusAnchor(
+          title = when (filter) {
+            SearchFilter.All -> stringResource(R.string.search_empty_all, query.trim())
+            SearchFilter.Movies -> stringResource(R.string.search_empty_movies, query.trim())
+            SearchFilter.Shows -> stringResource(R.string.search_empty_shows, query.trim())
+          },
+          hint = if (
+            filter != SearchFilter.All &&
+            (results as? LoadState.Ready)?.value?.isNotEmpty() == true
+          ) {
+            stringResource(R.string.search_empty_other_type_hint)
+          } else {
+            stringResource(R.string.search_empty_spelling_hint)
+          },
+          icon = Icons.Filled.Search,
+          target = statusFocus,
+        )
+      }
       // Retry re-runs the query directly: the debounce only fires on a *change* to the field, so
       // nothing would retry a failure on its own. Kept as FailureMessage rather than an empty
       // state because its Retry button is the only focusable a failed search has.
@@ -384,11 +451,13 @@ fun SearchScreen(
             viewModel.search(query)
           }
         },
-        actionLabel = "Open Settings".takeIf { apiKey.isNullOrBlank() },
+        actionLabel = stringResource(R.string.action_open_settings)
+          .takeIf { apiKey.isNullOrBlank() },
         onAction = onOpenSettings.takeIf { apiKey.isNullOrBlank() },
       )
       is SearchUi.Results -> {
         LazyVerticalGrid(
+          state = gridState,
           columns = GridCells.Adaptive(minSize = NebulaDimens.PosterWidth),
           horizontalArrangement = Arrangement.spacedBy(NebulaDimens.CardGap),
           verticalArrangement = Arrangement.spacedBy(GRID_ROW_GAP),
@@ -415,7 +484,14 @@ fun SearchScreen(
                 onClick = { onItemClick(item.type, item.tmdbId) },
                 // Two same-named remakes are one of the things search is for, so the year and the
                 // kind of title ride under every card.
-                subtitle = SearchResults.caption(item),
+                subtitle = listOfNotNull(
+                  item.year?.trim()?.ifBlank { null },
+                  if (item.type == MediaType.Show) {
+                    stringResource(R.string.media_type_series)
+                  } else {
+                    stringResource(R.string.media_type_movie)
+                  },
+                ).joinToString(" • "),
                 // Same held-OK affordance the managed Home rows have: a result the viewer is not
                 // ready to watch is exactly the thing My List is for, and making them open Details
                 // to save it costs two screens and a load.
@@ -424,6 +500,47 @@ fun SearchScreen(
                 // first row falls back to the default focus search, which finds the chips.
                 modifier = if (index == 0) Modifier.initialFocusTarget(firstResult) else Modifier,
               )
+            }
+          }
+          if (paging.loading) {
+            item(key = "search-page-loading", span = { GridItemSpan(maxLineSpan) }) {
+              Box(
+                modifier = Modifier.fillMaxWidth().padding(NebulaSpace.xl),
+                contentAlignment = Alignment.Center,
+              ) {
+                CircularProgressIndicator(
+                  modifier = Modifier
+                    .size(NebulaIcon.lg)
+                    .semantics { contentDescription = loadingMoreDescription },
+                  color = NebulaPalette.Violet,
+                  trackColor = NebulaPalette.Outline,
+                )
+              }
+            }
+          } else if (paging.error != null) {
+            item(key = "search-page-error", span = { GridItemSpan(maxLineSpan) }) {
+              Column(
+                modifier = Modifier.fillMaxWidth().padding(NebulaSpace.xl),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(NebulaSpace.md),
+              ) {
+                Text(
+                  text = paging.error.orEmpty(),
+                  style = MaterialTheme.typography.bodyMedium,
+                  color = NebulaPalette.TextMuted,
+                  textAlign = TextAlign.Center,
+                )
+                NebulaButton(
+                  text = stringResource(R.string.search_retry_more),
+                  onClick = {
+                    // The retry footer disappears while its request runs. Move focus first so the
+                    // D-pad never remains attached to a removed Compose node.
+                    runCatching { queryField.requester.requestFocus() }
+                    viewModel.retryNextSearchPage()
+                  },
+                  style = NebulaButtonStyle.Ghost,
+                )
+              }
             }
           }
         }
@@ -435,12 +552,20 @@ fun SearchScreen(
     val inList = WatchlistEntry.keyOf(item.type, item.tmdbId) in watchlistKeys
     CardOptionsDialog(
       title = item.title,
-      message = if (inList) "This title is in My List." else "Save this title for later.",
+      message = if (inList) {
+        stringResource(R.string.search_title_in_list)
+      } else {
+        stringResource(R.string.search_save_title_for_later)
+      },
       focusKey = item.key,
       focusLabel = "Search result options",
       actions = listOf(
         CardAction(
-          label = if (inList) "Remove from My List" else "Add to My List",
+          label = if (inList) {
+            stringResource(R.string.action_remove_from_my_list)
+          } else {
+            stringResource(R.string.action_add_to_my_list)
+          },
           destructive = inList,
         ) {
           viewModel.toggleWatchlist(item)
@@ -473,6 +598,7 @@ private fun SearchField(
   modifier: Modifier = Modifier,
 ) {
   var focused by remember { mutableStateOf(false) }
+  val searchDescription = stringResource(R.string.search_hint)
   // Nothing in this app provides a material3 theme, so without this the field inherits foundation's
   // default selection blue - the one colour on the screen that is not in the palette.
   val selectionColors = remember {
@@ -499,7 +625,7 @@ private fun SearchField(
       },
       placeholder = {
         Text(
-          "Search movies and shows",
+          searchDescription,
           style = MaterialTheme.typography.bodyLarge,
           color = NebulaPalette.TextMuted,
         )
@@ -527,7 +653,7 @@ private fun SearchField(
         cursorColor = NebulaPalette.VioletBright,
       ),
       modifier = modifier
-        .semantics { contentDescription = "Search movies and shows" }
+        .semantics { contentDescription = searchDescription }
         .onFocusChanged { focused = it.isFocused || it.hasFocus }
         // A layer block rather than Modifier.shadow: the block re-runs in the draw phase when
         // `focused` changes, so lighting the field up costs a redraw and never a relayout.
@@ -578,6 +704,11 @@ private fun SearchFilterRow(
     val chipShape = FilterChipDefaults.ContainerShape
     SearchFilter.values().forEachIndexed { index, option ->
       val isSelected = option == selected
+      val optionLabel = when (option) {
+        SearchFilter.All -> stringResource(R.string.search_filter_all)
+        SearchFilter.Movies -> stringResource(R.string.search_filter_movies)
+        SearchFilter.Shows -> stringResource(R.string.search_filter_shows)
+      }
       // One FilterChip per option whatever the selection, rather than swapping composable types on
       // the selected one: a chip that changed identity when picked would take the focus with it.
       FilterChip(
@@ -624,7 +755,7 @@ private fun SearchFilterRow(
         },
         modifier = if (index == 0) Modifier.initialFocusTarget(firstChipFocus) else Modifier,
       ) {
-        Text(option.label, style = MaterialTheme.typography.labelLarge)
+        Text(optionLabel, style = MaterialTheme.typography.labelLarge)
       }
     }
   }

@@ -6,3 +6,12 @@ plugins {
   id("org.jetbrains.kotlin.plugin.parcelize") version "1.9.24" apply false
   id("androidx.baselineprofile") version "1.3.3" apply false
 }
+
+// Keep every resolved configuration on the reviewed graph recorded in each
+// project's gradle.lockfile. Updating a dependency is therefore an explicit
+// source change rather than an incidental result of repository metadata.
+allprojects {
+  dependencyLocking {
+    lockAllConfigurations()
+  }
+}

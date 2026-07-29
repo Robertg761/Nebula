@@ -18,6 +18,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
@@ -25,6 +27,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.stremioshell.host.R
 import com.stremioshell.host.tv.ui.ArtworkImage
 import com.stremioshell.host.tv.ui.BadgeTone
 import com.stremioshell.host.tv.ui.NebulaBadge
@@ -166,7 +169,88 @@ object UpNextText {
     }
   }
 
-  private val ANNOUNCED_COUNTDOWN_SECONDS = setOf(15, 10, 5, 3, 2, 1)
+}
+
+@Composable
+private fun localizedEpisodeCode(target: UpNextTarget): String =
+  stringResource(R.string.player_up_next_episode_code, target.season, target.episode)
+
+@Composable
+private fun localizedEpisodeLine(target: UpNextTarget): String {
+  val code = localizedEpisodeCode(target)
+  val name = target.name.trim()
+  return if (name.isEmpty()) {
+    code
+  } else {
+    stringResource(R.string.player_up_next_episode_line, code, name)
+  }
+}
+
+@Composable
+private fun localizedUpNextStatus(state: UpNextCardState): String = when {
+  state.failure != null -> {
+    val failure = state.failure.message.trim()
+    if (failure.isBlank() || failure == UpNextFailure().message) {
+      stringResource(R.string.player_up_next_default_failure)
+    } else {
+      failure
+    }
+  }
+  state.resolving -> stringResource(R.string.player_up_next_finding_stream)
+  state.secondsLeft != null -> pluralStringResource(
+    R.plurals.player_up_next_playing_in,
+    state.secondsLeft,
+    state.secondsLeft,
+  )
+  else -> stringResource(
+    R.string.player_up_next_press_to_play,
+    stringResource(R.string.player_key_ok),
+  )
+}
+
+@Composable
+private fun localizedUpNextHint(state: UpNextCardState): String = when {
+  state.failure != null -> stringResource(
+    R.string.player_up_next_hint_retry,
+    stringResource(R.string.player_key_ok),
+    stringResource(R.string.player_key_back),
+  )
+  state.resolving -> stringResource(
+    R.string.player_up_next_hint_resolving,
+    stringResource(R.string.player_key_back),
+  )
+  else -> stringResource(
+    R.string.player_up_next_hint_ready,
+    stringResource(R.string.player_key_ok),
+    stringResource(R.string.player_key_back),
+  )
+}
+
+@Composable
+private fun localizedUpNextAnnouncement(
+  state: UpNextCardState,
+  episodeLine: String,
+  status: String,
+): String? = when {
+  state.failure != null -> stringResource(
+    R.string.player_up_next_failure_announcement,
+    episodeLine,
+    status,
+    stringResource(R.string.player_key_ok),
+    stringResource(R.string.player_key_back),
+  )
+  state.resolving -> stringResource(
+    R.string.player_up_next_resolving_announcement,
+    episodeLine,
+    status,
+    stringResource(R.string.player_key_back),
+  )
+  state.secondsLeft == null || state.secondsLeft in ANNOUNCED_COUNTDOWN_SECONDS -> stringResource(
+    R.string.player_up_next_announcement,
+    episodeLine,
+    status,
+  )
+  else -> null
 }
 
 /**
@@ -187,10 +271,20 @@ fun BoxScope.UpNextCard(
   onRetry: (() -> Unit)? = onPlay,
 ) {
   val view = LocalView.current
-  val accessibilityAnnouncement = UpNextText.accessibilityAnnouncement(state)
+  val episodeCode = localizedEpisodeCode(state.target)
+  val episodeLine = localizedEpisodeLine(state.target)
+  val titleLine = state.target.name.trim().ifEmpty { episodeCode }
+  val statusLine = localizedUpNextStatus(state)
+  val hintLine = localizedUpNextHint(state)
+  val accessibilityAnnouncement = localizedUpNextAnnouncement(state, episodeLine, statusLine)
   LaunchedEffect(accessibilityAnnouncement) {
     accessibilityAnnouncement?.let(view::announceForAccessibility)
   }
+  val accessibilityActionLabels = mapOf(
+    UpNextCardAction.Play to stringResource(R.string.player_up_next_action_play, episodeLine),
+    UpNextCardAction.Retry to stringResource(R.string.player_up_next_action_retry, episodeLine),
+    UpNextCardAction.Cancel to stringResource(R.string.player_up_next_action_cancel),
+  )
   val accessibilityActions = UpNextText.availableActions(state).mapNotNull { action ->
     val callback = when (action) {
       UpNextCardAction.Play -> onPlay
@@ -198,7 +292,7 @@ fun BoxScope.UpNextCard(
       UpNextCardAction.Cancel -> onCancel
     } ?: return@mapNotNull null
     CustomAccessibilityAction(
-      label = UpNextText.actionLabel(action, state.target),
+      label = accessibilityActionLabels.getValue(action),
       action = {
         callback()
         true
@@ -233,7 +327,7 @@ fun BoxScope.UpNextCard(
         .clip(NebulaDimens.PosterShape),
       // Not the broken-image glyph: a missing still is routine on TMDB, and the
       // episode's name in the slot is information rather than an apology.
-      fallback = { PosterFallback(UpNextText.titleLine(state.target)) },
+      fallback = { PosterFallback(titleLine) },
     )
     Column(
       modifier = Modifier.weight(1f),
@@ -241,17 +335,17 @@ fun BoxScope.UpNextCard(
     ) {
       Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
-          "Up next",
+          stringResource(R.string.player_up_next_heading),
           style = MaterialTheme.typography.labelMedium,
           color = NebulaPalette.TextFaint,
           modifier = Modifier.weight(1f),
         )
         // The number is the fastest thing to read from the sofa, so it gets the
         // accent chip rather than being buried at the head of the title below.
-        NebulaBadge("S${state.target.season}E${state.target.episode}", tone = BadgeTone.Accent)
+        NebulaBadge(episodeCode, tone = BadgeTone.Accent)
       }
       Text(
-        UpNextText.titleLine(state.target),
+        titleLine,
         style = MaterialTheme.typography.titleLarge,
         color = NebulaPalette.TextHigh,
         maxLines = 2,
@@ -282,7 +376,7 @@ fun BoxScope.UpNextCard(
           )
         }
         Text(
-          UpNextText.statusLine(state),
+          statusLine,
           style = MaterialTheme.typography.titleMedium,
           color = if (state.failure == null) NebulaPalette.VioletBright else NebulaPalette.Danger,
         )
@@ -300,7 +394,7 @@ fun BoxScope.UpNextCard(
         }
       }
       Text(
-        UpNextText.hintLine(state),
+        hintLine,
         style = MaterialTheme.typography.labelMedium,
         color = NebulaPalette.TextFaint,
       )
@@ -315,3 +409,4 @@ private val STILL_HEIGHT = 113.dp
 
 /** 6dp bar plus its 4dp lead-in, held whether or not the bar is in it. */
 private val COUNTDOWN_SLOT = 10.dp
+private val ANNOUNCED_COUNTDOWN_SECONDS = setOf(15, 10, 5, 3, 2, 1)

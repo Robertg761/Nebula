@@ -170,6 +170,11 @@ data class TrackRow(
   val label: String,
   val detail: String,
   val selected: Boolean,
+  /**
+   * The structured source for localized presentation. Null is the synthetic subtitles-off row.
+   * The legacy strings above remain the pure policy output used by the OSD and unit tests.
+   */
+  val track: MpvTrack? = null,
 )
 
 /**
@@ -277,5 +282,6 @@ object MpvTracks {
     label = displayName,
     detail = detail,
     selected = selected,
+    track = this,
   )
 }

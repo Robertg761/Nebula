@@ -38,6 +38,31 @@ class UpNextPolicyTest {
   }
 
   @Test
+  fun `autoplay disabled always leaves a prompt`() {
+    val offer = UpNextPolicy.offer(
+      hasNext = true,
+      paused = false,
+      msSinceInteractionMs = 600_000,
+      autoPlayNext = false,
+      countdownMs = 5_000,
+    )
+
+    assertEquals(UpNextPolicy.Offer.Prompt, offer)
+  }
+
+  @Test
+  fun `configured countdown duration is carried into the offer`() {
+    val offer = UpNextPolicy.offer(
+      hasNext = true,
+      paused = false,
+      msSinceInteractionMs = 600_000,
+      countdownMs = 30_000,
+    )
+
+    assertEquals(UpNextPolicy.Offer.Countdown(30_000), offer)
+  }
+
+  @Test
   fun `the countdown opens on the full number of seconds`() {
     assertEquals(15, UpNextPolicy.secondsLeft(elapsedMs = 0, totalMs = 15_000))
     assertEquals(15, UpNextPolicy.secondsLeft(elapsedMs = 200, totalMs = 15_000))

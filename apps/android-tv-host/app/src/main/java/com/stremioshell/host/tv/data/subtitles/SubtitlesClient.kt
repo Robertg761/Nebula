@@ -3,6 +3,7 @@ package com.stremioshell.host.tv.data.subtitles
 import com.stremioshell.host.tv.data.HttpFetcher
 import com.stremioshell.host.tv.data.OkHttpFetcher
 import com.stremioshell.host.tv.data.addon.AddonList
+import com.stremioshell.host.tv.data.decodeJsonOffMain
 import java.net.URLEncoder
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -53,7 +54,7 @@ class SubtitlesClient(
   ): List<AddonSubtitle> {
     val base = baseUrl().trim().ifBlank { OPENSUBTITLES_V3_BASE }
     val body = fetcher.getAllowingStale(subtitlesUrl(base, type, id, extra))
-    return json.decodeFromString<SubtitlesResponse>(body).subtitles
+    return decodeJsonOffMain { json.decodeFromString<SubtitlesResponse>(body) }.subtitles
       .filter { it.url.isNotBlank() }
   }
 

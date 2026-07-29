@@ -27,6 +27,7 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Canvas
@@ -81,6 +82,7 @@ import androidx.compose.ui.input.key.KeyEvent as ComposeKeyEvent
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
@@ -97,15 +99,19 @@ import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.stremioshell.host.R
 import com.stremioshell.host.tv.channel.WatchNextSync
 import com.stremioshell.host.tv.data.PlayerPrefs
 import com.stremioshell.host.tv.data.PlayerPrefsStore
+import com.stremioshell.host.tv.data.PlaybackUrlPolicy
+import com.stremioshell.host.tv.data.PlaybackUrlValidation
+import com.stremioshell.host.tv.data.PublicOnlyDns
 import com.stremioshell.host.tv.data.SettingsStore
 import com.stremioshell.host.tv.data.StreamPickStore
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.WatchStateStore
 import com.stremioshell.host.tv.data.SharedHttpClient
-import com.stremioshell.host.tv.data.awaitResponse
+import com.stremioshell.host.tv.data.awaitAndConsumeResponse
 import com.stremioshell.host.tv.data.addon.AddonStream
 import com.stremioshell.host.tv.data.addon.AddonStreamSubtitle
 import com.stremioshell.host.tv.data.addon.StreamAutoPick
@@ -115,6 +121,7 @@ import com.stremioshell.host.tv.data.subtitles.SubtitlesClient
 import com.stremioshell.host.tv.data.tmdb.EpisodeItem
 import com.stremioshell.host.tv.data.tmdb.MediaType
 import com.stremioshell.host.tv.data.tmdb.TmdbClient
+import com.stremioshell.host.tv.diagnostics.NebulaDiagnostics
 import com.stremioshell.host.tv.ui.BadgeTone
 import com.stremioshell.host.tv.ui.EmptyState
 import com.stremioshell.host.tv.ui.InitialFocusTarget
@@ -148,15 +155,14 @@ import java.util.Date
 import java.io.File
 import java.io.IOException
 import java.util.Locale
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.locks.ReentrantLock
 import okhttp3.Request
 
 class MpvPlayerActivity : ComponentActivity() {
   private var mpvCreated = false
+  /** True only when create/init failed and observer registration may be incomplete. */
+  private var mpvInitializationIncomplete = false
   private lateinit var watchStore: WatchStateStore
   private lateinit var playerPrefsStore: PlayerPrefsStore
 
@@ -188,7 +194,8 @@ class MpvPlayerActivity : ComponentActivity() {
    * activity can finish while a JNI read is still unwinding on its worker; without one shared
    * lock its delayed destroy can tear down the next activity's newly-created core.
    */
-  private val mpvLock = MPV_CORE_LOCK
+  private val mpvLock = MpvCoreCoordinator.lock
+  private var mpvLease: MpvCoreCoordinator.Lease? = null
 
   /**
    * Serializes resume writes in call order. `CoroutineStart.UNDISPATCHED` is used at launch sites
@@ -346,6 +353,7 @@ class MpvPlayerActivity : ComponentActivity() {
   /** Non-null while the up-next card is on screen; also what redirects the remote. */
   private val upNextCard = mutableStateOf<UpNextCardState?>(null)
   private var upNextCountdownStartMs = 0L
+  private var upNextCountdownTotalMs = UpNextPolicy.COUNTDOWN_MS
 
   /** Guards the next episode's stream lookup, so OK during it cannot start two. */
   private var nextEpisodeStarting = false
@@ -515,6 +523,9 @@ class MpvPlayerActivity : ComponentActivity() {
    */
   private var externalSubAdding = false
 
+  /** Files whose worker callback has not claimed ownership yet. Guarded by itself. */
+  private val queuedSubtitleFiles = mutableSetOf<File>()
+
   /**
    * Whether the next track list to arrive is the result of the audio-cycle key,
    * and should therefore update the stored language preference the same way a
@@ -609,14 +620,14 @@ class MpvPlayerActivity : ComponentActivity() {
     override fun run() {
       val state = upNextCard.value ?: return
       val elapsedMs = SystemClock.uptimeMillis() - upNextCountdownStartMs
-      if (UpNextPolicy.isDue(elapsedMs, UpNextPolicy.COUNTDOWN_MS)) {
+      if (UpNextPolicy.isDue(elapsedMs, upNextCountdownTotalMs)) {
         playNextEpisode()
         return
       }
       upNextCard.value =
         state.copy(
-          secondsLeft = UpNextPolicy.secondsLeft(elapsedMs, UpNextPolicy.COUNTDOWN_MS),
-          progress = PlaybackFrameRate.progressRemaining(elapsedMs, UpNextPolicy.COUNTDOWN_MS),
+          secondsLeft = UpNextPolicy.secondsLeft(elapsedMs, upNextCountdownTotalMs),
+          progress = PlaybackFrameRate.progressRemaining(elapsedMs, upNextCountdownTotalMs),
         )
       mainHandler.postDelayed(this, UP_NEXT_TICK_MS)
     }
@@ -657,12 +668,23 @@ class MpvPlayerActivity : ComponentActivity() {
 
   private var frameRateRetryRunnable: Runnable? = null
 
+  /**
+   * Rechecks lifetime on the main thread, not only on mpv's callback thread. An observer can race
+   * `onDestroy()` after its first check and enqueue after the handler queue was cleared; this gate
+   * makes that late runnable inert and prevents it from touching a replacement generation.
+   */
+  private fun postMpvEvent(action: () -> Unit) {
+    mainHandler.post {
+      if (!destroying && mpvCreated) action()
+    }
+  }
+
   private val observer = object : MPVLib.EventObserver {
     override fun eventProperty(property: String) {}
     override fun eventProperty(property: String, value: Long) {
       if (destroying) return
       if (property == "volume") {
-        mainHandler.post { observedVolume = value.toInt().coerceIn(0, 100) }
+        postMpvEvent { observedVolume = value.toInt().coerceIn(0, 100) }
       }
     }
     override fun eventProperty(property: String, value: Double) {
@@ -674,19 +696,19 @@ class MpvPlayerActivity : ComponentActivity() {
           val whole = value.toLong()
           if (whole == lastPostedSecond) return
           lastPostedSecond = whole
-          mainHandler.post {
+          postMpvEvent {
             if (generation == loadGeneration && acceptingFileProperties) {
               timePosSec.doubleValue = value
             }
           }
         }
-        "duration" -> mainHandler.post {
+        "duration" -> postMpvEvent {
           if (generation == loadGeneration && acceptingFileProperties) {
             durationSec.doubleValue = value
             publishMediaMetadata()
           }
         }
-        "speed" -> mainHandler.post {
+        "speed" -> postMpvEvent {
           if (generation == loadGeneration && acceptingFileProperties) {
             playbackSpeed.doubleValue = value
             publishPlaybackState()
@@ -700,7 +722,7 @@ class MpvPlayerActivity : ComponentActivity() {
           val whole = value.toLong()
           if (whole == lastPostedCacheSecond) return
           lastPostedCacheSecond = whole
-          mainHandler.post {
+          postMpvEvent {
             if (generation == loadGeneration && acceptingFileProperties) {
               cacheAheadSec.value = value.takeIf { it.isFinite() && it >= 0.0 }
               // A buffering stream whose demuxer frontier is still advancing is slow, not dead.
@@ -716,8 +738,8 @@ class MpvPlayerActivity : ComponentActivity() {
       if (destroying) return
       if (!acceptingFileProperties) return
       val generation = loadGeneration
-      mainHandler.post {
-        if (generation != loadGeneration || !acceptingFileProperties) return@post
+      postMpvEvent {
+        if (generation != loadGeneration || !acceptingFileProperties) return@postMpvEvent
         when (property) {
           // Every state the OSD reflects is also a state a MediaSession client
           // reflects, so these are the natural points to republish.
@@ -755,23 +777,31 @@ class MpvPlayerActivity : ComponentActivity() {
 
     override fun event(eventId: Int) {
       if (destroying) return
+      val generation = loadGeneration
       when (eventId) {
         // A file has begun loading: the initial one, or the entry mpv redirected
         // to after resolving a playlist. Either way it gets a full window to
         // become playable before the watchdog calls it dead.
-        MPVLib.MPV_EVENT_START_FILE -> mainHandler.post {
+        MPVLib.MPV_EVENT_START_FILE -> postMpvEvent {
+          if (generation != loadGeneration) return@postMpvEvent
           awaitingStartFile = false
           acceptingFileProperties = true
-          playbackErrors.reset()
+          playbackErrors.reset(generation)
           armLoadWatchdog(LOAD_TIMEOUT_MS)
         }
-        MPVLib.MPV_EVENT_FILE_LOADED -> mainHandler.post {
-          if (!acceptingFileProperties || playbackError.value != null) return@post
+        MPVLib.MPV_EVENT_FILE_LOADED -> postMpvEvent {
+          if (
+            generation != loadGeneration ||
+            !acceptingFileProperties ||
+            playbackError.value != null
+          ) {
+            return@postMpvEvent
+          }
           playbackStarted = true
           cancelLoadWatchdog()
           // Startup noise (hwdec probing, codec fallbacks) must not be reported
           // later as the reason a mid-stream failure happened.
-          playbackErrors.reset()
+          playbackErrors.reset(generation)
           buffering.value = false
           cancelStallWatchdog()
           refreshTracks()
@@ -796,7 +826,8 @@ class MpvPlayerActivity : ComponentActivity() {
         // Nothing else notices a dead stream: `keep-open=yes` leaves mpv idling
         // on a black frame, so without this a failed load or a fatal mid-stream
         // error spins under the busy indicator forever.
-        MPVLib.MPV_EVENT_END_FILE -> mainHandler.post {
+        MPVLib.MPV_EVENT_END_FILE -> postMpvEvent {
+          if (generation != loadGeneration) return@postMpvEvent
           if (!awaitingStartFile && playbackError.value == null) onPlaybackEnded()
         }
         // Playback has actually resumed at the seek target, so the real
@@ -804,8 +835,14 @@ class MpvPlayerActivity : ComponentActivity() {
         // also arrive from initial load, cache-stall recovery and earlier seeks,
         // so mirror whatever the coalescer keeps rather than blanking: a press
         // that landed since must stay on screen and still be flushed.
-        MPVLib.MPV_EVENT_PLAYBACK_RESTART -> mainHandler.post {
-          if (!acceptingFileProperties || playbackError.value != null) return@post
+        MPVLib.MPV_EVENT_PLAYBACK_RESTART -> postMpvEvent {
+          if (
+            generation != loadGeneration ||
+            !acceptingFileProperties ||
+            playbackError.value != null
+          ) {
+            return@postMpvEvent
+          }
           seeking.value = false
           seeker.settle()
           seekPreviewSec.doubleValue = seeker.previewSec ?: NO_SEEK
@@ -848,7 +885,10 @@ class MpvPlayerActivity : ComponentActivity() {
     override fun logMessage(prefix: String, level: Int, text: String) {
       if (destroying) return
       if (level > MPVLib.MPV_LOG_LEVEL_ERROR) return
-      playbackErrors.record(prefix, text)
+      // The accumulator compares and records under one monitor. If a replacement resets it while
+      // this old-file callback is in flight, the old diagnostic is either cleared by that reset or
+      // rejected afterward; it can never become the new file's failure reason.
+      playbackErrors.record(prefix, text, loadGeneration)
     }
   }
 
@@ -906,6 +946,7 @@ class MpvPlayerActivity : ComponentActivity() {
       ?.takeIf { it.containsKey(STATE_POSITION_MS) }
       ?.getLong(STATE_POSITION_MS)
     if (!applyLaunchIntent(intent, restoredPosition)) {
+      Toast.makeText(this, R.string.playback_url_blocked, Toast.LENGTH_LONG).show()
       finish()
       return
     }
@@ -921,26 +962,29 @@ class MpvPlayerActivity : ComponentActivity() {
       systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
     }
 
-    val pendingDestroy = MPV_DESTROY_PENDING.get()
-    if (
-      pendingDestroy != null &&
-      !runCatching {
-        pendingDestroy.await(MPV_CREATE_WAIT_MS, TimeUnit.MILLISECONDS)
-      }.getOrDefault(false)
-    ) {
+    val lease = MpvCoreCoordinator.acquire(MPV_CREATE_WAIT_MS)
+    if (lease == null) {
+      NebulaDiagnostics.record("player", "launch blocked: previous native core still owned")
       finish()
       return
     }
+    mpvLease = lease
     val coreLockAcquired = runCatching {
       mpvLock.tryLock(MPV_CREATE_WAIT_MS, TimeUnit.MILLISECONDS)
     }.getOrDefault(false)
     if (!coreLockAcquired) {
       // A vendor JNI call in the previous activity has not unwound. Creating another process-wide
       // core would let its delayed destroy kill this one, so fail this launch safely.
+      NebulaDiagnostics.record("player", "launch blocked: native core lock timed out")
+      MpvCoreCoordinator.abandon(lease)
+      mpvLease = null
       finish()
       return
     }
+    var nativeCreateAttempted = false
+    var initializationFailure: Throwable? = null
     try {
+      nativeCreateAttempted = true
       MPVLib.create(this)
       mpvCreated = true
       mpvAlive = true
@@ -977,8 +1021,44 @@ class MpvPlayerActivity : ComponentActivity() {
       MPVLib.observeProperty("speed", MPVLib.MPV_FORMAT_DOUBLE)
       MPVLib.observeProperty("demuxer-cache-time", MPVLib.MPV_FORMAT_DOUBLE)
       MPVLib.observeProperty("volume", MPVLib.MPV_FORMAT_INT64)
+      NebulaDiagnostics.record("player", "native core initialized")
+    } catch (error: Throwable) {
+      // A failed JNI/linkage initialization is recoverable at the Activity boundary. VM-wide
+      // failures are not: attempting UI or native cleanup while the runtime is dying is unsafe.
+      if (error is VirtualMachineError || error is ThreadDeath) throw error
+      initializationFailure = error
     } finally {
       mpvLock.unlock()
+    }
+
+    val failedInitialization = initializationFailure
+    if (failedInitialization != null) {
+      mpvInitializationIncomplete = true
+      destroying = true
+      stopMpvWorker()
+      mpvAlive = false
+      // `create()` itself can throw after allocating part of the singleton. Treat an attempted
+      // create as owned native state and retire that exact lease. If thread creation is temporarily
+      // unavailable, keep the lease/mpvCreated invariant intact so normal onDestroy retries.
+      mpvCreated = nativeCreateAttempted
+      val cleanupScheduled = nativeCreateAttempted &&
+        MpvCoreCoordinator.destroyAsync(lease, threadName = "mpv-failed-init-destroy") {
+          destroyMpvCoreAfterFailedInitialization()
+        }
+      if (cleanupScheduled) {
+        mpvCreated = false
+        mpvLease = null
+      } else if (!nativeCreateAttempted) {
+        MpvCoreCoordinator.abandon(lease)
+        mpvLease = null
+      }
+      NebulaDiagnostics.record(
+        "player",
+        "native core initialization failed: ${failedInitialization.javaClass.simpleName}",
+      )
+      Toast.makeText(this, R.string.player_start_failed, Toast.LENGTH_LONG).show()
+      finish()
+      return
     }
 
     loadPlayerPrefs()
@@ -1001,8 +1081,7 @@ class MpvPlayerActivity : ComponentActivity() {
    * screen while the caller believes the new one started.
    */
   private fun applyLaunchIntent(source: Intent, restoredPositionMs: Long? = null): Boolean {
-    val nextUrl = source.getStringExtra(EXTRA_URL).orEmpty()
-    if (nextUrl.isBlank()) return false
+    val nextUrl = validatedPlaybackUrl(source.getStringExtra(EXTRA_URL).orEmpty()) ?: return false
     url = nextUrl
     title = source.getStringExtra(EXTRA_TITLE).orEmpty()
     watchKey = source.getStringExtra(EXTRA_WATCH_KEY).orEmpty()
@@ -1035,7 +1114,7 @@ class MpvPlayerActivity : ComponentActivity() {
     setIntent(intent)
     if (!applyLaunchIntent(intent)) {
       setIntent(previousIntent)
-      showOsdMessage("Couldn't open the selected stream")
+      showOsdMessage(getString(R.string.playback_url_blocked))
       return
     }
     resetFileRuntime(clearUpNext = true, resetDelays = true, initialPositionMs = resumeMs)
@@ -1051,6 +1130,16 @@ class MpvPlayerActivity : ComponentActivity() {
     if (names.size != values.size) return emptyMap()
     return StreamRequestHeaders.sanitize(names.indices.associate { names[it] to values[it] })
   }
+
+  /** Narrows untrusted addon input to one public HTTPS URL before native mpv can interpret it. */
+  private fun validatedPlaybackUrl(candidate: String): String? =
+    when (val validation = PlaybackUrlPolicy.validate(candidate)) {
+      is PlaybackUrlValidation.Allowed -> validation.url
+      is PlaybackUrlValidation.Rejected -> {
+        NebulaDiagnostics.record("player", "stream URL rejected: ${validation.reason}")
+        null
+      }
+    }
 
   private fun readSubtitleExtras(source: Intent): List<AddonStreamSubtitle> {
     val urls = source.getStringArrayListExtra(EXTRA_SUBTITLE_URLS).orEmpty()
@@ -1075,10 +1164,11 @@ class MpvPlayerActivity : ComponentActivity() {
       ExternalSubtitleOption(
         url = subtitle.url,
         lang = languageCode,
-        label = LanguageCodes.displayName(languageCode).ifBlank { "Unknown language" },
-        detail = "Included with this stream",
+        label = LanguageCodes.displayName(languageCode)
+          .ifBlank { getString(R.string.player_unknown_language) },
+        detail = getString(R.string.player_subtitle_included),
         trackTitle = subtitle.id?.trim()?.takeIf { it.isNotEmpty() }
-          ?: "Stream subtitle ${index + 1}",
+          ?: getString(R.string.player_stream_subtitle_number, index + 1),
       )
     }
     return when {
@@ -1126,6 +1216,7 @@ class MpvPlayerActivity : ComponentActivity() {
     dolbyVisionWarned = false
     externalSubtitles.value = initialExternalSubtitlesState()
     externalSubAdding = false
+    discardQueuedSubtitleFiles()
     audioCyclePending = false
     nextEpisodeStarting = false
     retryInFlight = false
@@ -1148,9 +1239,10 @@ class MpvPlayerActivity : ComponentActivity() {
   }
 
   /**
-   * Streams come from debrid/torrent resolvers over plain HTTP, where a stalled
-   * or dropped connection is routine. Without reconnect options a single hiccup
-   * ends playback for good, and a thin cache turns every wobble into a stall.
+   * Streams come from debrid/torrent resolvers, where a stalled or dropped connection is routine.
+   * Without reconnect options a single hiccup ends playback for good, and a thin cache turns every
+   * wobble into a stall. TLS verification is explicit because older libavformat builds can have a
+   * weaker default; addon-provided playback URLs are HTTPS-only.
    */
   private fun applyNetworkOptions() {
     MPVLib.setOptionString("cache", "yes")
@@ -1163,6 +1255,7 @@ class MpvPlayerActivity : ComponentActivity() {
     MPVLib.setOptionString("demuxer-max-bytes", cache.forwardBytes.toString())
     MPVLib.setOptionString("demuxer-max-back-bytes", cache.backBytes.toString())
     MPVLib.setOptionString("network-timeout", "30")
+    MPVLib.setOptionString("tls-verify", "yes")
     MPVLib.setOptionString(
       "stream-lavf-o",
       "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=10",
@@ -1207,14 +1300,19 @@ class MpvPlayerActivity : ComponentActivity() {
     val size = SubtitleSize.fromStorage(prefs.subtitleSize)
     subtitleSize.value = size
     val requestedOutput = AudioOutputMode.fromStorage(prefs.audioOutput)
-    // Old builds persisted passthrough before proving the next route could decode it, which could
-    // make every future launch silent. Passthrough is now a capability-gated session choice.
-    val output =
-      if (requestedOutput == AudioOutputMode.Passthrough) AudioOutputMode.Decode else requestedOutput
+    // A persisted passthrough choice is a preference, never proof that this particular route can
+    // carry it. Honour it only when Android reports compatible codecs for the active media route;
+    // otherwise decode for this session without erasing the preference (an AVR may simply be off).
+    val output = if (
+      requestedOutput == AudioOutputMode.Passthrough && supportedSpdifCodecs().isNotEmpty()
+    ) {
+      AudioOutputMode.Passthrough
+    } else {
+      AudioOutputMode.Decode
+    }
     audioOutput.value = output
-    if (requestedOutput != output) {
-      playerPrefs = prefs.copy(audioOutput = output.storageName)
-      persistenceScope.launch { runCatching { playerPrefsStore.setAudioOutput(output.storageName) } }
+    if (requestedOutput == AudioOutputMode.Passthrough && output == AudioOutputMode.Decode) {
+      NebulaDiagnostics.record("player", "passthrough preference fell back to decode for this route")
     }
     if (mpvCreated && !finishing) {
       applyTrackPreferencesForNextFile()
@@ -1249,6 +1347,11 @@ class MpvPlayerActivity : ComponentActivity() {
   private fun loadCurrentFile(replace: Boolean, startMs: Long) {
     if (!mpvCreated || finishing || url.isBlank()) return
     loadGeneration += 1
+    val generation = loadGeneration
+    val command = PlaybackLoadCommand.build(url, replace = replace, resumeMs = startMs)
+    val audioLanguage = playerPrefs.audioLanguage
+    val subtitleLanguage = playerPrefs.subtitleLanguage
+    val headerSnapshot = requestHeaders.toMap()
     awaitingStartFile = true
     acceptingFileProperties = false
     cancelLoadWatchdog()
@@ -1256,7 +1359,7 @@ class MpvPlayerActivity : ComponentActivity() {
     frameRateRetryRunnable?.let(mainHandler::removeCallbacks)
     frameRateRetryRunnable = null
     playbackStarted = false
-    playbackErrors.reset()
+    playbackErrors.reset(generation)
     buffering.value = true
     paused.value = true
     seeking.value = false
@@ -1266,14 +1369,19 @@ class MpvPlayerActivity : ComponentActivity() {
     pauseRequested = false
     clearDisplayFrameRateVote()
     abandonAudioFocus()
-    // This has to precede loadfile. A global pause is intentional; unlike `start` it is an
-    // invariant of every load and is explicitly released only after focus is granted.
-    MPVLib.setPropertyBoolean("pause", true)
-    applyTrackPreferencesForNextFile()
-    applyStreamRequestHeaders()
-    MPVLib.command(PlaybackLoadCommand.build(url, replace = replace, resumeMs = startMs))
-    // START_FILE normally re-arms this. Keeping the first arm covers a native command failure that
-    // produces no event at all.
+    // File loads and subtitle additions share one worker. If an old subtitle mutation is already
+    // running, it finishes before this queued replacement; if it has not started, the generation
+    // check drops it. Native work never blocks the main thread.
+    runMpvMutationOffMain(generation) {
+      // This has to precede loadfile. A global pause is intentional; unlike `start` it is an
+      // invariant of every load and is explicitly released only after focus is granted.
+      MPVLib.setPropertyBoolean("pause", true)
+      applyTrackPreferencesForNextFile(audioLanguage, subtitleLanguage)
+      applyStreamRequestHeaders(headerSnapshot)
+      MPVLib.command(command)
+    }
+    // START_FILE normally re-arms this. Keeping the first arm covers a native command failure or
+    // worker handoff that produces no event at all.
     armLoadWatchdog(LOAD_TIMEOUT_MS)
     publishPlaybackState()
     syncPlayingState()
@@ -1286,26 +1394,29 @@ class MpvPlayerActivity : ComponentActivity() {
    * be English in one file and commentary in the next. Clearing those selectors back to auto lets
    * the stored language list choose against the new file's own tracks.
    */
-  private fun applyTrackPreferencesForNextFile() {
+  private fun applyTrackPreferencesForNextFile(
+    audioLanguage: String = playerPrefs.audioLanguage,
+    subtitleLanguage: String = playerPrefs.subtitleLanguage,
+  ) {
     MPVLib.setPropertyString(
       "alang",
-      TrackPreferences.alangValue(playerPrefs.audioLanguage).orEmpty(),
+      TrackPreferences.alangValue(audioLanguage).orEmpty(),
     )
     MPVLib.setPropertyString("aid", "auto")
     MPVLib.setPropertyString(
       "slang",
-      TrackPreferences.slangValue(playerPrefs.subtitleLanguage).orEmpty(),
+      TrackPreferences.slangValue(subtitleLanguage).orEmpty(),
     )
     MPVLib.setPropertyString(
       "sid",
-      if (TrackPreferences.subtitlesOff(playerPrefs.subtitleLanguage)) "no" else "auto",
+      if (TrackPreferences.subtitlesOff(subtitleLanguage)) "no" else "auto",
     )
   }
 
-  private fun applyStreamRequestHeaders() {
+  private fun applyStreamRequestHeaders(headers: Map<String, String> = requestHeaders) {
     // Reset on every file, including an empty map, so credentials from one add-on can never leak
     // into a retry resolved by another or into the next episode.
-    MPVLib.setPropertyString("http-header-fields", StreamRequestHeaders.mpvValue(requestHeaders))
+    MPVLib.setPropertyString("http-header-fields", StreamRequestHeaders.mpvValue(headers))
   }
 
   /**
@@ -1336,7 +1447,7 @@ class MpvPlayerActivity : ComponentActivity() {
     // Keep the resume point: the viewer stopped where the stream died. The
     // MIN_SAVE_MS guard inside decides whether that is worth remembering.
     saveWatchState(SaveReason.Stopped)
-    showPlaybackError(playbackErrors.messageOr(DEFAULT_PLAYBACK_ERROR))
+    showPlaybackError(playbackErrors.messageOr(getString(R.string.player_stream_stopped)))
   }
 
   /**
@@ -1393,7 +1504,7 @@ class MpvPlayerActivity : ComponentActivity() {
       if (generation != loadGeneration || playbackStarted || playbackError.value != null) {
         return@Runnable
       }
-      showPlaybackError(playbackErrors.messageOr(DEFAULT_LOAD_ERROR))
+      showPlaybackError(playbackErrors.messageOr(getString(R.string.player_stream_open_failed)))
     }
     loadFailedRunnable = runnable
     mainHandler.postDelayed(runnable, delayMs)
@@ -1418,7 +1529,13 @@ class MpvPlayerActivity : ComponentActivity() {
         return@Runnable
       }
       saveWatchState(SaveReason.Stopped)
-      showPlaybackError(STALL_ERROR)
+      showPlaybackError(
+        resources.getQuantityString(
+          R.plurals.player_stream_stalled,
+          (STALL_TIMEOUT_MS / 1_000).toInt(),
+          STALL_TIMEOUT_MS / 1_000,
+        ),
+      )
     }
     stallRunnable = runnable
     mainHandler.postDelayed(runnable, STALL_TIMEOUT_MS)
@@ -1436,6 +1553,7 @@ class MpvPlayerActivity : ComponentActivity() {
    */
   private fun showPlaybackError(reason: String) {
     if (finishing || playbackError.value != null) return
+    NebulaDiagnostics.record("player", "playback failed: $reason")
     cancelLoadWatchdog()
     mainHandler.removeCallbacks(seekRunnable)
     mainHandler.removeCallbacks(seekSettleTimeoutRunnable)
@@ -1472,6 +1590,7 @@ class MpvPlayerActivity : ComponentActivity() {
   private fun retryPlayback() {
     val error = playbackError.value
     if (!mpvCreated || finishing || error == null || retryInFlight) return
+    NebulaDiagnostics.record("player", "retry requested")
 
     // Where to come back in, captured before reset drops an outstanding seek target.
     val restartMs = (resumePositionSec() * 1000).toLong()
@@ -1483,7 +1602,7 @@ class MpvPlayerActivity : ComponentActivity() {
     if (shouldRefresh && !imdbId.isNullOrBlank()) {
       retryInFlight = true
       buffering.value = true
-      showOsdMessage("Refreshing stream link…")
+      showOsdMessage(getString(R.string.player_refreshing_stream))
       val forWatchKey = watchKey
       lifecycleScope.launch {
         val refreshed = suspendRunCatching {
@@ -1498,7 +1617,11 @@ class MpvPlayerActivity : ComponentActivity() {
           return@launch
         }
         retryInFlight = false
-        refreshed?.takeIf { !it.url.isNullOrBlank() }?.let(::applyResolvedStream)
+        val refreshedStream = refreshed?.takeIf { !it.url.isNullOrBlank() }
+        if (refreshedStream != null && !applyResolvedStream(refreshedStream)) {
+          showPlaybackError(getString(R.string.player_refreshed_stream_blocked))
+          return@launch
+        }
         loadCurrentFile(replace = true, startMs = restartMs)
         showOsd()
       }
@@ -1517,8 +1640,8 @@ class MpvPlayerActivity : ComponentActivity() {
     return StreamAutoPick.pick(fetch.streams, bingeGroup, streamPickStore.get(imdb))
   }
 
-  private fun applyResolvedStream(stream: AddonStream) {
-    url = stream.url?.takeIf { it.isNotBlank() } ?: return
+  private fun applyResolvedStream(stream: AddonStream): Boolean {
+    url = validatedPlaybackUrl(stream.url.orEmpty()) ?: return false
     bingeGroup = stream.bingeGroup ?: bingeGroup
     requestHeaders = StreamRequestHeaders.sanitize(
       stream.behaviorHints?.proxyHeaders?.request.orEmpty(),
@@ -1528,6 +1651,7 @@ class MpvPlayerActivity : ComponentActivity() {
     streamFilename = stream.behaviorHints?.filename
     streamVideoSize = stream.behaviorHints?.videoSize
     externalSubtitles.value = initialExternalSubtitlesState()
+    return true
   }
 
   /**
@@ -1641,6 +1765,8 @@ class MpvPlayerActivity : ComponentActivity() {
       hasNext = target != null,
       paused = pausedByViewer,
       msSinceInteractionMs = SystemClock.uptimeMillis() - lastInteractionMs,
+      autoPlayNext = playerPrefs.autoPlayNext,
+      countdownMs = playerPrefs.upNextCountdownSeconds * 1_000L,
     )
     if (target == null || offer == UpNextPolicy.Offer.None) {
       finishPlayback(markFinished = true)
@@ -1658,6 +1784,7 @@ class MpvPlayerActivity : ComponentActivity() {
       progress = 1f,
     )
     if (countdown != null) {
+      upNextCountdownTotalMs = countdown.totalMs
       upNextCountdownStartMs = SystemClock.uptimeMillis()
       mainHandler.postDelayed(upNextTickRunnable, UP_NEXT_TICK_MS)
     }
@@ -1785,8 +1912,18 @@ class MpvPlayerActivity : ComponentActivity() {
    */
   private fun startNextEpisode(target: UpNextTarget, stream: AddonStream, nextUrl: String) {
     if (!mpvCreated || finishing) return
+    val validatedUrl = validatedPlaybackUrl(nextUrl)
+    if (validatedUrl == null) {
+      upNextCard.value = upNextCard.value?.copy(
+        resolving = false,
+        secondsLeft = null,
+        failure = UpNextFailure(getString(R.string.playback_url_blocked)),
+      )
+      publishPlaybackState()
+      return
+    }
     dismissUpNext()
-    url = nextUrl
+    url = validatedUrl
     requestHeaders = StreamRequestHeaders.sanitize(
       stream.behaviorHints?.proxyHeaders?.request.orEmpty(),
     )
@@ -1977,7 +2114,7 @@ class MpvPlayerActivity : ComponentActivity() {
         modifier = Modifier.size(28.dp),
       )
       Text(
-        if (isSeeking) "Seeking" else "Buffering",
+        stringResource(if (isSeeking) R.string.player_seeking else R.string.player_buffering),
         modifier = Modifier.padding(start = 14.dp),
         color = NebulaPalette.TextMuted,
         style = MaterialTheme.typography.bodyMedium,
@@ -2008,16 +2145,20 @@ class MpvPlayerActivity : ComponentActivity() {
         .padding(horizontal = 44.dp, vertical = 40.dp),
       horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-      EmptyState(title = "Playback failed", hint = message, icon = Icons.Filled.Warning)
+      EmptyState(
+        title = stringResource(R.string.player_playback_failed),
+        hint = message,
+        icon = Icons.Filled.Warning,
+      )
       NebulaButton(
-        text = "Retry",
+        text = stringResource(R.string.action_retry),
         onClick = { retryPlayback() },
         style = NebulaButtonStyle.Primary,
         icon = Icons.Filled.Refresh,
         modifier = Modifier.padding(top = 26.dp).initialFocusTarget(retryTarget),
       )
       Text(
-        "OK retries from where it stopped   |   BACK tries another stream",
+        stringResource(R.string.player_retry_hint),
         modifier = Modifier.padding(top = 20.dp),
         color = NebulaPalette.TextFaint,
         style = MaterialTheme.typography.labelMedium,
@@ -2144,7 +2285,9 @@ class MpvPlayerActivity : ComponentActivity() {
       episodeText?.let { NebulaBadge(it, tone = BadgeTone.Accent) }
       // A paused film and a stalled one look the same on screen; the badge is what
       // tells a viewer which of the two they are looking at.
-      if (isPaused) NebulaBadge("Paused", tone = BadgeTone.Warn)
+      if (isPaused) {
+        NebulaBadge(stringResource(R.string.player_paused), tone = BadgeTone.Warn)
+      }
     }
   }
 
@@ -2169,11 +2312,17 @@ class MpvPlayerActivity : ComponentActivity() {
         // language, a channel layout and a codec, and unweighted it would push the
         // shortest and most fixed chip of the three off the end of the row.
         NebulaBadge(
-          "Audio  ${audio ?: "none"}",
+          stringResource(
+            R.string.player_audio_track,
+            audio ?: stringResource(R.string.player_none),
+          ),
           modifier = Modifier.weight(1f, fill = false),
         )
         NebulaBadge(
-          "Subtitles  ${subtitle ?: "off"}",
+          stringResource(
+            R.string.player_subtitle_track,
+            subtitle ?: stringResource(R.string.player_off),
+          ),
           modifier = Modifier.weight(1f, fill = false),
           tone = if (subtitle != null) BadgeTone.Accent else BadgeTone.Neutral,
         )
@@ -2230,7 +2379,7 @@ class MpvPlayerActivity : ComponentActivity() {
       verticalAlignment = Alignment.CenterVertically,
     ) {
       TransportButton(
-        label = if (isPaused) "Play" else "Pause",
+        label = stringResource(if (isPaused) R.string.action_play else R.string.player_pause),
         onClick = { togglePause(); showOsd() },
         modifier = Modifier.initialFocusTarget(target),
         primary = true,
@@ -2248,7 +2397,7 @@ class MpvPlayerActivity : ComponentActivity() {
         }
       }
       TransportButton(
-        label = "Restart",
+        label = stringResource(R.string.player_restart),
         onClick = { seekToSec(0.0); showOsd() },
         showLabel = false,
       ) { tint ->
@@ -2260,7 +2409,7 @@ class MpvPlayerActivity : ComponentActivity() {
         )
       }
       TransportButton(
-        label = "Audio & subtitles",
+        label = stringResource(R.string.player_audio_and_subtitles),
         onClick = { openMenu(PlayerMenuTab.Audio) },
       ) { tint ->
         Icon(
@@ -2271,7 +2420,7 @@ class MpvPlayerActivity : ComponentActivity() {
         )
       }
       TransportButton(
-        label = "Playback options",
+        label = stringResource(R.string.player_playback_options),
         onClick = { openMenu(PlayerMenuTab.Options) },
       ) { tint ->
         Icon(
@@ -2286,7 +2435,7 @@ class MpvPlayerActivity : ComponentActivity() {
       // button, and on a film there is never anything next.
       if (next != null) {
         TransportButton(
-          label = "Next episode",
+          label = stringResource(R.string.player_next_episode),
           onClick = { skipToNextEpisode() },
         ) { tint -> SkipNextGlyph(tint) }
       }
@@ -2533,9 +2682,9 @@ class MpvPlayerActivity : ComponentActivity() {
           // Taught and retired. "Ends at" keeps the row, so nothing under the bar shifts.
           ""
         } else if (row == OsdRow.Buttons) {
-          "OK selects   |   LEFT/RIGHT moves   |   DOWN to the bar   |   BACK hides"
+          stringResource(R.string.player_controls_hint)
         } else {
-          "OK play/pause   |   LEFT/RIGHT 10s   |   UP for controls   |   DOWN hides"
+          stringResource(R.string.player_scrub_hint)
         },
         modifier = Modifier.weight(1f),
         color = NebulaPalette.TextFaint,
@@ -2546,7 +2695,7 @@ class MpvPlayerActivity : ComponentActivity() {
       if (remaining != null) {
         val endsAt = PlaybackTimeline.endsAtEpochMs(System.currentTimeMillis(), remaining)
         Text(
-          "Ends at ${formatClockTime(endsAt)}",
+          stringResource(R.string.player_ends_at, formatClockTime(endsAt)),
           modifier = Modifier.padding(start = 16.dp),
           color = NebulaPalette.TextFaint,
           style = MaterialTheme.typography.labelMedium,
@@ -3137,6 +3286,19 @@ class MpvPlayerActivity : ComponentActivity() {
   }
 
   /**
+   * Deletes files whose worker callbacks were removed before they could claim them.
+   *
+   * A callback that has already claimed its file removes it from this set first and owns deletion
+   * in its own finally block, so lifecycle cleanup cannot remove the path underneath `sub-add`.
+   */
+  private fun discardQueuedSubtitleFiles() {
+    val abandoned = synchronized(queuedSubtitleFiles) {
+      queuedSubtitleFiles.toList().also { queuedSubtitleFiles.clear() }
+    }
+    abandoned.forEach(File::delete)
+  }
+
+  /**
    * Runs [read] on the worker thread and hands its result to [onResult] on the
    * main thread, where anything touching Compose state or the window has to
    * happen. Nothing runs at all once the core is gone, and a read that threw is
@@ -3311,12 +3473,12 @@ class MpvPlayerActivity : ComponentActivity() {
   private fun skipToNextEpisode() {
     if (!transportAllowed()) return
     if (upNextTarget.value == null) {
-      showOsdMessage("No next episode")
+      showOsdMessage(getString(R.string.player_no_next_episode))
       return
     }
     saveWatchState(SaveReason.Stopped)
     playNextEpisode()
-    showOsdMessage("Starting next episode")
+    showOsdMessage(getString(R.string.player_starting_next_episode))
   }
 
   private fun closeMenu() {
@@ -3406,7 +3568,7 @@ class MpvPlayerActivity : ComponentActivity() {
       }
       if (found == null) {
         externalSubtitles.value = ExternalSubtitlesState.Failed
-        showOsdMessage(SUBTITLE_FETCH_ERROR)
+        showOsdMessage(getString(R.string.player_subtitle_fetch_failed))
         return@launch
       }
       externalSubtitles.value =
@@ -3425,11 +3587,18 @@ class MpvPlayerActivity : ComponentActivity() {
   private fun addExternalSubtitle(option: ExternalSubtitleOption) {
     if (!mpvCreated || externalSubAdding) return
     val generation = loadGeneration
+    val sourceStreamUrl = url
+    val sourceRequestHeaders = requestHeaders.toMap()
     externalSubAdding = true
-    showOsdMessage("Loading ${option.label} subtitles...")
+    showOsdMessage(getString(R.string.player_loading_subtitles, option.label))
     lifecycleScope.launch {
       val localFile = suspendRunCatching {
-        withContext(Dispatchers.IO) { downloadSubtitle(option.url, generation) }
+        downloadSubtitle(
+          rawUrl = option.url,
+          generation = generation,
+          sourceStreamUrl = sourceStreamUrl,
+          sourceRequestHeaders = sourceRequestHeaders,
+        )
       }.getOrNull()
       if (
         localFile == null || finishing || !mpvCreated || generation != loadGeneration
@@ -3437,7 +3606,7 @@ class MpvPlayerActivity : ComponentActivity() {
         localFile?.delete()
         if (!finishing && generation == loadGeneration) {
           externalSubAdding = false
-          showOsdMessage(SUBTITLE_ADD_ERROR)
+          showOsdMessage(getString(R.string.player_subtitle_add_failed))
         }
         return@launch
       }
@@ -3447,21 +3616,30 @@ class MpvPlayerActivity : ComponentActivity() {
         externalSubAdding = false
         return@launch
       }
-      worker.post {
+      synchronized(queuedSubtitleFiles) { queuedSubtitleFiles += localFile }
+      val accepted = worker.post {
+        // onDestroy or a file replacement can discard a callback before it starts. Claiming under
+        // the same monitor makes exactly one side own deletion; a callback that lost that race
+        // must not try to feed a path the lifecycle already removed to mpv.
+        val claimed = synchronized(queuedSubtitleFiles) { queuedSubtitleFiles.remove(localFile) }
+        if (!claimed) return@post
         // Network I/O has already completed through cancellable OkHttp. This native command only
         // parses a bounded local file, so onDestroy cannot wait on an unresponsive subtitle host.
-        val result = readWhileAlive {
-          if (generation != loadGeneration) return@readWhileAlive null
-          val beforeIds = MpvTracks.parse(MPVLib.getPropertyString("track-list"))
-            .asSequence()
-            .filter { it.kind == TrackKind.Subtitle && it.external }
-            .mapTo(mutableSetOf()) { it.id }
-          MPVLib.command(
-            arrayOf("sub-add", localFile.absolutePath, "cached", option.trackTitle, option.lang),
-          )
-          beforeIds to MPVLib.getPropertyString("track-list")
+        val result = try {
+          readWhileAlive {
+            if (generation != loadGeneration) return@readWhileAlive null
+            val beforeIds = MpvTracks.parse(MPVLib.getPropertyString("track-list"))
+              .asSequence()
+              .filter { it.kind == TrackKind.Subtitle && it.external }
+              .mapTo(mutableSetOf()) { it.id }
+            MPVLib.command(
+              arrayOf("sub-add", localFile.absolutePath, "cached", option.trackTitle, option.lang),
+            )
+            beforeIds to MPVLib.getPropertyString("track-list")
+          }
+        } finally {
+          localFile.delete()
         }
-        localFile.delete()
         val beforeIds = result?.first.orEmpty()
         val parsed = MpvTracks.parse(result?.second)
         mainHandler.post mainPost@{
@@ -3470,38 +3648,69 @@ class MpvPlayerActivity : ComponentActivity() {
           onExternalSubtitleAdded(option, parsed, beforeIds)
         }
       }
+      if (!accepted) {
+        val stillQueued = synchronized(queuedSubtitleFiles) {
+          queuedSubtitleFiles.remove(localFile)
+        }
+        if (stillQueued) localFile.delete()
+        if (!finishing && generation == loadGeneration) {
+          externalSubAdding = false
+          showOsdMessage(getString(R.string.player_subtitle_add_failed))
+        }
+      }
     }
   }
 
   /** Downloads one subtitle with cancellation, a strict size ceiling and the stream's safe headers. */
-  private suspend fun downloadSubtitle(rawUrl: String, generation: Long): File {
-    var currentUrl = rawUrl
+  private suspend fun downloadSubtitle(
+    rawUrl: String,
+    generation: Long,
+    sourceStreamUrl: String,
+    sourceRequestHeaders: Map<String, String>,
+  ): File {
+    var currentUrl = SubtitleUrlPolicy.allowedUrlOrNull(rawUrl)
+      ?: throw IOException("Unsafe subtitle URL")
     var redirectCount = 0
     while (true) {
+      if (generation != loadGeneration) throw CancellationException("Subtitle request replaced")
       val requestBuilder = Request.Builder().url(currentUrl)
       // Recomputed for every hop. A same-origin endpoint may redirect to an unrelated CDN, and
       // custom Cookie/X-* headers are not all guaranteed to be stripped by OkHttp automatically.
-      StreamRequestHeaders.forSameOrigin(url, currentUrl, requestHeaders).forEach { (name, value) ->
-        requestBuilder.header(name, value)
-      }
-      val response = SUBTITLE_HTTP_CLIENT.newCall(requestBuilder.build()).awaitResponse()
-      val redirect = response.code in 300..399
-      if (redirect) {
-        val next = response.header("Location")?.let(response.request.url::resolve)
-        response.close()
-        if (next == null || redirectCount >= MAX_SUBTITLE_REDIRECTS) {
-          throw IOException("Invalid subtitle redirect")
+      StreamRequestHeaders.forSameOrigin(
+        sourceStreamUrl,
+        currentUrl,
+        sourceRequestHeaders,
+      ).forEach { (name, value) -> requestBuilder.header(name, value) }
+      val hop = SUBTITLE_HTTP_CLIENT.newCall(requestBuilder.build()).awaitAndConsumeResponse(
+        onCancellation = { result ->
+          if (result is SubtitleDownloadHop.Complete) result.file.delete()
+        },
+      ) { response ->
+        if (response.code in 300..399) {
+          if (redirectCount >= MAX_SUBTITLE_REDIRECTS) {
+            throw IOException("Too many subtitle redirects")
+          }
+          val next = SubtitleUrlPolicy.redirectUrlOrNull(
+            from = response.request.url,
+            location = response.header("Location"),
+          ) ?: throw IOException("Unsafe subtitle redirect")
+          SubtitleDownloadHop.Redirect(next)
+        } else {
+          SubtitleDownloadHop.Complete(
+            downloadSubtitleBody(
+              response = response,
+              sourceUrl = currentUrl,
+              generation = generation,
+            ),
+          )
         }
-        redirectCount += 1
-        currentUrl = next.toString()
-        continue
       }
-      return response.use {
-        downloadSubtitleBody(
-          response = it,
-          sourceUrl = currentUrl,
-          generation = generation,
-        )
+      when (hop) {
+        is SubtitleDownloadHop.Complete -> return hop.file
+        is SubtitleDownloadHop.Redirect -> {
+          redirectCount += 1
+          currentUrl = hop.url
+        }
       }
     }
   }
@@ -3561,7 +3770,7 @@ class MpvPlayerActivity : ComponentActivity() {
         it.id !in externalTrackIdsBeforeAdd
     }
     if (!loaded) {
-      showOsdMessage(SUBTITLE_ADD_ERROR)
+      showOsdMessage(getString(R.string.player_subtitle_add_failed))
       return
     }
     // Exactly what picking an embedded track does: the language the viewer chose is
@@ -3570,7 +3779,7 @@ class MpvPlayerActivity : ComponentActivity() {
       TrackPreferences.subtitleLanguageUpdate(option.lang, playerPrefs.subtitleLanguage),
       audio = false,
     )
-    showOsdMessage("${option.label} subtitles added")
+    showOsdMessage(getString(R.string.player_subtitles_added, option.label))
   }
 
   /** Moves the selection marker locally, ahead of mpv reporting it back. */
@@ -3630,20 +3839,18 @@ class MpvPlayerActivity : ComponentActivity() {
     val next = AudioOutputMode.stepped(audioOutput.value, steps)
     if (next == audioOutput.value) return
     if (next == AudioOutputMode.Passthrough && supportedSpdifCodecs().isEmpty()) {
-      showOsdMessage("Passthrough unavailable on the connected audio device")
+      showOsdMessage(getString(R.string.player_passthrough_unavailable))
       return
     }
     audioOutput.value = next
     applyAudioOutput(next)
     reselectAudioTrack()
-    // Decode is universally safe and can persist. Passthrough remains session-only until the
-    // actual AO is verified on hardware; a setting whose failure is silence must not poison the
-    // next launch.
-    if (next == AudioOutputMode.Decode) {
-      playerPrefs = playerPrefs.copy(audioOutput = next.storageName)
-      val store = playerPrefsStore
-      persistenceScope.launch { runCatching { store.setAudioOutput(next.storageName) } }
-    }
+    // The explicit choice persists in either direction. Every later launch and route change
+    // revalidates the active sink and falls back to Decode for that session without erasing the
+    // preference, so a temporarily powered-off AVR cannot turn this into silent playback.
+    playerPrefs = playerPrefs.copy(audioOutput = next.storageName)
+    val store = playerPrefsStore
+    persistenceScope.launch { runCatching { store.setAudioOutput(next.storageName) } }
     // The same confirmation a subtitle add gets, and for the same reason: what
     // changed is off screen, and passthrough's failure mode is silence.
     showOsdMessage(next.osdMessage)
@@ -3704,7 +3911,7 @@ class MpvPlayerActivity : ComponentActivity() {
     audioOutput.value = AudioOutputMode.Decode
     applyAudioOutput(AudioOutputMode.Decode)
     reselectAudioTrack()
-    showOsdMessage("Audio route changed - switched to Decode")
+    showOsdMessage(getString(R.string.player_audio_route_decode))
   }
 
   private fun syncAudioDeviceCallback(register: Boolean) {
@@ -4138,35 +4345,42 @@ class MpvPlayerActivity : ComponentActivity() {
     // Before mpv goes: whatever was playing before this film is waiting on it.
     abandonAudioFocus()
     if (mpvCreated) {
-      // Nothing new may reach the core. An in-flight read still owns [mpvLock], but the main
-      // thread waits only a short bounded window; if a vendor mpv build wedges in JNI, teardown
-      // continues on a background thread instead of turning BACK into an Activity ANR.
+      // Nothing new may reach the core. An in-flight read still owns [mpvLock]; destruction always
+      // continues on a background thread because vendor JNI gives MPVLib.destroy() no useful upper
+      // latency bound and Activity teardown must never turn BACK into an ANR.
       stopMpvWorker()
+      discardQueuedSubtitleFiles()
       mpvAlive = false
-      val acquired = runCatching {
-        mpvLock.tryLock(MPV_DESTROY_MAIN_WAIT_MS, TimeUnit.MILLISECONDS)
-      }.getOrDefault(false)
-      if (acquired) {
-        try {
-          destroyMpvCore()
-        } finally {
-          mpvLock.unlock()
-        }
+      val lease = mpvLease
+      val destroyOwnedCore: () -> Unit = if (mpvInitializationIncomplete) {
+        ::destroyMpvCoreAfterFailedInitialization
       } else {
-        val destroyFinished = CountDownLatch(1)
-        MPV_DESTROY_PENDING.set(destroyFinished)
-        Thread({
-          mpvLock.lock()
-          try {
-            destroyMpvCore()
-          } finally {
-            mpvLock.unlock()
-            destroyFinished.countDown()
-            MPV_DESTROY_PENDING.compareAndSet(destroyFinished, null)
-          }
-        }, "mpv-destroy").start()
+        ::destroyMpvCore
+      }
+      var retirementStarted = lease != null &&
+        MpvCoreCoordinator.destroyAsync(lease, destroy = destroyOwnedCore)
+      if (!retirementStarted && lease != null) {
+        // Thread creation failed before the coordinator handed ownership off. There is no later
+        // lifecycle callback to retry from, so the exceptional fallback retires under the same
+        // lock now. A throwing destroy deliberately leaves the lease owned, preventing a second
+        // singleton from being created over native state whose fate is unknown.
+        NebulaDiagnostics.record("player", "async native destroy unavailable; using fallback")
+        retirementStarted = runCatching {
+          MpvCoreCoordinator.destroyBlocking(lease, destroy = destroyOwnedCore)
+        }.onFailure { failure ->
+          NebulaDiagnostics.record(
+            "player",
+            "native destroy failed: ${failure.javaClass.simpleName}",
+          )
+        }.getOrDefault(false)
+      } else if (lease == null) {
+        NebulaDiagnostics.record("player", "native core had no ownership lease")
       }
       mpvCreated = false
+      if (retirementStarted) mpvLease = null
+    } else {
+      mpvLease?.let(MpvCoreCoordinator::abandon)
+      mpvLease = null
     }
     super.onDestroy()
   }
@@ -4175,6 +4389,20 @@ class MpvPlayerActivity : ComponentActivity() {
   private fun destroyMpvCore() {
     MPVLib.removeObserver(observer)
     MPVLib.removeLogObserver(logObserver)
+    MPVLib.destroy()
+  }
+
+  /**
+   * Best-effort cleanup for a partially initialized binding.
+   *
+   * Observer registration and even `MPVLib.create()` itself may be the failing operation, so each
+   * call must stand alone. Observer-removal failures are secondary, but `destroy()` must propagate:
+   * only its successful return lets the coordinator prove the singleton is gone and release the
+   * lease for a replacement.
+   */
+  private fun destroyMpvCoreAfterFailedInitialization() {
+    runCatching { MPVLib.removeObserver(observer) }
+    runCatching { MPVLib.removeLogObserver(logObserver) }
     MPVLib.destroy()
   }
 
@@ -4280,10 +4508,6 @@ class MpvPlayerActivity : ComponentActivity() {
      */
     private const val IDLE_SCREEN_ON_MS = 5 * 60_000L
 
-    private const val DEFAULT_LOAD_ERROR = "The stream could not be opened."
-    private const val DEFAULT_PLAYBACK_ERROR = "The stream stopped unexpectedly."
-    private val STALL_ERROR =
-      "The stream stalled: no data for ${STALL_TIMEOUT_MS / 1000} seconds."
     private const val NO_SEEK = -1.0
 
     /**
@@ -4296,12 +4520,11 @@ class MpvPlayerActivity : ComponentActivity() {
     /** How long a one-off OSD line stays up; see [showOsdMessage]. */
     private const val OSD_MESSAGE_MS = 5_000L
 
-    private const val SUBTITLE_FETCH_ERROR = "Couldn't load subtitles."
-    private const val SUBTITLE_ADD_ERROR = "Couldn't load subtitle."
     private const val MAX_SUBTITLE_BYTES = 5L * 1024 * 1024
     private const val MAX_SUBTITLE_REDIRECTS = 5
     private val SUBTITLE_EXTENSIONS = setOf("srt", "ass", "ssa", "vtt", "sub")
     private val SUBTITLE_HTTP_CLIENT = SharedHttpClient.client.newBuilder()
+      .dns(PublicOnlyDns())
       .followRedirects(false)
       .followSslRedirects(false)
       .build()
@@ -4315,17 +4538,8 @@ class MpvPlayerActivity : ComponentActivity() {
      */
     private const val PREFS_READ_TIMEOUT_MS = 1_500L
 
-    /** Maximum time Activity teardown may wait for an in-flight native property call. */
-    private const val MPV_DESTROY_MAIN_WAIT_MS = 250L
-
     /** Bounded wait for a previous activity's global libmpv teardown. */
     private const val MPV_CREATE_WAIT_MS = 2_000L
-
-    /** One fair process-wide guard for libmpv's singleton core across activity instances. */
-    private val MPV_CORE_LOCK = ReentrantLock(true)
-
-    /** Signals an asynchronous old-core teardown before its worker has had a chance to queue. */
-    private val MPV_DESTROY_PENDING = AtomicReference<CountDownLatch?>(null)
 
     /** How far mpv's volume drops for a duckable focus loss. */
     private const val DUCK_VOLUME_FRACTION = 0.3
@@ -4486,6 +4700,11 @@ class MpvPlayerActivity : ComponentActivity() {
       }
     }
   }
+}
+
+private sealed interface SubtitleDownloadHop {
+  data class Redirect(val url: String) : SubtitleDownloadHop
+  data class Complete(val file: File) : SubtitleDownloadHop
 }
 
 /** Result-catching for suspend work that never turns lifecycle cancellation into a normal error. */

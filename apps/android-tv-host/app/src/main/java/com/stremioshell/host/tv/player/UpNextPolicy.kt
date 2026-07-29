@@ -36,10 +36,16 @@ object UpNextPolicy {
     data object Prompt : Offer
   }
 
-  fun offer(hasNext: Boolean, paused: Boolean, msSinceInteractionMs: Long): Offer = when {
+  fun offer(
+    hasNext: Boolean,
+    paused: Boolean,
+    msSinceInteractionMs: Long,
+    autoPlayNext: Boolean = true,
+    countdownMs: Long = COUNTDOWN_MS,
+  ): Offer = when {
     !hasNext -> Offer.None
-    paused || msSinceInteractionMs < RECENT_INTERACTION_MS -> Offer.Prompt
-    else -> Offer.Countdown(COUNTDOWN_MS)
+    !autoPlayNext || paused || msSinceInteractionMs < RECENT_INTERACTION_MS -> Offer.Prompt
+    else -> Offer.Countdown(countdownMs.coerceAtLeast(0L))
   }
 
   /**

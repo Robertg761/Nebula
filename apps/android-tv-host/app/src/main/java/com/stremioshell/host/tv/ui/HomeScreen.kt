@@ -62,6 +62,8 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -75,6 +77,7 @@ import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.stremioshell.host.R
 import com.stremioshell.host.tv.HomeRail
 import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.tv.TvAppViewModel
@@ -114,6 +117,7 @@ fun HomeScreen(
   val apiKey by viewModel.tmdbApiKey.collectAsState()
   val addonUrls by viewModel.addonManifestUrls.collectAsState()
   val heroLogoUrl by viewModel.heroLogoUrl.collectAsState()
+  val loadingHomeDescription = stringResource(R.string.home_loading_description)
   val firstContentFocus = rememberInitialFocusTarget()
   // Own targets for the two managed rows, so a card removed by the options dialog hands focus back
   // to the row it was removed from rather than to the billboard. See the row-edit request below.
@@ -233,7 +237,7 @@ fun HomeScreen(
         // The wordmark, set the way the launcher banner sets it - a first run is the one moment
         // the app has to introduce itself, and it is also the only screen with room to do it.
         Text(
-          text = "NEBULA",
+          text = stringResource(R.string.home_wordmark),
           style = MaterialTheme.typography.displayLarge.wordmark(),
           color = NebulaPalette.TextHigh,
           // Tracking is added after the final A as well, so the text node is one whole space wider
@@ -253,12 +257,11 @@ fun HomeScreen(
           // vocabulary rather than the vocabulary of the person holding the remote.
           text = when {
             missingTmdbKey && missingAddon ->
-              "Add a TMDB key and a stream addon to browse and play. Use your phone, or enter " +
-                "them with the remote."
+              stringResource(R.string.home_setup_missing_key_and_addon)
             missingTmdbKey ->
-              "Add a TMDB key to load catalogs and search. Your stream addon is already saved."
+              stringResource(R.string.home_setup_missing_key)
             else ->
-              "Add a stream addon before you start browsing, so Play can always lead somewhere."
+              stringResource(R.string.home_setup_missing_addon)
           },
           style = MaterialTheme.typography.bodyLarge,
           color = NebulaPalette.TextMuted,
@@ -271,14 +274,14 @@ fun HomeScreen(
         )
         Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
           NebulaButton(
-            text = "Set up with phone",
+            text = stringResource(R.string.home_action_setup_phone),
             onClick = onPairWithPhone,
             style = NebulaButtonStyle.Primary,
             icon = Icons.Filled.Phone,
             modifier = Modifier.initialFocusTarget(firstContentFocus),
           )
           NebulaButton(
-            text = "Enter manually",
+            text = stringResource(R.string.home_action_enter_manually),
             onClick = onOpenSettings,
             icon = Icons.Filled.Edit,
           )
@@ -332,7 +335,7 @@ fun HomeScreen(
           // first-content request above lands on the billboard.
           .initialFocusTarget(skeletonFocus)
           .focusable()
-          .semantics { contentDescription = "Loading Home" },
+          .semantics { contentDescription = loadingHomeDescription },
       ) {
         HomeSkeleton()
       }
@@ -350,20 +353,20 @@ fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(NebulaSpace.lg),
       ) {
         EmptyState(
-          title = "Nothing to browse yet",
-          hint = "TMDB returned no catalog titles. Check your key or try refreshing.",
+          title = stringResource(R.string.home_empty_title),
+          hint = stringResource(R.string.home_empty_hint),
           icon = Icons.Filled.Warning,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
           NebulaButton(
-            text = "Refresh",
+            text = stringResource(R.string.home_action_refresh),
             onClick = { viewModel.loadHomeRails(force = true) },
             style = NebulaButtonStyle.Primary,
             icon = Icons.Filled.Refresh,
             modifier = Modifier.initialFocusTarget(firstContentFocus),
           )
           NebulaButton(
-            text = "Open Settings",
+            text = stringResource(R.string.action_open_settings),
             onClick = onOpenSettings,
             style = NebulaButtonStyle.Secondary,
           )
@@ -476,7 +479,7 @@ fun HomeScreen(
       ) { index ->
         val rail = railList[index]
         MediaRowFocusable(
-          title = rail.title,
+          title = localizedHomeRailTitle(rail.title),
           items = rail.items,
           firstCardFocus = if (index == 0 && !hasHero && !hasContinueWatching && !hasWatchlist) {
             firstContentFocus
@@ -490,7 +493,7 @@ fun HomeScreen(
       }
       if (rails is LoadState.Loading) {
         item(key = "rails-status", contentType = "status") {
-          RailsStatusRow("Loading the rest of your catalogs…", onRetry = null)
+          RailsStatusRow(stringResource(R.string.home_loading_catalogs), onRetry = null)
         }
       } else if (inlineNotice != null) {
         item(key = "rails-status", contentType = "status") {
@@ -509,19 +512,19 @@ fun HomeScreen(
       // Just the title: the episode belongs in the message, where there is room to say it in
       // words rather than as a code welded to the show's name.
       title = entry.title,
-      message = remember(entry) { continueDialogMessage(entry) },
+      message = continueDialogMessage(entry),
       focusKey = entry.key,
       focusLabel = "Continue Watching options",
       actions = listOf(
         // Named after the shelf the viewer is looking at. "Remove from row" was the developer's
         // word for it.
-        CardAction("Remove from Continue Watching", destructive = true) {
+        CardAction(stringResource(R.string.home_action_remove_continue_watching), destructive = true) {
           viewModel.forgetWatchEntry(entry)
           options = null
           editedRow = ROW_CONTINUE
           rowEditTick++
         },
-        CardAction("Mark watched") {
+        CardAction(stringResource(R.string.home_action_mark_watched)) {
           viewModel.markWatched(entry)
           options = null
           editedRow = ROW_CONTINUE
@@ -535,11 +538,11 @@ fun HomeScreen(
   watchlistOptions?.let { entry ->
     CardOptionsDialog(
       title = entry.title,
-      message = remember(entry) { watchlistDialogMessage(entry) },
+      message = watchlistDialogMessage(entry),
       focusKey = entry.key,
       focusLabel = "My List options",
       actions = listOf(
-        CardAction("Remove from My List", destructive = true) {
+        CardAction(stringResource(R.string.action_remove_from_my_list), destructive = true) {
           viewModel.removeFromWatchlist(entry)
           watchlistOptions = null
           editedRow = ROW_WATCHLIST
@@ -554,6 +557,29 @@ fun HomeScreen(
 /** Which row the options dialog last edited, so focus can be handed back to it. */
 private const val ROW_CONTINUE = "continue"
 private const val ROW_WATCHLIST = "watchlist"
+
+/**
+ * Localizes the known catalog headings without changing the English titles used as paging keys.
+ *
+ * The fallback keeps a future server- or app-provided rail usable until it receives a dedicated
+ * resource rather than hiding it or assigning it the wrong heading.
+ */
+@Composable
+private fun localizedHomeRailTitle(title: String): String {
+  val resource = when (title) {
+    "Trending Movies" -> R.string.home_rail_trending_movies
+    "Trending Shows" -> R.string.home_rail_trending_shows
+    "Popular Movies" -> R.string.home_rail_popular_movies
+    "Popular Shows" -> R.string.home_rail_popular_shows
+    "Action" -> R.string.home_rail_action
+    "Comedy Shows" -> R.string.home_rail_comedy_shows
+    "Sci-Fi & Fantasy" -> R.string.home_rail_scifi_fantasy
+    "Documentaries" -> R.string.home_rail_documentaries
+    "Animation" -> R.string.home_rail_animation
+    else -> null
+  }
+  return resource?.let { stringResource(it) } ?: title
+}
 
 /**
  * Half the trailing letter-space of the first-run wordmark.
@@ -614,7 +640,7 @@ private fun RailsStatusRow(
       modifier = Modifier.weight(1f),
     )
     if (onRetry != null) {
-      NebulaButton(text = "Retry", onClick = onRetry, icon = Icons.Filled.Refresh)
+      NebulaButton(text = stringResource(R.string.action_retry), onClick = onRetry, icon = Icons.Filled.Refresh)
     }
   }
 }
@@ -688,13 +714,6 @@ private fun pickHero(rails: List<HomeRail>): MediaItem? {
   return candidates[((System.currentTimeMillis() / DAY_MS) % candidates.size).toInt()]
 }
 
-/**
- * Splits [DetailsMetadata]'s joined line back into the facts it was built from, so the billboard can
- * set them as chips. Reading the formatter's output rather than re-deriving the fields keeps the
- * ordering and omission rules in the one tested place they belong.
- */
-private val HERO_METADATA_SEPARATOR = Regex("""\s*•\s*""")
-
 /** True for the four D-pad arrows, which is all we need to detect deliberate navigation. */
 private fun Key.isDirectional(): Boolean =
   this == Key.DirectionUp || this == Key.DirectionDown ||
@@ -739,11 +758,25 @@ private fun HeroBillboard(
   onClick: () -> Unit,
   focusTarget: InitialFocusTarget?,
 ) {
-  val metadata = DetailsMetadata.ofItem(featured)
-  val chips = remember(metadata) {
-    metadata.split(HERO_METADATA_SEPARATOR).map { it.trim() }.filter { it.isNotEmpty() }
-  }
   val score = remember(featured.rating) { DetailsMetadata.scoreLabel(featured.rating) }
+  val mediaType = stringResource(
+    if (featured.type == MediaType.Show) R.string.media_type_series else R.string.media_type_movie,
+  )
+  val chips = listOfNotNull(
+    featured.year?.trim()?.ifBlank { null },
+    mediaType,
+    score,
+  )
+  val spokenMetadata = chips.joinToString(", ")
+  val heroDescription = if (spokenMetadata.isBlank()) {
+    stringResource(R.string.home_hero_description, featured.title)
+  } else {
+    stringResource(
+      R.string.home_hero_description_with_metadata,
+      featured.title,
+      spokenMetadata,
+    )
+  }
   val heroScrim = if (LocalLayoutDirection.current == LayoutDirection.Rtl) {
     NebulaHeroScrimRtl
   } else {
@@ -771,7 +804,7 @@ private fun HeroBillboard(
       modifier = Modifier.fillMaxWidth().height(NebulaDimens.HeroHeight)
         .onFocusChanged { focused = it.isFocused }
         .semantics(mergeDescendants = true) {
-          contentDescription = A11yLabels.hero(featured.title, metadata)
+          contentDescription = heroDescription
         },
     ) {
       Box(modifier = Modifier.fillMaxSize()) {
@@ -868,7 +901,7 @@ private fun HeroBillboard(
               .padding(horizontal = NebulaSpace.lg, vertical = NebulaSpace.xs),
           ) {
             Text(
-              text = "View details",
+              text = stringResource(R.string.home_action_view_details),
               style = MaterialTheme.typography.labelLarge,
               // Dark ink on the accent gradient, the same pairing a focused NebulaButton uses.
               color = if (focused) NebulaPalette.OnAccent else NebulaPalette.TextMuted,
@@ -988,7 +1021,7 @@ private fun WatchlistRow(
   rowFocus: InitialFocusTarget,
 ) {
   Column(modifier = Modifier.fillMaxWidth()) {
-    RailHeading("My List")
+    RailHeading(stringResource(R.string.home_rail_my_list))
     CompositionLocalProvider(LocalBringIntoViewSpec provides rememberHomeRailBringIntoViewSpec()) {
       LazyRow(
         modifier = Modifier.restoreRowFocus(),
@@ -1033,7 +1066,7 @@ private fun ContinueWatchingRow(
   rowFocus: InitialFocusTarget,
 ) {
   Column(modifier = Modifier.fillMaxWidth()) {
-    RailHeading("Continue Watching")
+    RailHeading(stringResource(R.string.home_rail_continue_watching))
     CompositionLocalProvider(LocalBringIntoViewSpec provides rememberHomeRailBringIntoViewSpec()) {
       LazyRow(
         modifier = Modifier.restoreRowFocus(),
@@ -1048,7 +1081,7 @@ private fun ContinueWatchingRow(
             modifier = Modifier
               .initialFocusTarget(if (index == 0) firstCardFocus else null)
               .initialFocusTarget(if (index == 0) rowFocus else null),
-            subtitle = remember(entry) { continueCaption(entry) },
+            subtitle = continueCaption(entry),
             onLongClick = { onOptions(entry) },
             progress = entry.progress,
           )
@@ -1081,10 +1114,17 @@ private fun WatchEntry.toMediaItem(): MediaItem = MediaItem(
  * The bullet is the app's one visual separator - [A11yLabels.spoken] turns it into a pause, which
  * is why the same line reads correctly to TalkBack as well.
  */
-private fun continueCaption(entry: WatchEntry): String? = listOfNotNull(
-  entry.season?.let { "S${it}E${entry.episode}" },
-  remainingLabel(entry),
-).joinToString(" • ").ifEmpty { null }
+@Composable
+private fun continueCaption(entry: WatchEntry): String? {
+  val episodeCode = if (entry.season != null && entry.episode != null) {
+    stringResource(R.string.home_episode_code, entry.season, entry.episode)
+  } else {
+    null
+  }
+  return listOfNotNull(episodeCode, remainingLabel(entry))
+    .joinToString(stringResource(R.string.home_fact_separator))
+    .ifEmpty { null }
+}
 
 /**
  * What the Continue Watching options dialog says under the title.
@@ -1092,28 +1132,45 @@ private fun continueCaption(entry: WatchEntry): String? = listOfNotNull(
  * The line it replaced restated the row heading ("Manage this title in Continue Watching.") in the
  * one place there was room to say something the viewer could not already see - where they stopped.
  */
-private fun continueDialogMessage(entry: WatchEntry): String = listOfNotNull(
-  A11yLabels.episodeCode(entry.season, entry.episode)?.replaceFirstChar(Char::uppercase),
-  remainingLabel(entry),
-).joinToString(" • ").ifEmpty { "Pick up where you left off." }
+@Composable
+private fun continueDialogMessage(entry: WatchEntry): String {
+  val episode = if (entry.season != null && entry.episode != null) {
+    stringResource(R.string.home_spoken_season_episode, entry.season, entry.episode)
+  } else {
+    null
+  }
+  return listOfNotNull(episode, remainingLabel(entry))
+    .joinToString(stringResource(R.string.home_fact_separator))
+    .ifEmpty { stringResource(R.string.home_continue_fallback) }
+}
 
 /** The same idea for My List, which stores a year rather than a position. */
-private fun watchlistDialogMessage(entry: WatchlistEntry): String =
-  listOfNotNull(entry.year, if (entry.type == MediaType.Show) "Series" else "Film")
-    .joinToString(" • ")
-    .ifEmpty { "Saved to My List." }
+@Composable
+private fun watchlistDialogMessage(entry: WatchlistEntry): String {
+  val mediaType = stringResource(
+    if (entry.type == MediaType.Show) R.string.media_type_series else R.string.home_media_type_film,
+  )
+  return listOfNotNull(entry.year, mediaType)
+    .joinToString(stringResource(R.string.home_fact_separator))
+    .ifEmpty { stringResource(R.string.home_watchlist_fallback) }
+}
 
 /**
  * "22m left" for a part-watched video, "Watched" once it is finished, null when the duration was
  * never recorded - which is the case for anything played before durations were stored, and is why
  * this returns null rather than a confident "0m left".
  */
+@Composable
 private fun remainingLabel(entry: WatchEntry): String? {
-  if (entry.watched) return "Watched"
+  if (entry.watched) return stringResource(R.string.home_watched)
   if (entry.durationMs <= 0) return null
   val remainingMs = entry.durationMs - entry.positionMs
   if (remainingMs <= 0) return null
   // Rounded up, so the last fifty seconds of a video read as "1m left" rather than "0m left".
   val minutes = ((remainingMs + 59_999) / 60_000).toInt()
-  return if (minutes >= 60) "${minutes / 60}h ${minutes % 60}m left" else "${minutes}m left"
+  return if (minutes >= 60) {
+    stringResource(R.string.home_hours_minutes_left, minutes / 60, minutes % 60)
+  } else {
+    pluralStringResource(R.plurals.home_minutes_left, minutes, minutes)
+  }
 }

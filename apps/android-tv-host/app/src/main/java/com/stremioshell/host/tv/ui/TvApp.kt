@@ -36,6 +36,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -51,6 +52,7 @@ import androidx.tv.material3.NavigationDrawerItemDefaults
 import androidx.tv.material3.Surface
 import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
+import com.stremioshell.host.R
 import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.addon.AddonStream
@@ -298,7 +300,7 @@ fun TvApp(
                 colors = railItemColors(),
                 shape = NavigationDrawerItemDefaults.shape(shape = NebulaShapes.small),
                 glow = RailItemGlow,
-              ) { Text("Home") }
+              ) { Text(stringResource(R.string.nav_home)) }
               NavigationDrawerItem(
                 selected = current is Screen.Search,
                 onClick = { openRootDestination(Screen.Search) },
@@ -306,7 +308,7 @@ fun TvApp(
                 colors = railItemColors(),
                 shape = NavigationDrawerItemDefaults.shape(shape = NebulaShapes.small),
                 glow = RailItemGlow,
-              ) { Text("Search") }
+              ) { Text(stringResource(R.string.nav_search)) }
               NavigationDrawerItem(
                 selected = current is Screen.Settings,
                 onClick = { openRootDestination(Screen.Settings) },
@@ -314,7 +316,7 @@ fun TvApp(
                 colors = railItemColors(),
                 shape = NavigationDrawerItemDefaults.shape(shape = NebulaShapes.small),
                 glow = RailItemGlow,
-              ) { Text("Settings") }
+              ) { Text(stringResource(R.string.nav_settings)) }
             }
             // Heavier weight below than above, so the items sit on the optical centre line
             // rather than the geometric one - the mark up top already pulls the eye high.
@@ -417,16 +419,22 @@ fun TvApp(
   pendingSettingsExit?.let { exit ->
     val continuingToPair = exit == SettingsExit.Pair
     CardOptionsDialog(
-      title = "Unsaved settings",
+      title = stringResource(R.string.unsaved_settings_title),
       message = if (continuingToPair) {
-        "Save or finish adding your settings changes before continuing to phone setup?"
+        stringResource(R.string.unsaved_settings_phone_message)
       } else {
-        "Save or finish adding your settings changes before leaving?"
+        stringResource(R.string.unsaved_settings_leave_message)
       },
       focusKey = exit,
       focusLabel = "Unsaved settings options",
       actions = listOf(
-        CardAction(if (continuingToPair) "Save & continue" else "Save & leave") {
+        CardAction(
+          if (continuingToPair) {
+            stringResource(R.string.action_save_and_continue)
+          } else {
+            stringResource(R.string.action_save_and_leave)
+          },
+        ) {
           leaveAfterSave = exit
           pendingSettingsExit = null
           // A root-navigation request can arrive while Pair is covering a dirty Settings entry.
@@ -436,7 +444,11 @@ fun TvApp(
           settingsSaveRequest++
         },
         CardAction(
-          if (continuingToPair) "Discard & continue" else "Discard draft",
+          if (continuingToPair) {
+            stringResource(R.string.action_discard_and_continue)
+          } else {
+            stringResource(R.string.action_discard_draft)
+          },
           destructive = true,
         ) {
           pendingSettingsExit = null

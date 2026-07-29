@@ -119,6 +119,10 @@ logcat for every failure.
      episode. Open Audio/Subtitles immediately after the replacement loads; the
      list must belong to the new file and must not remain empty because the old
      read consumed the refresh.
+   - Retry repeatedly while the original file is still opening. Delayed
+     START_FILE/FILE_LOADED/END_FILE callbacks from the abandoned load must not
+     mark the replacement failed, finished, or playable before its own first
+     frame.
 6. Seek and end-of-file boundaries:
    - Tap and hold LEFT/RIGHT through several repeats, then issue a second seek
      before the first restart callback arrives. The newest preview must remain
@@ -159,16 +163,26 @@ Run before manual device signoff:
 
 ```bash
 source scripts/android-env.sh
-cd apps/android-tv-host
-./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+(
+  cd apps/android-tv-host
+  ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+)
+./scripts/run-tv-instrumentation.sh 26
+./scripts/run-tv-instrumentation.sh 34
 ```
 
-That is the normal automated gate, and it is what CI runs. Baseline-profile
-generation has its own device-backed instrumentation procedure in
-`docs/baseline-profile.md`; everything below the normal gate remains manual.
+The instrumentation harness creates a temporary, isolated AVD from each
+official x86 Android TV image and requires no TMDB or addon credential. It
+covers cold launch, focus, D-pad entry to Settings, Back,
+search/watch-next routing, and DataStore persistence. It does not load libmpv
+or sign off playback hardware. Baseline-profile generation has its own
+device-backed procedure in `docs/baseline-profile.md`; the physical playback
+cases below remain manual.
 
-Run the manual checklist on a local TV emulator plus hardware. The emulator
-needs `-gpu host` on Linux; headless software renderers crash emulator 36.x.
+Run the manual checklist on a local TV emulator plus hardware. The automated
+harness defaults to the host renderer because emulator 36.6 currently crashes
+during Android TV boot with its bundled SwiftShader on Linux. The renderer
+remains explicit and overridable through `NEBULA_EMULATOR_GPU`.
 
 ```bash
 emulator -avd stremio_tv_34 -no-window -no-audio -no-boot-anim -gpu host -no-snapshot &

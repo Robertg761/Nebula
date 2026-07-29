@@ -128,7 +128,13 @@ class ConfigPairingServer(
     ).also { it.addHeader("Cache-Control", "no-store") }
 
   private fun formPage(error: String? = null): String {
-    val errorHtml = if (error != null) "<p class=\"err\">${escape(error)}</p>" else ""
+    val errorHtml = if (error != null) {
+      "<p class=\"err\" id=\"form-error\" role=\"alert\" aria-live=\"assertive\">" +
+        "${escape(error)}</p>"
+    } else {
+      ""
+    }
+    val errorDescription = if (error != null) " form-error" else ""
     return """
       <!doctype html><html><head>
       <meta charset="utf-8">
@@ -164,12 +170,16 @@ class ConfigPairingServer(
       empty to keep what the TV already has.</p>
       $errorHtml
       <form method="POST" action="/config?$TOKEN_FIELD=${escape(token)}">
-        <label>TMDB API key <span class="hint">themoviedb.org &rsaquo; Settings &rsaquo; API</span></label>
-        <input name="tmdb" autocomplete="off" autocapitalize="off" spellcheck="false"
+        <label for="tmdb">TMDB API key
+          <span class="hint" id="tmdb-hint">themoviedb.org &rsaquo; Settings &rsaquo; API</span></label>
+        <input id="tmdb" name="tmdb" aria-describedby="tmdb-hint$errorDescription"
+               autocomplete="off" autocapitalize="off" spellcheck="false"
                placeholder="Leave empty to keep current key">
-        <label>Stream addon manifest URLs
-          <span class="hint">one per line, up to ${AddonList.MAX_ADDONS} - e.g. your Comet instance, with your Real-Debrid key</span></label>
-        <textarea name="addon" rows="4" autocomplete="off" autocapitalize="off" spellcheck="false"
+        <label for="addon">Stream addon manifest URLs
+          <span class="hint" id="addon-hint">one per line, up to ${AddonList.MAX_ADDONS} - e.g. your Comet instance, with your Real-Debrid key</span></label>
+        <textarea id="addon" name="addon" rows="4"
+               aria-describedby="addon-hint$errorDescription"
+               autocomplete="off" autocapitalize="off" spellcheck="false"
                placeholder="Leave empty to keep the addons the TV already has"></textarea>
         <button type="submit">Save to TV</button>
       </form>

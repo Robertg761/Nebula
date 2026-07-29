@@ -105,6 +105,18 @@ class TmdbClientTest {
   }
 
   @Test
+  fun `search page preserves counters and asks for the requested page`() = runBlocking {
+    val page = client(
+      """{"page":3,"total_pages":9,"results":[{"id":1,"media_type":"movie","title":"A"}]}"""
+    ).searchPage("ab", page = 3)
+
+    assertEquals(3, page.page)
+    assertEquals(9, page.totalPages)
+    assertEquals(listOf("A"), page.items.map { it.title })
+    assertTrue(requested.single().contains("&page=3"))
+  }
+
+  @Test
   fun `details exposes imdb id, seasons, and runtime fallbacks`() = runBlocking {
     val details = client(
       """
@@ -258,6 +270,36 @@ class TmdbClientTest {
 
     assertEquals(4, stale)
     assertEquals(0, plain)
+  }
+
+  @Test
+  fun `credential probe requires a live non-stale response`() = runBlocking {
+    var stale = 0
+    var plain = 0
+    var fresh = 0
+    val fetcher = object : HttpFetcher {
+      override suspend fun get(url: String): String {
+        plain++
+        return "{}"
+      }
+
+      override suspend fun getFresh(url: String): String {
+        fresh++
+        assertTrue(url.contains("/configuration?api_key=test-key"))
+        return "{}"
+      }
+
+      override suspend fun getAllowingStale(url: String): String {
+        stale++
+        return "{}"
+      }
+    }
+
+    TmdbClient(apiKey = "test-key", fetcher = fetcher).probeCredentials()
+
+    assertEquals(0, plain)
+    assertEquals(1, fresh)
+    assertEquals(0, stale)
   }
 
   @Test

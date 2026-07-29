@@ -60,8 +60,9 @@ not drop the app off TV home screens.
 
 ## ABIs
 
-Release packages `arm64-v8a` + `armeabi-v7a` only - no TV device is x86, and
-libmpv's native libs are the bulk of the APK. Debug adds `x86_64` for the dev
-emulator. Deliberately one universal APK rather than ABI splits: the release
-workflow publishes a single `StremioShell-tv-<version>.apk` and the in-app
+Release packages `arm64-v8a` + `armeabi-v7a` only - no shipping TV device is
+x86, and libmpv's native libs are the bulk of the APK. Debug adds `x86` for the
+official API 26/34 Android TV emulator images and `x86_64` for generic
+local emulators. Deliberately one universal release APK rather than ABI splits:
+the workflow publishes a single `StremioShell-tv-<version>.apk` and the in-app
 updater selects the release asset by that name.

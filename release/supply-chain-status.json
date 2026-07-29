@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "releaseReady": false,
+  "gradleSbom": null,
+  "nativeSbom": null,
+  "nativeSourceArchive": null,
+  "nativeComponents": [
+    {
+      "name": "libmpv-android",
+      "version": "0.4.1",
+      "source": "https://github.com/jarnedemeulemeester/libmpv-android/commit/293d1a606413be36886a2ec922aee3d358690e07",
+      "license": "MIT",
+      "artifact": "dev.jdtech.mpv:libmpv:0.4.1",
+      "sha256": "361f4fecb2769fd77697e02f83e24e767431859560282225facc5310a60f6ab2"
+    },
+    {
+      "name": "mpv",
+      "version": null,
+      "source": null,
+      "license": null,
+      "sha256": null
+    },
+    {
+      "name": "FFmpeg",
+      "version": null,
+      "source": null,
+      "license": null,
+      "sha256": null
+    }
+  ],
+  "blockers": [
+    "Resolve the exact embedded mpv and FFmpeg versions, build flags, licenses, source commits, and binary hashes.",
+    "Generate and review a pinned CycloneDX or SPDX JSON inventory for the locked Gradle graph.",
+    "Archive the corresponding native source trees, patches, and build scripts."
+  ]
+}

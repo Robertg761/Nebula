@@ -64,18 +64,34 @@ class PlaybackPoliciesTest {
   }
 
   @Test
-  fun `unsafe request headers are discarded and list characters escaped`() {
+  fun `late diagnostics from a replaced file cannot poison the new generation`() {
+    val errors = PlaybackErrorAccumulator()
+    errors.reset(generation = 1)
+    errors.record("ffmpeg", "HTTP error 404", generation = 1)
+
+    errors.reset(generation = 2)
+    errors.record("ffmpeg", "HTTP error 403", generation = 1)
+
+    assertEquals("new default", errors.messageOr("new default"))
+  }
+
+  @Test
+  fun `native playback receives only non-secret negotiation headers`() {
     val value = StreamRequestHeaders.mpvValue(
       linkedMapOf(
         "Referer" to "https://example.test/a,b",
         "Host" to "attacker.test",
         "Bad\nName" to "value",
         "Authorization" to "Bearer token",
+        "Cookie" to "session=secret",
+        "X-Api-Key" to "secret",
+        "User-Agent" to "Nebula,TV",
+        "Accept" to "video/*",
       ),
     )
 
     assertEquals(
-      "Referer: https://example.test/a\\,b,Authorization: Bearer token",
+      "User-Agent: Nebula\\,TV,Accept: video/*",
       value,
     )
   }

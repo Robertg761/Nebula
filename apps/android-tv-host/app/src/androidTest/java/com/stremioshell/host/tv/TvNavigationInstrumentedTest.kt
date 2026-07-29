@@ -1,0 +1,144 @@
+package com.stremioshell.host.tv
+
+import android.app.SearchManager
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.SystemClock
+import androidx.test.core.app.ActivityScenario
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.uiautomator.By
+import androidx.test.uiautomator.UiDevice
+import androidx.test.uiautomator.UiObject2
+import androidx.test.uiautomator.Until
+import com.stremioshell.host.tv.data.SettingsStore
+import kotlinx.coroutines.runBlocking
+import org.junit.After
+import org.junit.Assert.assertNotNull
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+
+/**
+ * Credential-free TV smoke coverage for the Android lifecycle and real Compose
+ * accessibility tree. Playback, HDR, audio routing and CEC remain physical-TV
+ * release gates; see docs/tv-qa-matrix.md.
+ */
+@RunWith(AndroidJUnit4::class)
+class TvNavigationInstrumentedTest {
+  private val context: Context = ApplicationProvider.getApplicationContext()
+  private val settings = SettingsStore(context)
+  private lateinit var device: UiDevice
+
+  @Before
+  fun resetConfiguration() {
+    device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+    runBlocking {
+      settings.setConfiguration(
+        tmdbKey = "",
+        addonUrls = emptyList(),
+        subtitlesBaseUrl = "",
+      )
+    }
+  }
+
+  @After
+  fun clearConfiguration() {
+    runBlocking {
+      settings.setConfiguration(
+        tmdbKey = "",
+        addonUrls = emptyList(),
+        subtitlesBaseUrl = "",
+      )
+    }
+  }
+
+  @Test
+  fun coldLaunchHasFocusableSetupAndSettingsBackReturnsHome() {
+    launch(Intent(context, TvAppActivity::class.java)).use {
+      waitForText("NEBULA")
+      waitForFocusedText("Set up with phone")
+
+      device.pressDPadRight()
+      waitForFocusedText("Enter manually")
+      device.pressDPadCenter()
+
+      waitForText("Settings")
+      waitForFocusedText("Set up with phone")
+      device.pressBack()
+
+      waitForText("NEBULA")
+      waitForFocusedText("Set up with phone")
+    }
+  }
+
+  @Test
+  fun searchIntentRoutesQueryAndBackReturnsHome() {
+    val intent = Intent(context, TvAppActivity::class.java)
+      .setAction(Intent.ACTION_SEARCH)
+      .putExtra(SearchManager.QUERY, "Dune Part Two")
+
+    launch(intent).use {
+      waitForText("Search")
+      waitForText("Dune Part Two")
+      device.pressBack()
+      waitForText("NEBULA")
+    }
+  }
+
+  @Test
+  fun watchNextDeepLinkRoutesToDetailsAndBackReturnsHome() {
+    val intent = Intent(
+      Intent.ACTION_VIEW,
+      Uri.parse("stremio-tv://watch-next?type=movie&tmdb=550&position=60000"),
+      context,
+      TvAppActivity::class.java,
+    )
+
+    launch(intent).use {
+      // With no test credential, Details intentionally remains in its safe
+      // loading state. Its accessibility description proves the URI reached
+      // Details rather than falling through to Home.
+      assertNotNull(
+        "Watch Next URI did not route to Details",
+        device.wait(Until.findObject(By.desc("Loading details\u2026")), TIMEOUT_MS),
+      )
+      device.pressBack()
+      waitForText("NEBULA")
+    }
+  }
+
+  private fun launch(intent: Intent): ActivityScenario<TvAppActivity> {
+    return ActivityScenario.launch<TvAppActivity>(intent)
+  }
+
+  private fun waitForText(text: String): UiObject2 {
+    return requireNotNull(device.wait(Until.findObject(By.text(text)), TIMEOUT_MS)) {
+      "Timed out waiting for text: $text"
+    }
+  }
+
+  private fun waitForFocusedText(text: String): UiObject2 {
+    val deadline = SystemClock.uptimeMillis() + TIMEOUT_MS
+    while (SystemClock.uptimeMillis() < deadline) {
+      val label = device.findObject(By.text(text))
+      var node = label
+      while (node != null) {
+        // Compose exposes focus on the button semantics node and its label as a
+        // child accessibility node. Checking the ancestor chain proves the
+        // same user-visible control has focus without assuming they are merged.
+        if (node.isFocused) return requireNotNull(label)
+        node = node.parent
+      }
+      SystemClock.sleep(POLL_INTERVAL_MS)
+    }
+    throw IllegalArgumentException("Timed out waiting for focused text: $text")
+  }
+
+  private companion object {
+    const val TIMEOUT_MS = 15_000L
+    const val POLL_INTERVAL_MS = 100L
+  }
+}

@@ -1,5 +1,7 @@
 package com.stremioshell.host.tv.ui
 
+import android.app.ActivityManager
+import android.content.Intent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -41,6 +43,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -56,6 +59,9 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
@@ -76,19 +82,27 @@ import androidx.tv.material3.Surface
 import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
 import com.stremioshell.host.BuildConfig
+import com.stremioshell.host.R
 import com.stremioshell.host.tv.SettingsMutationResult
 import com.stremioshell.host.tv.TvAppViewModel
+import com.stremioshell.host.tv.data.PlaybackPreferencePolicy
+import com.stremioshell.host.tv.data.PlayerPrefs
 import com.stremioshell.host.tv.data.SettingsSaveGuard
 import com.stremioshell.host.tv.data.addon.AddonList
 import com.stremioshell.host.tv.data.subtitles.SubtitlesClient
+import com.stremioshell.host.tv.diagnostics.NebulaDiagnostics
+import com.stremioshell.host.tv.player.AudioOutputMode
+import com.stremioshell.host.tv.player.SubtitleSize
 import com.stremioshell.host.tv.ui.theme.NebulaDimens
 import com.stremioshell.host.tv.ui.theme.NebulaIcon
 import com.stremioshell.host.tv.ui.theme.NebulaMotion
 import com.stremioshell.host.tv.ui.theme.NebulaPalette
 import com.stremioshell.host.tv.ui.theme.NebulaShapes
 import com.stremioshell.host.tv.ui.theme.NebulaSpace
+import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 /**
  * How long the Save button stays blocked before it assumes its save is never going to answer.
@@ -126,14 +140,18 @@ fun SettingsScreen(
   val storedKey by viewModel.tmdbApiKey.collectAsState()
   val storedAddons by viewModel.addonManifestUrls.collectAsState()
   val storedSubtitles by viewModel.subtitlesBaseUrl.collectAsState()
+  val storedPlayerPrefs by viewModel.playerPrefs.collectAsState()
 
   var tmdbKey by rememberSaveable { mutableStateOf("") }
   var newAddonUrl by rememberSaveable { mutableStateOf("") }
   var subtitlesUrl by rememberSaveable { mutableStateOf("") }
+  var audioLanguage by rememberSaveable { mutableStateOf("") }
+  var subtitleLanguage by rememberSaveable { mutableStateOf("") }
   var saveStatus by rememberSaveable { mutableStateOf("") }
   var seeded by rememberSaveable { mutableStateOf(false) }
   var appliedResetRequest by rememberSaveable { mutableIntStateOf(-1) }
   var advanced by rememberSaveable { mutableStateOf(false) }
+  var playbackSeeded by rememberSaveable { mutableStateOf(false) }
 
   // Deliberately not saveable, unlike the field values above. A notice describes something that
   // just happened, and `saving` tracks a coroutine a config change kills - restoring that one
@@ -143,6 +161,9 @@ fun SettingsScreen(
   var showSubtitlesUrl by remember { mutableStateOf(false) }
   var tmdbNotice by remember { mutableStateOf<Notice?>(null) }
   var addonNotice by remember { mutableStateOf<Notice?>(null) }
+  var playbackNotice by remember { mutableStateOf<Notice?>(null) }
+  var supportNotice by remember { mutableStateOf<Notice?>(null) }
+  var exportingDiagnostics by remember { mutableStateOf(false) }
   var saving by remember { mutableStateOf(false) }
   var saveAttempt by remember { mutableIntStateOf(0) }
   var persistedAttempt by remember { mutableIntStateOf(-1) }
@@ -151,11 +172,23 @@ fun SettingsScreen(
   var pendingRemovalFeedback by remember { mutableStateOf<String?>(null) }
   var pendingClearKey by remember { mutableStateOf(false) }
   var pendingClearKeyFeedback by remember { mutableStateOf<String?>(null) }
+  var pendingPlaybackReset by remember { mutableStateOf(false) }
+  var pendingPlaybackResetFeedback by remember { mutableStateOf<String?>(null) }
+  var pendingAppReset by remember { mutableStateOf(false) }
+  var pendingAppResetFeedback by remember { mutableStateOf<String?>(null) }
   var addonEditTick by remember { mutableIntStateOf(0) }
+  var playbackControls by remember { mutableStateOf<PlayerPrefs?>(null) }
+  var playbackMutationInFlight by remember { mutableStateOf(false) }
   val currentOnSaveComplete by rememberUpdatedState(onSaveComplete)
+  val context = LocalContext.current
+  val supportScope = rememberCoroutineScope()
 
   val addons = storedAddons.orEmpty()
   val addonLabels = remember(addons) { AddonList.labels(addons) }
+  val playbackReady = storedPlayerPrefs != null
+  val playback = playbackControls ?: storedPlayerPrefs ?: PlayerPrefs()
+  val playbackSubtitleSize = SubtitleSize.fromStorage(playback.subtitleSize)
+  val playbackAudioOutput = AudioOutputMode.fromStorage(playback.audioOutput)
   val scrollState = rememberScrollState()
 
   // Mostly the nodes a text field has to aim at: button-to-button moves are left to the default
@@ -167,6 +200,9 @@ fun SettingsScreen(
   val lastRemoveFocus = rememberInitialFocusTarget()
   val addonRevealFocus = rememberInitialFocusTarget()
   val addButtonFocus = rememberInitialFocusTarget()
+  val audioLanguageFocus = rememberInitialFocusTarget()
+  val subtitleLanguageFocus = rememberInitialFocusTarget()
+  val playbackLanguageSaveFocus = rememberInitialFocusTarget()
   val advancedFocus = rememberInitialFocusTarget()
   val subtitlesRevealFocus = rememberInitialFocusTarget()
   val saveFocus = rememberInitialFocusTarget()
@@ -196,6 +232,20 @@ fun SettingsScreen(
       showSubtitlesUrl = false
       seeded = true
       appliedResetRequest = resetRequest
+    }
+  }
+
+  LaunchedEffect(storedPlayerPrefs) {
+    val prefs = storedPlayerPrefs
+    if (prefs != null) {
+      if (!playbackSeeded) {
+        audioLanguage = prefs.audioLanguage
+        subtitleLanguage = prefs.subtitleLanguage
+        playbackSeeded = true
+      }
+      // A mutation callback installs its authoritative post-write value directly. Do not replace
+      // that with an older queued StateFlow emission while the write is still completing.
+      if (!playbackMutationInFlight) playbackControls = prefs
     }
   }
 
@@ -271,11 +321,17 @@ fun SettingsScreen(
   // Draft text counts even where the save guard will protect a stored key. Otherwise deleting the
   // visible key or typing an addon and leaving without pressing Add would silently discard work
   // while the screen claimed there was nothing pending.
+  val playbackLanguageDirty = playbackReady && (
+    audioLanguage.trim().lowercase(Locale.ROOT) != storedPlayerPrefs?.audioLanguage.orEmpty() ||
+      subtitleLanguage.trim().lowercase(Locale.ROOT) !=
+      storedPlayerPrefs?.subtitleLanguage.orEmpty()
+    )
   val dirty = seeded && (
     tmdbKey.trim() != storedKey.orEmpty().trim() ||
       newAddonUrl.isNotBlank() ||
       SettingsSaveGuard.normalizeSubtitlesBase(subtitlesUrl) !=
-      SettingsSaveGuard.normalizeSubtitlesBase(storedSubtitles.orEmpty())
+      SettingsSaveGuard.normalizeSubtitlesBase(storedSubtitles.orEmpty()) ||
+      playbackLanguageDirty
     )
 
   LaunchedEffect(dirty) { onDirtyChanged(dirty) }
@@ -292,11 +348,36 @@ fun SettingsScreen(
     if (wasSaving) currentOnSaveComplete(false)
   }
 
-  val startSave: () -> Unit = {
+  val saveConfigurationForAttempt: (Int) -> Unit = { attempt ->
+    viewModel.saveSettings(tmdbKey, subtitlesUrl) { status ->
+      // A timed-out or superseded probe can still finish. It must neither repaint the verdict
+      // for a newer draft nor complete a newer leave request.
+      if (attempt == saveAttempt) {
+        saveStatus = status
+        if (status.contains("Checking connections")) {
+          persistedAttempt = attempt
+          saving = true
+        } else {
+          saving = false
+          if (completedAttempt != attempt) {
+            completedAttempt = attempt
+            currentOnSaveComplete(true)
+          }
+        }
+      }
+    }
+  }
+
+  val startSave: () -> Unit = save@{
     if (!saving) {
+      if (playbackMutationInFlight) {
+        saveStatus = context.getString(R.string.settings_save_playback_in_progress)
+        currentOnSaveComplete(false)
+        return@save
+      }
       if (newAddonUrl.isNotBlank()) {
         addonNotice = Notice(
-          "Press Add addon to use the URL you typed — Save does not add it.",
+          context.getString(R.string.settings_addon_draft_pending),
           StatusTone.Caution,
         )
         runCatching { addButtonFocus.requester.requestFocus() }
@@ -306,20 +387,33 @@ fun SettingsScreen(
         saveAttempt = attempt
         persistedAttempt = -1
         saving = true
-        viewModel.saveSettings(tmdbKey, subtitlesUrl) { status ->
-          // A timed-out or superseded probe can still finish. It must neither repaint the verdict
-          // for a newer draft nor complete a newer leave request.
-          if (attempt == saveAttempt) {
-            saveStatus = status
-            if (status.contains("Checking connections")) {
-              persistedAttempt = attempt
-              saving = true
-            } else {
+        if (!playbackReady) {
+          saveConfigurationForAttempt(attempt)
+        } else {
+          val submittedAudio = audioLanguage
+          val submittedSubtitles = subtitleLanguage
+          playbackMutationInFlight = true
+          viewModel.savePlaybackLanguages(submittedAudio, submittedSubtitles) { result ->
+            result.prefs?.let { playbackControls = it }
+            playbackMutationInFlight = false
+            if (attempt != saveAttempt) return@savePlaybackLanguages
+            if (result.outcome == SettingsMutationResult.Failed) {
               saving = false
               if (completedAttempt != attempt) {
                 completedAttempt = attempt
-                currentOnSaveComplete(true)
+                saveStatus = context.getString(
+                  R.string.settings_save_playback_languages_failed,
+                )
+                currentOnSaveComplete(false)
               }
+            } else {
+              result.prefs?.let { saved ->
+                if (audioLanguage == submittedAudio) audioLanguage = saved.audioLanguage
+                if (subtitleLanguage == submittedSubtitles) {
+                  subtitleLanguage = saved.subtitleLanguage
+                }
+              }
+              saveConfigurationForAttempt(attempt)
             }
           }
         }
@@ -339,9 +433,12 @@ fun SettingsScreen(
     saving = false
     val persisted = persistedAttempt == attempt
     saveStatus = if (persisted) {
-      "Settings saved. Connection tests are taking too long; you can leave and test again later."
+      context.getString(R.string.settings_save_watchdog_persisted)
     } else {
-      "Nebula could not confirm that Settings were saved. Try again."
+      context.getString(
+        R.string.settings_save_watchdog_unconfirmed,
+        context.getString(R.string.app_name),
+      )
     }
     if (completedAttempt != attempt) {
       completedAttempt = attempt
@@ -372,21 +469,25 @@ fun SettingsScreen(
     // ScreenEdge, which would indent the heading a second time; the offset cancels exactly that,
     // landing the words flush with the cards below and the tick TickInset to their left.
     ScreenHeader(
-      title = "Settings",
+      title = stringResource(R.string.nav_settings),
       // The only place the running build is stated anywhere in the app; without it the owner of a
       // sideloaded, self-updating APK cannot find out what they have without adb.
-      subtitle = "Nebula ${BuildConfig.VERSION_NAME}",
+      subtitle = stringResource(
+        R.string.settings_version,
+        stringResource(R.string.app_name),
+        BuildConfig.VERSION_NAME,
+      ),
       modifier = Modifier.offset(x = -NebulaDimens.ScreenEdge),
     )
 
     SettingsSection(
-      title = "Quick setup",
-      description = "Type your key and addon URLs on your phone instead of with the remote.",
+      title = stringResource(R.string.settings_quick_setup_title),
+      description = stringResource(R.string.settings_quick_setup_description),
     ) {
       NebulaButton(
         // Same words as the button on Home that opens the same screen. It used to carry a
         // parenthetical here and not there, which is two names for one destination.
-        text = "Set up with phone",
+        text = stringResource(R.string.home_action_setup_phone),
         onClick = onPairWithPhone,
         icon = Icons.Filled.Phone,
         modifier = Modifier.initialFocusTarget(pairInitialFocus),
@@ -394,9 +495,12 @@ fun SettingsScreen(
     }
 
     SettingsSection(
-      title = "TMDB",
-      description = "Nebula gets every catalog, poster and description from TMDB. Create a free " +
-        "key at themoviedb.org → Settings → API.",
+      title = stringResource(R.string.settings_tmdb_title),
+      description = stringResource(
+        R.string.settings_tmdb_description,
+        stringResource(R.string.app_name),
+        stringResource(R.string.settings_tmdb_key_path),
+      ),
     ) {
       OutlinedTextField(
         value = tmdbKey,
@@ -405,7 +509,7 @@ fun SettingsScreen(
           tmdbKey = it
         },
         singleLine = true,
-        placeholder = { Text("Paste or type your key") },
+        placeholder = { Text(stringResource(R.string.settings_tmdb_key_placeholder)) },
         visualTransformation = if (showTmdbKey) {
           VisualTransformation.None
         } else {
@@ -426,7 +530,9 @@ fun SettingsScreen(
           // a field twice as wide as any value it can ever contain.
           .widthIn(max = 460.dp)
           .fillMaxWidth()
-          .semantics { contentDescription = "TMDB API key" }
+          .semantics {
+            contentDescription = context.getString(R.string.settings_tmdb_api_key)
+          }
           // A material3 text field traps the D-pad on TV, so move focus
           // between fields explicitly before it consumes the key.
           .fieldNav(down = clearKeyFocus, up = pairInitialFocus),
@@ -437,26 +543,31 @@ fun SettingsScreen(
       // would be unreachable from a focused field.
       Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
         NebulaButton(
-          text = if (showTmdbKey) "Hide key" else "Show key",
+          text = stringResource(
+            if (showTmdbKey) R.string.settings_hide_key else R.string.settings_show_key,
+          ),
           onClick = { showTmdbKey = !showTmdbKey },
           style = NebulaButtonStyle.Ghost,
           modifier = Modifier
             .initialFocusTarget(clearKeyFocus)
             .semantics {
               contentDescription = if (showTmdbKey) {
-                "Hide TMDB API key"
+                context.getString(R.string.settings_hide_tmdb_key_description)
               } else {
-                "Show TMDB API key"
+                context.getString(R.string.settings_show_tmdb_key_description)
               }
             },
         )
         NebulaButton(
-          text = "Clear key",
+          text = stringResource(R.string.settings_clear_key),
           onClick = {
             // A key takes minutes to re-enter on a remote. Confirm a real deletion instead of
             // making the most destructive control in the section a one-press action.
             if (tmdbKey.isBlank() && storedKey.isNullOrBlank()) {
-              tmdbNotice = Notice("There is no TMDB key to clear.", StatusTone.Info)
+              tmdbNotice = Notice(
+                context.getString(R.string.settings_no_tmdb_key_to_clear),
+                StatusTone.Info,
+              )
             } else {
               pendingClearKeyFeedback = null
               pendingClearKey = true
@@ -469,12 +580,16 @@ fun SettingsScreen(
     }
 
     SettingsSection(
-      title = "Stream addons",
-      description = "Asked in this order. The first addon offering a release is the one you get; " +
-        "everything else is merged in and sorted by quality.",
+      title = stringResource(R.string.settings_stream_addons_title),
+      description = stringResource(R.string.settings_stream_addons_description),
       // The two commit models on this screen were silently different. Now they are visibly
       // different: this list writes on press, the fields below Save do not.
-      badge = { NebulaBadge(text = "Saves immediately", tone = BadgeTone.Good) },
+      badge = {
+        NebulaBadge(
+          text = stringResource(R.string.settings_saves_immediately),
+          tone = BadgeTone.Good,
+        )
+      },
     ) {
       if (addons.isEmpty()) {
         // A placeholder shaped like a row rather than a second muted paragraph stacked on the
@@ -489,7 +604,7 @@ fun SettingsScreen(
           contentAlignment = Alignment.Center,
         ) {
           Text(
-            "No addons yet — add your Comet manifest URL below",
+            stringResource(R.string.settings_no_addons),
             style = MaterialTheme.typography.bodySmall,
             color = NebulaPalette.TextMuted,
             textAlign = TextAlign.Center,
@@ -528,7 +643,7 @@ fun SettingsScreen(
             )
           }
           NebulaButton(
-            text = "Up",
+            text = stringResource(R.string.settings_move_up),
             icon = Icons.Filled.KeyboardArrowUp,
             enabled = index > 0,
             style = NebulaButtonStyle.Ghost,
@@ -538,23 +653,35 @@ fun SettingsScreen(
                 when (result) {
                   SettingsMutationResult.Changed -> {
                     invalidateConnectionVerdict()
-                    addonNotice = Notice("Moved $label earlier.", StatusTone.Success)
+                    addonNotice = Notice(
+                      context.getString(R.string.settings_addon_moved_earlier, label),
+                      StatusTone.Success,
+                    )
                   }
                   SettingsMutationResult.Unchanged -> {
-                    addonNotice = Notice("$label is already in that position.", StatusTone.Info)
+                    addonNotice = Notice(
+                      context.getString(R.string.settings_addon_already_positioned, label),
+                      StatusTone.Info,
+                    )
                   }
                   SettingsMutationResult.Failed -> {
-                    addonNotice = Notice("Could not move $label. Try again.", StatusTone.Danger)
+                    addonNotice = Notice(
+                      context.getString(R.string.settings_addon_move_failed, label),
+                      StatusTone.Danger,
+                    )
                   }
                 }
               }
             },
             modifier = Modifier.semantics {
-              contentDescription = "Move ${addonLabels[index]} earlier"
+              contentDescription = context.getString(
+                R.string.settings_move_addon_earlier_description,
+                addonLabels[index],
+              )
             },
           )
           NebulaButton(
-            text = "Down",
+            text = stringResource(R.string.settings_move_down),
             icon = Icons.Filled.KeyboardArrowDown,
             enabled = index < addons.lastIndex,
             style = NebulaButtonStyle.Ghost,
@@ -564,23 +691,35 @@ fun SettingsScreen(
                 when (result) {
                   SettingsMutationResult.Changed -> {
                     invalidateConnectionVerdict()
-                    addonNotice = Notice("Moved $label later.", StatusTone.Success)
+                    addonNotice = Notice(
+                      context.getString(R.string.settings_addon_moved_later, label),
+                      StatusTone.Success,
+                    )
                   }
                   SettingsMutationResult.Unchanged -> {
-                    addonNotice = Notice("$label is already in that position.", StatusTone.Info)
+                    addonNotice = Notice(
+                      context.getString(R.string.settings_addon_already_positioned, label),
+                      StatusTone.Info,
+                    )
                   }
                   SettingsMutationResult.Failed -> {
-                    addonNotice = Notice("Could not move $label. Try again.", StatusTone.Danger)
+                    addonNotice = Notice(
+                      context.getString(R.string.settings_addon_move_failed, label),
+                      StatusTone.Danger,
+                    )
                   }
                 }
               }
             },
             modifier = Modifier.semantics {
-              contentDescription = "Move ${addonLabels[index]} later"
+              contentDescription = context.getString(
+                R.string.settings_move_addon_later_description,
+                addonLabels[index],
+              )
             },
           )
           NebulaButton(
-            text = "Remove",
+            text = stringResource(R.string.settings_remove),
             // Not Ghost: its focused fill is SurfaceVariant, which is exactly the colour of the
             // row it sits on, so the one control here that destroys configuration marked focus
             // with a ring and nothing else. Danger's plate is a step down from the row at rest
@@ -602,7 +741,12 @@ fun SettingsScreen(
               )
               // Every row's button is labelled "Remove", so a screen reader stepping down the
               // list heard "Remove, Remove, Remove" with no way to tell which one it was on.
-              .semantics { contentDescription = "Remove ${addonLabels[index]}" },
+              .semantics {
+                contentDescription = context.getString(
+                  R.string.settings_remove_addon_description,
+                  addonLabels[index],
+                )
+              },
           )
           }
         }
@@ -615,7 +759,7 @@ fun SettingsScreen(
           newAddonUrl = it
         },
         singleLine = true,
-        placeholder = { Text("https://comet.../<config>/manifest.json") },
+        placeholder = { Text(stringResource(R.string.settings_addon_url_placeholder)) },
         visualTransformation = if (showAddonUrl) {
           VisualTransformation.None
         } else {
@@ -635,7 +779,9 @@ fun SettingsScreen(
           // Shares its right edge with the rows above it, which are fillMaxWidth. At 0.8f the
           // list terminated 151dp further right than the field that adds to it.
           .fillMaxWidth()
-          .semantics { contentDescription = "New stream addon manifest URL" }
+          .semantics {
+            contentDescription = context.getString(R.string.settings_new_addon_url_description)
+          }
           .fieldNav(
             down = addonRevealFocus,
             up = if (addons.isEmpty()) clearKeyFocus else lastRemoveFocus,
@@ -643,34 +789,42 @@ fun SettingsScreen(
       )
       Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
         NebulaButton(
-          text = if (showAddonUrl) "Hide URL" else "Show URL",
+          text = stringResource(
+            if (showAddonUrl) R.string.settings_hide_url else R.string.settings_show_url,
+          ),
           onClick = { showAddonUrl = !showAddonUrl },
           style = NebulaButtonStyle.Ghost,
           modifier = Modifier
             .initialFocusTarget(addonRevealFocus)
             .semantics {
               contentDescription = if (showAddonUrl) {
-                "Hide new stream addon URL"
+                context.getString(R.string.settings_hide_new_addon_url_description)
               } else {
-                "Show new stream addon URL"
+                context.getString(R.string.settings_show_new_addon_url_description)
               }
             },
         )
         NebulaButton(
-          text = "Add addon",
+          text = stringResource(R.string.settings_add_addon),
           onClick = {
             // Persisted on press rather than staged behind Save: a list whose edits only
             // land later shows a configuration that is not the one being used.
             val submittedUrl = newAddonUrl
             val normalized = AddonList.normalize(submittedUrl)
             addonNotice = when {
-              normalized.isEmpty() -> Notice("Enter an addon URL first.", StatusTone.Caution)
+              normalized.isEmpty() -> Notice(
+                context.getString(R.string.settings_enter_addon_url_first),
+                StatusTone.Caution,
+              )
               normalized in addons -> Notice(
-                "That addon is already in the list.",
+                context.getString(R.string.settings_addon_already_in_list),
                 StatusTone.Caution,
               )
               addons.size >= AddonList.MAX_ADDONS ->
-                Notice("That's the most addons the list holds.", StatusTone.Caution)
+                Notice(
+                  context.getString(R.string.settings_addon_limit_reached),
+                  StatusTone.Caution,
+                )
               else -> {
                 viewModel.addAddon(submittedUrl) { result ->
                   when (result) {
@@ -682,19 +836,25 @@ fun SettingsScreen(
                         showAddonUrl = false
                       }
                       addonNotice = Notice(
-                        "Added ${AddonList.label(normalized)}.",
+                        context.getString(
+                          R.string.settings_addon_added,
+                          AddonList.label(normalized),
+                        ),
                         StatusTone.Success,
                       )
                     }
                     SettingsMutationResult.Unchanged -> {
                       addonNotice = Notice(
-                        "That addon was already in the list.",
+                        context.getString(R.string.settings_addon_already_in_list),
                         StatusTone.Caution,
                       )
                     }
                     SettingsMutationResult.Failed -> {
                       addonNotice = Notice(
-                        "Could not add ${AddonList.label(normalized)}. Check the URL and try again.",
+                        context.getString(
+                          R.string.settings_addon_add_failed,
+                          AddonList.label(normalized),
+                        ),
                         StatusTone.Danger,
                       )
                     }
@@ -710,8 +870,356 @@ fun SettingsScreen(
       addonNotice?.let { SectionNotice(it) }
     }
 
+    SettingsSection(
+      title = stringResource(R.string.settings_playback_title),
+      description = stringResource(R.string.settings_playback_description),
+      badge = {
+        NebulaBadge(
+          text = stringResource(R.string.settings_saves_immediately),
+          tone = BadgeTone.Good,
+        )
+      },
+    ) {
+      Text(
+        stringResource(R.string.settings_audio_language_label),
+        style = MaterialTheme.typography.labelMedium,
+        color = NebulaPalette.TextMuted,
+      )
+      OutlinedTextField(
+        value = audioLanguage,
+        onValueChange = {
+          audioLanguage = it
+          playbackNotice = null
+        },
+        enabled = playbackReady && !playbackMutationInFlight,
+        singleLine = true,
+        placeholder = {
+          Text(
+            stringResource(
+              R.string.settings_audio_language_placeholder,
+              stringResource(R.string.settings_language_code_english),
+            ),
+          )
+        },
+        shape = NebulaShapes.medium,
+        colors = settingsFieldColors(),
+        keyboardOptions = KeyboardOptions(
+          capitalization = KeyboardCapitalization.None,
+          autoCorrectEnabled = false,
+          keyboardType = KeyboardType.Ascii,
+          imeAction = ImeAction.Next,
+        ),
+        modifier = Modifier
+          .widthIn(max = 460.dp)
+          .fillMaxWidth()
+          .initialFocusTarget(audioLanguageFocus)
+          .semantics {
+            contentDescription = context.getString(R.string.settings_audio_language_label)
+          }
+          .fieldNav(down = subtitleLanguageFocus, up = addButtonFocus),
+      )
+      Text(
+        stringResource(R.string.settings_subtitle_language_label),
+        style = MaterialTheme.typography.labelMedium,
+        color = NebulaPalette.TextMuted,
+      )
+      OutlinedTextField(
+        value = subtitleLanguage,
+        onValueChange = {
+          subtitleLanguage = it
+          playbackNotice = null
+        },
+        enabled = playbackReady && !playbackMutationInFlight,
+        singleLine = true,
+        placeholder = {
+          Text(
+            stringResource(
+              R.string.settings_subtitle_language_placeholder,
+              stringResource(R.string.settings_language_code_english),
+              stringResource(R.string.settings_subtitle_off_code),
+            ),
+          )
+        },
+        shape = NebulaShapes.medium,
+        colors = settingsFieldColors(),
+        keyboardOptions = KeyboardOptions(
+          capitalization = KeyboardCapitalization.None,
+          autoCorrectEnabled = false,
+          keyboardType = KeyboardType.Ascii,
+          imeAction = ImeAction.Done,
+        ),
+        modifier = Modifier
+          .widthIn(max = 460.dp)
+          .fillMaxWidth()
+          .initialFocusTarget(subtitleLanguageFocus)
+          .semantics {
+            contentDescription = context.getString(R.string.settings_subtitle_language_label)
+          }
+          .fieldNav(down = playbackLanguageSaveFocus, up = audioLanguageFocus),
+      )
+      NebulaButton(
+        text = stringResource(R.string.settings_apply_language_preferences),
+        enabled = playbackReady && !playbackMutationInFlight,
+        onClick = {
+          val submittedAudio = audioLanguage
+          val submittedSubtitles = subtitleLanguage
+          playbackMutationInFlight = true
+          viewModel.savePlaybackLanguages(submittedAudio, submittedSubtitles) { result ->
+            result.prefs?.let { playbackControls = it }
+            playbackMutationInFlight = false
+            playbackNotice = when (result.outcome) {
+              SettingsMutationResult.Changed -> {
+                // Mirror the store's normalisation so the field is also the value now in use.
+                result.prefs?.let { saved ->
+                  if (audioLanguage == submittedAudio) audioLanguage = saved.audioLanguage
+                  if (subtitleLanguage == submittedSubtitles) {
+                    subtitleLanguage = saved.subtitleLanguage
+                  }
+                }
+                Notice(
+                  context.getString(R.string.settings_language_preferences_saved),
+                  StatusTone.Success,
+                )
+              }
+              SettingsMutationResult.Unchanged ->
+                Notice(
+                  context.getString(R.string.settings_language_preferences_unchanged),
+                  StatusTone.Info,
+                )
+              SettingsMutationResult.Failed ->
+                Notice(
+                  context.getString(R.string.settings_language_preferences_failed),
+                  StatusTone.Danger,
+                )
+            }
+          }
+        },
+        modifier = Modifier.initialFocusTarget(playbackLanguageSaveFocus),
+      )
+
+      Row(
+        horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        NebulaButton(
+          text = stringResource(
+            R.string.settings_subtitle_size,
+            stringResource(playbackSubtitleSize.labelResource()),
+          ),
+          enabled = playbackReady && !playbackMutationInFlight,
+          onClick = {
+            val next = SubtitleSize.stepped(playbackSubtitleSize, 1)
+            playbackMutationInFlight = true
+            viewModel.setPlaybackSubtitleSize(next.storageName) { result ->
+              result.prefs?.let { playbackControls = it }
+              playbackMutationInFlight = false
+              playbackNotice = if (result.outcome == SettingsMutationResult.Failed) {
+                Notice(
+                  context.getString(R.string.settings_subtitle_size_failed),
+                  StatusTone.Danger,
+                )
+              } else {
+                Notice(
+                  context.getString(
+                    R.string.settings_subtitle_size_saved,
+                    context.getString(next.labelResource()),
+                  ),
+                  StatusTone.Success,
+                )
+              }
+            }
+          },
+        )
+        NebulaButton(
+          text = stringResource(
+            R.string.settings_audio_output,
+            stringResource(playbackAudioOutput.labelResource()),
+          ),
+          enabled = playbackReady && !playbackMutationInFlight,
+          onClick = {
+            val next = AudioOutputMode.stepped(playbackAudioOutput, 1)
+            playbackMutationInFlight = true
+            viewModel.setPlaybackAudioOutput(next.storageName) { result ->
+              result.prefs?.let { playbackControls = it }
+              playbackMutationInFlight = false
+              playbackNotice = if (result.outcome == SettingsMutationResult.Failed) {
+                Notice(
+                  context.getString(R.string.settings_audio_output_failed),
+                  StatusTone.Danger,
+                )
+              } else {
+                Notice(
+                  context.getString(
+                    R.string.settings_audio_output_saved,
+                    context.getString(next.labelResource()),
+                  ),
+                  StatusTone.Success,
+                )
+              }
+            }
+          },
+        )
+      }
+      if (playbackAudioOutput == AudioOutputMode.Passthrough) {
+        Text(
+          stringResource(
+            R.string.settings_passthrough_description,
+            stringResource(R.string.app_name),
+            stringResource(R.string.settings_audio_output_decode),
+          ),
+          style = MaterialTheme.typography.bodySmall,
+          color = NebulaPalette.Caution,
+        )
+      }
+
+      Row(
+        horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        NebulaButton(
+          text = stringResource(
+            if (playback.autoPlayNext) {
+              R.string.settings_autoplay_next_on
+            } else {
+              R.string.settings_autoplay_next_off
+            },
+          ),
+          enabled = playbackReady && !playbackMutationInFlight,
+          onClick = {
+            val next = !playback.autoPlayNext
+            playbackMutationInFlight = true
+            viewModel.setAutoPlayNext(next) { result ->
+              result.prefs?.let { playbackControls = it }
+              playbackMutationInFlight = false
+              playbackNotice = if (result.outcome == SettingsMutationResult.Failed) {
+                Notice(
+                  context.getString(R.string.settings_autoplay_failed),
+                  StatusTone.Danger,
+                )
+              } else {
+                Notice(
+                  context.getString(
+                    if (next) {
+                      R.string.settings_autoplay_enabled
+                    } else {
+                      R.string.settings_autoplay_disabled
+                    },
+                  ),
+                  StatusTone.Success,
+                )
+              }
+            }
+          },
+        )
+        NebulaButton(
+          text = pluralStringResource(
+            R.plurals.settings_countdown,
+            playback.upNextCountdownSeconds,
+            playback.upNextCountdownSeconds,
+          ),
+          enabled = playbackReady && playback.autoPlayNext && !playbackMutationInFlight,
+          onClick = {
+            val next = PlaybackPreferencePolicy.nextCountdownSeconds(
+              playback.upNextCountdownSeconds,
+            )
+            playbackMutationInFlight = true
+            viewModel.setUpNextCountdownSeconds(next) { result ->
+              result.prefs?.let { playbackControls = it }
+              playbackMutationInFlight = false
+              playbackNotice = if (result.outcome == SettingsMutationResult.Failed) {
+                Notice(
+                  context.getString(R.string.settings_countdown_failed),
+                  StatusTone.Danger,
+                )
+              } else {
+                Notice(
+                  context.resources.getQuantityString(
+                    R.plurals.settings_countdown_saved,
+                    next,
+                    next,
+                  ),
+                  StatusTone.Success,
+                )
+              }
+            }
+          },
+        )
+      }
+      NebulaButton(
+        text = stringResource(R.string.settings_reset_playback_defaults),
+        enabled = playbackReady && !playbackMutationInFlight,
+        style = NebulaButtonStyle.Ghost,
+        onClick = {
+          pendingPlaybackResetFeedback = null
+          pendingPlaybackReset = true
+        },
+      )
+      playbackNotice?.let { SectionNotice(it) }
+    }
+
+    SettingsSection(
+      title = stringResource(R.string.settings_support_title),
+      description = stringResource(R.string.settings_support_description),
+    ) {
+      Row(
+        horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        NebulaButton(
+          text = stringResource(
+            if (exportingDiagnostics) {
+              R.string.settings_preparing_diagnostics
+            } else {
+              R.string.settings_share_diagnostics
+            },
+          ),
+          enabled = !exportingDiagnostics,
+          onClick = {
+            exportingDiagnostics = true
+            supportNotice = null
+            supportScope.launch {
+              val report = NebulaDiagnostics.export(context)
+              exportingDiagnostics = false
+              report.onSuccess { uri ->
+                val chooser = Intent.createChooser(
+                  NebulaDiagnostics.shareIntent(uri),
+                  context.getString(
+                    R.string.settings_share_diagnostics_chooser,
+                    context.getString(R.string.app_name),
+                  ),
+                )
+                if (runCatching { context.startActivity(chooser) }.isFailure) {
+                  supportNotice = Notice(
+                    context.getString(R.string.settings_share_app_failed),
+                    StatusTone.Danger,
+                  )
+                }
+              }.onFailure {
+                supportNotice = Notice(
+                  context.getString(
+                    R.string.settings_create_diagnostics_failed,
+                    context.getString(R.string.app_name),
+                  ),
+                  StatusTone.Danger,
+                )
+              }
+            }
+          },
+        )
+        NebulaButton(
+          text = stringResource(R.string.settings_erase_all_app_data),
+          style = NebulaButtonStyle.Danger,
+          onClick = {
+            pendingAppResetFeedback = null
+            pendingAppReset = true
+          },
+        )
+      }
+      supportNotice?.let { SectionNotice(it) }
+    }
+
     NebulaButton(
-      text = "Advanced",
+      text = stringResource(R.string.settings_advanced),
       icon = if (advanced) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
       style = NebulaButtonStyle.Ghost,
       onClick = { advanced = !advanced },
@@ -720,7 +1228,13 @@ fun SettingsScreen(
       modifier = Modifier
         .initialFocusTarget(advancedFocus)
         .semantics(mergeDescendants = true) {
-          contentDescription = if (advanced) "Advanced, expanded" else "Advanced, collapsed"
+          contentDescription = context.getString(
+            if (advanced) {
+              R.string.settings_advanced_expanded
+            } else {
+              R.string.settings_advanced_collapsed
+            },
+          )
         },
     )
 
@@ -743,15 +1257,16 @@ fun SettingsScreen(
       SettingsSection(
         // Named for its subject. It used to be titled "Advanced" directly under a button reading
         // "Advanced", so the word appeared twice in 60dp and the card's actual topic never did.
-        title = "Subtitles addon",
-        description = "Leave blank for the built-in OpenSubtitles v3 addon.",
+        title = stringResource(R.string.settings_subtitles_addon_title),
+        description = stringResource(R.string.settings_subtitles_addon_description),
       ) {
         // Above the field, not below it. As the last element of a scrolling Column with nothing
         // focusable after it, the only feedback this field has could never be scrolled into view.
         Text(
-          "Currently using: ${
-            AddonList.safeDisplay(SettingsSaveGuard.normalizeSubtitlesBase(subtitlesUrl))
-          }",
+          stringResource(
+            R.string.settings_currently_using,
+            AddonList.safeDisplay(SettingsSaveGuard.normalizeSubtitlesBase(subtitlesUrl)),
+          ),
           style = MaterialTheme.typography.bodySmall,
           color = NebulaPalette.TextMuted,
         )
@@ -780,20 +1295,26 @@ fun SettingsScreen(
           // button now sits below the field instead of above it.
           modifier = Modifier
             .fillMaxWidth()
-            .semantics { contentDescription = "Subtitles addon URL" }
+            .semantics {
+              contentDescription = context.getString(
+                R.string.settings_subtitles_addon_url_description,
+              )
+            }
             .fieldNav(down = subtitlesRevealFocus, up = advancedFocus),
         )
         NebulaButton(
-          text = if (showSubtitlesUrl) "Hide URL" else "Show URL",
+          text = stringResource(
+            if (showSubtitlesUrl) R.string.settings_hide_url else R.string.settings_show_url,
+          ),
           onClick = { showSubtitlesUrl = !showSubtitlesUrl },
           style = NebulaButtonStyle.Ghost,
           modifier = Modifier
             .initialFocusTarget(subtitlesRevealFocus)
             .semantics {
               contentDescription = if (showSubtitlesUrl) {
-                "Hide subtitles addon URL"
+                context.getString(R.string.settings_hide_subtitles_url_description)
               } else {
-                "Show subtitles addon URL"
+                context.getString(R.string.settings_show_subtitles_url_description)
               }
             },
         )
@@ -807,13 +1328,15 @@ fun SettingsScreen(
       NebulaButton(
         // Says what the wait is for: this writes, then probes every addon manifest and TMDB,
         // each of which can block for ~30s.
-        text = "Save & test connections",
+        text = stringResource(R.string.settings_save_and_test),
         onClick = startSave,
         style = NebulaButtonStyle.Primary,
         modifier = Modifier.initialFocusTarget(saveFocus),
       )
       // Warn, not Bad: an edit that has not been written yet is a caveat, not a failure.
-      if (dirty) NebulaBadge(text = "Unsaved changes", tone = BadgeTone.Warn)
+      if (dirty) {
+        NebulaBadge(text = stringResource(R.string.settings_unsaved_changes), tone = BadgeTone.Warn)
+      }
     }
 
     if (saveStatus.isNotBlank()) {
@@ -829,27 +1352,37 @@ fun SettingsScreen(
     // stake than the My List entries this dialog was written for.
     CardOptionsDialog(
       title = label,
-      message = "Remove this addon? Its manifest URL is deleted, and putting it back means " +
-        "typing the whole thing on the remote again." +
-        pendingRemovalFeedback?.let { "\n\n$it" }.orEmpty(),
+      message = dialogMessageWithFeedback(
+        stringResource(R.string.settings_remove_addon_message),
+        pendingRemovalFeedback,
+      ),
       focusKey = url,
       focusLabel = "Addon removal options",
       actions = listOf(
-        CardAction("Remove addon", destructive = true) {
+        CardAction(stringResource(R.string.settings_remove_addon), destructive = true) {
           viewModel.removeAddon(url) { result ->
             when (result) {
               SettingsMutationResult.Changed -> {
                 invalidateConnectionVerdict()
-                addonNotice = Notice("Removed $label.", StatusTone.Info)
+                addonNotice = Notice(
+                  context.getString(R.string.settings_addon_removed, label),
+                  StatusTone.Info,
+                )
                 pendingRemovalFeedback = null
                 pendingRemoval = null
                 addonEditTick++
               }
               SettingsMutationResult.Unchanged -> {
-                pendingRemovalFeedback = "$label was not in the addon list."
+                pendingRemovalFeedback = context.getString(
+                  R.string.settings_addon_not_found,
+                  label,
+                )
               }
               SettingsMutationResult.Failed -> {
-                pendingRemovalFeedback = "Could not remove $label. Try again."
+                pendingRemovalFeedback = context.getString(
+                  R.string.settings_remove_addon_failed,
+                  label,
+                )
               }
             }
           }
@@ -864,14 +1397,15 @@ fun SettingsScreen(
 
   if (pendingClearKey) {
     CardOptionsDialog(
-      title = "TMDB API key",
-      message = "Clear the saved key? Catalogs, search, and metadata will stop loading until you " +
-        "enter another one." +
-        pendingClearKeyFeedback?.let { "\n\n$it" }.orEmpty(),
+      title = stringResource(R.string.settings_tmdb_api_key),
+      message = dialogMessageWithFeedback(
+        stringResource(R.string.settings_clear_key_message),
+        pendingClearKeyFeedback,
+      ),
       focusKey = "clear-tmdb-key",
       focusLabel = "TMDB key removal options",
       actions = listOf(
-        CardAction("Clear key", destructive = true) {
+        CardAction(stringResource(R.string.settings_clear_key), destructive = true) {
           viewModel.clearTmdbKey { result ->
             when (result) {
               SettingsMutationResult.Changed -> {
@@ -879,17 +1413,19 @@ fun SettingsScreen(
                 tmdbKey = ""
                 showTmdbKey = false
                 tmdbNotice = Notice(
-                  "TMDB key cleared. Enter a new one to load catalogs again.",
+                  context.getString(R.string.settings_tmdb_key_cleared),
                   StatusTone.Caution,
                 )
                 pendingClearKeyFeedback = null
                 pendingClearKey = false
               }
               SettingsMutationResult.Unchanged -> {
-                pendingClearKeyFeedback = "There was no saved TMDB key to clear."
+                pendingClearKeyFeedback = context.getString(R.string.settings_no_saved_tmdb_key)
               }
               SettingsMutationResult.Failed -> {
-                pendingClearKeyFeedback = "Could not clear the TMDB key. Try again."
+                pendingClearKeyFeedback = context.getString(
+                  R.string.settings_clear_tmdb_key_failed,
+                )
               }
             }
           }
@@ -901,7 +1437,110 @@ fun SettingsScreen(
       },
     )
   }
+
+  if (pendingPlaybackReset) {
+    CardOptionsDialog(
+      title = stringResource(R.string.settings_playback_defaults_title),
+      message = dialogMessageWithFeedback(
+        stringResource(R.string.settings_reset_playback_message),
+        pendingPlaybackResetFeedback,
+      ),
+      focusKey = "reset-playback-defaults",
+      focusLabel = "Playback reset options",
+      actions = listOf(
+        CardAction(stringResource(R.string.settings_reset_playback_defaults), destructive = true) {
+          playbackMutationInFlight = true
+          viewModel.resetPlaybackPreferences { result ->
+            result.prefs?.let { playbackControls = it }
+            playbackMutationInFlight = false
+            when (result.outcome) {
+              SettingsMutationResult.Changed,
+              SettingsMutationResult.Unchanged,
+              -> {
+                // Reset also discards any unapplied language text on this screen, even when the
+                // persisted values were already defaults.
+                audioLanguage = ""
+                subtitleLanguage = ""
+                playbackNotice = Notice(
+                  context.getString(R.string.settings_playback_defaults_reset),
+                  StatusTone.Info,
+                )
+                pendingPlaybackResetFeedback = null
+                pendingPlaybackReset = false
+              }
+              SettingsMutationResult.Failed -> {
+                pendingPlaybackResetFeedback = context.getString(
+                  R.string.settings_reset_playback_failed,
+                )
+              }
+            }
+          }
+        },
+      ),
+      onDismiss = {
+        pendingPlaybackResetFeedback = null
+        pendingPlaybackReset = false
+      },
+    )
+  }
+
+  if (pendingAppReset) {
+    CardOptionsDialog(
+      title = stringResource(
+        R.string.settings_erase_all_data_title,
+        stringResource(R.string.app_name),
+      ),
+      message = dialogMessageWithFeedback(
+        stringResource(
+          R.string.settings_erase_all_data_message,
+          stringResource(R.string.app_name),
+        ),
+        pendingAppResetFeedback,
+      ),
+      focusKey = "erase-all-app-data",
+      focusLabel = "App data reset options",
+      actions = listOf(
+        CardAction(stringResource(R.string.settings_erase_all_app_data), destructive = true) {
+          val accepted = runCatching {
+            context.getSystemService(ActivityManager::class.java).clearApplicationUserData()
+          }.getOrDefault(false)
+          if (!accepted) {
+            pendingAppResetFeedback = context.getString(
+              R.string.settings_reset_request_rejected,
+              context.getString(R.string.app_name),
+            )
+          }
+        },
+      ),
+      onDismiss = {
+        pendingAppResetFeedback = null
+        pendingAppReset = false
+      },
+    )
+  }
 }
+
+/** Screen-local labels keep persisted enum names stable while allowing the UI to be translated. */
+private fun SubtitleSize.labelResource(): Int = when (this) {
+  SubtitleSize.Small -> R.string.settings_subtitle_size_small
+  SubtitleSize.Medium -> R.string.settings_subtitle_size_medium
+  SubtitleSize.Large -> R.string.settings_subtitle_size_large
+  SubtitleSize.Huge -> R.string.settings_subtitle_size_huge
+}
+
+/** See [SubtitleSize.labelResource]. */
+private fun AudioOutputMode.labelResource(): Int = when (this) {
+  AudioOutputMode.Decode -> R.string.settings_audio_output_decode
+  AudioOutputMode.Passthrough -> R.string.settings_audio_output_passthrough
+}
+
+@Composable
+private fun dialogMessageWithFeedback(message: String, feedback: String?): String =
+  if (feedback == null) {
+    message
+  } else {
+    stringResource(R.string.settings_dialog_with_feedback, message, feedback)
+  }
 
 /**
  * A card for one group of related settings. Splitting the screen into these is what turned it

@@ -5,6 +5,28 @@ A detail pass over every surface, driven by an audit that turned up 255 findings
 put the app onto one design system; this makes that system actually hold, and fixes a set of defects
 that only show up when you sit in front of the thing.
 
+**Reliability, product and release follow-through.**
+- Search keeps paging when a filtered page contains only the other media type, and paging Retry
+  hands focus back safely.
+- Pairing validates TMDB and every addon before one atomic save; cancelling/ leaving cannot let an
+  in-flight validation commit later. The phone form now has associated labels and announced errors.
+- The stream picker can filter by availability, dynamic range, resolution, source and size, with a
+  recommended view and deliberate focus recovery when filters remove a control.
+- Playback defaults now cover languages, subtitle size, audio output, autoplay and countdown.
+  Rapid presses serialize against authoritative stored preferences, and unapplied language drafts
+  participate in Settings' save/leave guard.
+- Addon playback URLs are canonicalized to HTTPS and reject private literals/local names. Subtitle
+  DNS answers and every redirect are additionally revalidated, downloads are size/cancellation
+  bounded, and TMDB metadata can fall back to stale cache even when a network body fails after its
+  headers.
+- libmpv has generation-scoped ownership and file-scoped callbacks, so delayed teardown or events
+  cannot destroy or mutate a replacement player. TLS certificate verification is explicit.
+- Bounded, redacted diagnostics stay local until the viewer shares a uniquely written report.
+- Credential-free Android TV checks now run against official API 26 and API 34 images. Dependency
+  locks/checksums, pinned Actions, guarded manual promotion and provenance checks raise the release
+  floor; public publishing remains deliberately blocked until the native source inventory and
+  reviewed SBOM are complete.
+
 **Titles are branded, not typeset.** Home's billboard and the Details header both lead with the
 title's own logotype where TMDB has one, falling back to type where it does not. (TMDB files SVG
 variants next to the PNGs and Coil cannot decode them, so the pick excludes SVG outright - choosing

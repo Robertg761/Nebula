@@ -60,6 +60,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
@@ -81,6 +82,7 @@ import androidx.tv.material3.Surface
 import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
+import com.stremioshell.host.R
 import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.tv.data.tmdb.MediaItem
 import com.stremioshell.host.tv.ui.theme.NebulaAccentBrushVertical
@@ -642,7 +644,7 @@ fun FailureMessage(
           }
           if (onRetry != null) {
             NebulaButton(
-              text = "Retry",
+              text = stringResource(R.string.action_retry),
               onClick = onRetry,
               style = if (hasAction) NebulaButtonStyle.Secondary else NebulaButtonStyle.Primary,
               icon = Icons.Filled.Refresh,
@@ -821,7 +823,7 @@ fun CardOptionsDialog(
         )
       }
       NebulaButton(
-        text = "Cancel",
+        text = stringResource(R.string.action_cancel),
         onClick = onDismiss,
         style = NebulaButtonStyle.Ghost,
         modifier = Modifier.fillMaxWidth()

@@ -32,10 +32,14 @@ are the same thing through `scripts/run-gradle.mjs` (plain Node, no install
 step - the repo has no JS dependencies). Debug APK lands in
 `apps/android-tv-host/app/build/outputs/apk/debug/`.
 
-Automated gate:
-`./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug`.
-Baseline-profile generation is the only instrumentation procedure in the repo;
-device product QA remains the manual matrix in `docs/tv-qa-matrix.md`.
+Fast automated gate:
+`./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+:baselineprofile:assembleBenchmarkRelease`.
+CI additionally runs credential-free Android TV instrumentation on isolated
+official API 26 and API 34 emulators. Baseline-profile generation and
+hardware-dependent product QA
+remain the explicit procedures in `docs/baseline-profile.md` and
+`docs/tv-qa-matrix.md`.
 
 ## First-run configuration
 
@@ -69,14 +73,18 @@ cleartext HTTP as described above; it never returns stored credentials.
 
 ## Releases and in-app updates
 
-`.github/workflows/release.yml` builds and publishes TV releases:
+`.github/workflows/release.yml` builds and publishes manually promoted TV
+releases through the protected `release` environment:
 
-1. Triggers on `main` pushes touching release files, or `workflow_dispatch`.
+1. Is dispatched explicitly from `main`; ordinary pushes never publish.
 2. Reads the version from `apps/android-tv-host/app/build.gradle.kts`.
-3. Runs unit tests and lint, then builds and signs `:app:assembleRelease`.
+3. Runs unit tests, lint, Baseline Profile producer assembly, and credential-free
+   TV instrumentation on API 26 and API 34 for that exact SHA.
 4. Verifies the APK signature and compares its SHA-256 signer fingerprint with
    the configured release identity.
-5. Creates GitHub Release `v<version>` with `StremioShell-tv-<version>.apk`.
+5. Attests the signed APK, creates or repairs a draft GitHub Release, and
+   verifies the APK plus reviewed Gradle SBOM, native SBOM, and native source
+   archive by name, size, and digest before making the release public.
 
 The in-app updater polls GitHub Releases on startup and hourly in the
 background (release builds only), matches the `-tv-` named asset, and
@@ -84,7 +92,7 @@ downloads it in the background. Update source defaults live in
 `app/build.gradle.kts` (`githubReleaseOwner`, `githubReleaseRepo`) and can be
 overridden with `-PgithubReleaseOwner=... -PgithubReleaseRepo=...`.
 
-Before pushing a release:
+Before dispatching a release:
 
 1. Bump `versionCode` and `versionName` in
    `apps/android-tv-host/app/build.gradle.kts`.
@@ -95,10 +103,23 @@ Before pushing a release:
    the repository Actions variable `SS_SIGNING_CERT_SHA256` with the expected
    signing-certificate fingerprint (64 hexadecimal characters; colons are
    accepted).
+4. Confirm the protected environment and branch/tag rules in
+   `docs/repository-settings.md` are configured.
+5. Resolve the current native inventory/SBOM/source-archive blockers described
+   in `docs/release-supply-chain.md`. The workflow intentionally refuses public
+   promotion until `scripts/check_release_supply_chain.js` passes.
 
 ## Further reading
 
 - `apps/android-tv-host/README.md` - module layout, TV-only manifest, ABIs.
 - `docs/quality-gates.md` - what has to pass before a release.
+- `docs/lint-baseline.md` - reviewed lint findings and their dispositions.
+- `docs/release-supply-chain.md` - the explicit SBOM/native-source release gate.
 - `docs/baseline-profile.md` - device-backed profile regeneration procedure.
 - `docs/tv-qa-matrix.md` - manual device/remote QA checklist.
+- `docs/architecture.md` and `docs/roadmap.md` - trust boundaries and planned
+  quality work.
+- `PRIVACY.md`, `SECURITY.md`, and `THIRD_PARTY_NOTICES.md` - data handling,
+  private reporting, and third-party/source obligations.
+
+The root project-license decision is still pending; see `CONTRIBUTING.md`.

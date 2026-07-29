@@ -4,7 +4,12 @@ import android.content.Context
 import android.util.Log
 import java.io.File
 import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import okhttp3.Cache
 import okhttp3.CacheControl
@@ -15,8 +20,12 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody
+import okhttp3.ResponseBody.Companion.toResponseBody
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 
 internal const val HTTP_TAG = "TvHttp"
 internal const val MAX_JSON_RESPONSE_BYTES: Long = 5L * 1024 * 1024
@@ -25,6 +34,14 @@ internal const val MAX_JSON_RESPONSE_BYTES: Long = 5L * 1024 * 1024
 fun interface HttpFetcher {
   /** Returns the response body for a 2xx response; throws [HttpStatusException] otherwise. */
   suspend fun get(url: String): String
+
+  /**
+   * Requires a network revalidation instead of accepting a fresh disk-cache hit.
+   *
+   * Credential checks use this path: a response cached before a key was revoked must not be
+   * mistaken for proof that the key still works. Test fetchers can keep delegating to [get].
+   */
+  suspend fun getFresh(url: String): String = get(url)
 
   /**
    * Like [get], but the response may be cached and, when the network fails, a previously cached
@@ -54,8 +71,43 @@ object HttpCachePolicy {
   /** How old a cached body may be when it is standing in for a failed network call. */
   const val MAX_STALE_SECONDS: Int = 7 * 24 * 60 * 60
 
+  /**
+   * Local-only response header describing why a stale body was returned. It is added after the
+   * cache lookup, never sent to a service, and gives diagnostics/tests provenance without changing
+   * [HttpFetcher]'s deliberately tiny public API.
+   */
+  const val STALE_PROVENANCE_HEADER = "X-Nebula-Stale-Provenance"
+
   /** True when the caller opted this request into caching with a stale fallback. */
   fun isCacheable(request: Request): Boolean = request.header(CACHEABLE_HEADER) != null
+
+  /** Statuses where an older catalog is more useful than the service's transient error page. */
+  fun isRetryableStatus(code: Int): Boolean = code == 429 || code in 500..599
+
+  /**
+   * Parses the two legal Retry-After forms: delta-seconds and an HTTP date.
+   *
+   * The result is capped because it is a scheduling/diagnostic hint, not authority for a remote
+   * server to suppress refreshes forever. A past date means retry now.
+   */
+  fun retryAfterSeconds(
+    raw: String?,
+    nowEpochMillis: Long = System.currentTimeMillis(),
+  ): Long? {
+    val value = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    value.toLongOrNull()?.let { seconds ->
+      if (seconds < 0) return null
+      return seconds.coerceAtMost(MAX_RETRY_AFTER_SECONDS)
+    }
+    val retryAt = runCatching {
+      SimpleDateFormat(RETRY_AFTER_DATE_PATTERN, Locale.US).apply {
+        isLenient = false
+        timeZone = TimeZone.getTimeZone("GMT")
+      }.parse(value)
+    }.getOrNull() ?: return null
+    val remainingMillis = (retryAt.time - nowEpochMillis).coerceAtLeast(0L)
+    return ((remainingMillis + 999L) / 1_000L).coerceAtMost(MAX_RETRY_AFTER_SECONDS)
+  }
 
   /** Freshness we stamp on responses as they pass into the cache. */
   fun freshResponseCacheControl(freshSeconds: Int = FRESH_SECONDS): String =
@@ -76,6 +128,10 @@ object HttpCachePolicy {
   fun withoutMarker(request: Request): Request =
     request.newBuilder().removeHeader(CACHEABLE_HEADER).build()
 
+  /** Forces a network round-trip while still allowing HTTP conditional revalidation. */
+  fun requiringNetwork(request: Request): Request =
+    request.newBuilder().cacheControl(CacheControl.FORCE_NETWORK).build()
+
   /**
    * Stamps a freshness window on a response so the cache will store it. TMDB's own headers are
    * not reliably storable, and without this there would be nothing on disk to fall back on.
@@ -88,6 +144,15 @@ object HttpCachePolicy {
       .header("Cache-Control", freshResponseCacheControl(freshSeconds))
       .build()
   }
+
+  /** Marks a cached response with local provenance after a network failure or retryable status. */
+  fun markStaleFallback(response: Response, provenance: String): Response =
+    response.newBuilder()
+      .header(STALE_PROVENANCE_HEADER, provenance)
+      .build()
+
+  private const val MAX_RETRY_AFTER_SECONDS = 7L * 24 * 60 * 60
+  private const val RETRY_AFTER_DATE_PATTERN = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
 }
 
 /**
@@ -104,22 +169,69 @@ internal class StaleOnNetworkFailureInterceptor(
   override fun intercept(chain: Interceptor.Chain): Response {
     val request = chain.request()
     if (!HttpCachePolicy.isCacheable(request)) return chain.proceed(request)
-    val failure = try {
-      return chain.proceed(request)
+    var responseStarted = false
+    val networkResponse = try {
+      val response = chain.proceed(request)
+      responseStarted = true
+      eagerlyBufferSuccessfulBody(response)
     } catch (error: IOException) {
-      error
+      val cached = cachedResponse(chain, request)
+      if (cached == null) throw error
+      val provenance = if (responseStarted) "network-body" else "network-io"
+      val phase = if (responseStarted) "network body failed" else "network failed"
+      log("$phase; serving cached ${redactSecrets(request.url.toString())}")
+      return HttpCachePolicy.markStaleFallback(cached, provenance)
     }
+
+    if (!HttpCachePolicy.isRetryableStatus(networkResponse.code)) return networkResponse
+    val status = networkResponse.code
+    val retryAfter = HttpCachePolicy.retryAfterSeconds(networkResponse.header("Retry-After"))
+    // OkHttp requires an application interceptor to close one response before calling proceed
+    // again. Keep a bodyless copy for the no-cache case: callers only need its status/headers and
+    // must still receive the service failure rather than a synthetic cache 504.
+    val passThrough = networkResponse.newBuilder()
+      .body(ByteArray(0).toResponseBody(networkResponse.body?.contentType()))
+      .build()
+    networkResponse.close()
+    val cached = cachedResponse(chain, request) ?: return passThrough
+    val retryHint = retryAfter?.let { "; retry-after=${it}s" }.orEmpty()
+    log(
+      "HTTP $status$retryHint; serving cached ${redactSecrets(request.url.toString())}",
+    )
+    return HttpCachePolicy.markStaleFallback(cached, "http-$status")
+  }
+
+  private fun cachedResponse(chain: Interceptor.Chain, request: Request): Response? {
     val cached = runCatching {
       chain.proceed(HttpCachePolicy.staleFallbackRequest(request, maxStaleSeconds))
     }.getOrNull()
-    // `only-if-cached` with nothing stored yields a synthetic 504; report the real network
-    // failure in that case rather than a bogus status.
+    // `only-if-cached` with nothing stored yields a synthetic 504.
     if (cached == null || !cached.isSuccessful) {
       cached?.close()
-      throw failure
+      return null
     }
-    log("network failed; serving cached ${redactSecrets(request.url.toString())}")
     return cached
+  }
+
+  /**
+   * Consumes successful marked responses while this interceptor can still retry against cache.
+   *
+   * Returning the original streaming body would move an IOException after headers outside the
+   * interceptor, making the stale fallback unreachable. The replacement remains bounded and is
+   * consumed a second time only from memory by [OkHttpFetcher].
+   */
+  private fun eagerlyBufferSuccessfulBody(response: Response): Response {
+    if (!response.isSuccessful) return response
+    val body = response.body ?: return response
+    val contentType = body.contentType()
+    val bytes = try {
+      body.readByteArrayLimited(MAX_JSON_RESPONSE_BYTES)
+    } finally {
+      body.close()
+    }
+    return response.newBuilder()
+      .body(bytes.toResponseBody(contentType))
+      .build()
   }
 }
 
@@ -175,20 +287,34 @@ object SharedHttpClient {
 }
 
 object OkHttpFetcher : HttpFetcher {
-  override suspend fun get(url: String): String = execute(url, cacheable = false)
+  override suspend fun get(url: String): String =
+    execute(url, cacheable = false, requireNetwork = false)
 
-  override suspend fun getAllowingStale(url: String): String = execute(url, cacheable = true)
+  override suspend fun getFresh(url: String): String =
+    execute(url, cacheable = false, requireNetwork = true)
 
-  private suspend fun execute(url: String, cacheable: Boolean): String {
+  override suspend fun getAllowingStale(url: String): String =
+    execute(url, cacheable = true, requireNetwork = false)
+
+  private suspend fun execute(
+    url: String,
+    cacheable: Boolean,
+    requireNetwork: Boolean,
+  ): String {
     val builder = Request.Builder().url(url).header("Accept", "application/json")
     if (cacheable) builder.header(HttpCachePolicy.CACHEABLE_HEADER, "1")
-    val request = builder.build()
-    return SharedHttpClient.client.newCall(request).awaitResponse().use { response ->
+    val built = builder.build()
+    val request = if (requireNetwork) HttpCachePolicy.requiringNetwork(built) else built
+    return SharedHttpClient.client.newCall(request).awaitAndConsumeResponse { response ->
       if (!response.isSuccessful) {
         // The URL carries the TMDB api_key, so the detail stays here (redacted) and the thrown
         // message - which the UI may end up rendering - carries only status and host.
         Log.w(HTTP_TAG, "GET ${redactSecrets(url)} failed: HTTP ${response.code}")
-        throw HttpStatusException(response.code, request.url.host)
+        throw HttpStatusException(
+          code = response.code,
+          host = request.url.host,
+          retryAfterSeconds = HttpCachePolicy.retryAfterSeconds(response.header("Retry-After")),
+        )
       }
       response.body?.readUtf8Limited(MAX_JSON_RESPONSE_BYTES).orEmpty()
     }
@@ -206,6 +332,16 @@ internal fun ResponseBody.readUtf8Limited(maxBytes: Long): String {
   val source = source()
   if (source.request(maxBytes + 1L)) throw HttpResponseTooLargeException(maxBytes)
   return source.readUtf8()
+}
+
+/** Byte-preserving counterpart used when an interceptor must replay the already-audited body. */
+internal fun ResponseBody.readByteArrayLimited(maxBytes: Long): ByteArray {
+  require(maxBytes >= 0L && maxBytes < Long.MAX_VALUE)
+  val declaredBytes = contentLength()
+  if (declaredBytes > maxBytes) throw HttpResponseTooLargeException(maxBytes)
+  val source = source()
+  if (source.request(maxBytes + 1L)) throw HttpResponseTooLargeException(maxBytes)
+  return source.readByteArray()
 }
 
 /**
@@ -228,3 +364,57 @@ internal suspend fun Call.awaitResponse(): Response =
       }
     })
   }
+
+/**
+ * Awaits headers and consumes the response on [Dispatchers.IO].
+ *
+ * The second cancellable bridge is intentional. [awaitResponse] can cancel the socket while it is
+ * waiting for headers, but its continuation is complete once headers arrive. Keeping another
+ * continuation active around body consumption means leaving a screen still calls [Call.cancel],
+ * which closes a slow/chunked body instead of occupying an OkHttp connection until callTimeout.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+internal suspend fun <T : Any> Call.awaitAndConsumeResponse(
+  onCancellation: (T) -> Unit = {},
+  consume: (Response) -> T,
+): T {
+  val ownsResult = AtomicBoolean(false)
+  var produced: T? = null
+  fun discardProducedResult() {
+    if (ownsResult.compareAndSet(true, false)) {
+      produced?.let { value -> runCatching { onCancellation(value) } }
+    }
+  }
+
+  return try {
+    val delivered = withContext(Dispatchers.IO) {
+      awaitResponse().use { response ->
+        suspendCancellableCoroutine { continuation ->
+          continuation.invokeOnCancellation {
+            cancel()
+            discardProducedResult()
+          }
+          try {
+            val value = consume(response)
+            produced = value
+            ownsResult.set(true)
+            if (continuation.isActive) {
+              continuation.resume(value) { discardProducedResult() }
+            } else {
+              discardProducedResult()
+            }
+          } catch (error: Throwable) {
+            if (continuation.isActive) continuation.resumeWithException(error)
+          }
+        }
+      }
+    }
+    // Ownership transfers to the caller only after withContext has delivered the value back across
+    // its dispatcher boundary. Cancellation before that point is handled below.
+    ownsResult.set(false)
+    delivered
+  } catch (cancellation: CancellationException) {
+    discardProducedResult()
+    throw cancellation
+  }
+}

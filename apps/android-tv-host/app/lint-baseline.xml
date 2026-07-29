@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<issues format="6" by="lint 8.5.2" type="baseline" client="gradle" dependencies="false" name="AGP (8.5.2)" variant="all" version="8.5.2">
+
+    <issue
+        id="OldTargetApi"
+        message="Not targeting the latest versions of Android; compatibility modes apply. Consider testing and updating this version. Consult the `android.os.Build.VERSION_CODES` javadoc for details."
+        errorLine1="    targetSdk = 34"
+        errorLine2="    ~~~~~~~~~~~~~~">
+        <location
+            file="build.gradle.kts"
+            line="42"
+            column="5"/>
+    </issue>
+
+    <issue
+        id="VectorRaster"
+        message="Limit vector icons sizes to 200×200 to keep icon drawing fast; see https://developer.android.com/studio/write/vector-asset-studio#when for more"
+        errorLine1="  android:width=&quot;320dp&quot;"
+        errorLine2="                 ~~~~~">
+        <location
+            file="src/main/res/drawable/ic_tv_banner.xml"
+            line="15"
+            column="18"/>
+    </issue>
+
+    <issue
+        id="DiscouragedApi"
+        message="Should not restrict activity to fixed orientation. This may not be suitable for different form factors, causing the app to be letterboxed."
+        errorLine1="      android:screenOrientation=&quot;landscape&quot;"
+        errorLine2="      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/AndroidManifest.xml"
+            line="88"
+            column="7"/>
+    </issue>
+
+    <issue
+        id="ChromeOsAbiSupport"
+        message="Missing x86_64 ABI support for ChromeOS"
+        errorLine1="        abiFilters += listOf(&quot;arm64-v8a&quot;, &quot;armeabi-v7a&quot;)"
+        errorLine2="                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="build.gradle.kts"
+            line="84"
+            column="23"/>
+    </issue>
+
+    <issue
+        id="VectorPath"
+        message="Very long vector path (1439 characters), which is bad for performance. Considering reducing precision, removing minor details or rasterizing vector."
+        errorLine1="  &lt;path android:pathData=&quot;M136.22 96.00V73.00H139.80L141.33 77.59V96.00ZM152.08 96.00 138.53 78.64 139.80 73.00 153.35 90.36ZM152.08 96.00 150.71 91.41V73.00H155.83V96.00Z M165.26 96.00V73.00H170.37V96.00ZM169.17 96.00V91.57H181.77V96.00ZM169.17 86.39V82.12H180.63V86.39ZM169.17 77.40V73.00H181.61V77.40Z M194.20 96.00V92.03H199.61Q201.11 92.03 201.96 91.15Q202.80 90.27 202.80 89.00Q202.80 88.12 202.41 87.43Q202.02 86.75 201.32 86.36Q200.62 85.97 199.61 85.97H194.20V82.09H199.19Q200.46 82.09 201.24 81.45Q202.02 80.82 202.02 79.52Q202.02 78.25 201.24 77.61Q200.46 76.97 199.19 76.97H194.20V73.00H200.16Q202.38 73.00 203.93 73.81Q205.47 74.63 206.29 76.00Q207.10 77.37 207.10 79.03Q207.10 81.14 205.74 82.61Q204.37 84.08 201.70 84.63L201.83 82.90Q204.73 83.46 206.31 85.15Q207.89 86.85 207.89 89.32Q207.89 91.21 206.96 92.73Q206.03 94.24 204.29 95.12Q202.54 96.00 200.10 96.00ZM190.29 96.00V73.00H195.34V96.00Z M225.43 96.36Q222.59 96.36 220.43 95.15Q218.26 93.95 217.04 91.81Q215.82 89.68 215.82 86.94V73.00H220.96V87.24Q220.96 88.60 221.55 89.61Q222.14 90.62 223.16 91.16Q224.19 91.70 225.43 91.70Q226.73 91.70 227.71 91.16Q228.69 90.62 229.26 89.63Q229.83 88.64 229.83 87.27V73.00H234.97V86.98Q234.97 89.71 233.77 91.83Q232.56 93.95 230.41 95.15Q228.26 96.36 225.43 96.36Z M244.05 96.00V73.00H249.16V96.00ZM247.99 96.00V91.50H259.36V96.00Z M265.59 96.00 274.72 73.00H279.34L288.37 96.00H282.96L276.05 76.91H277.91L270.91 96.00ZM270.77 91.83V87.66H283.32V91.83Z&quot;>"
+        errorLine2="                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/res/drawable/ic_tv_banner.xml"
+            line="103"
+            column="27"/>
+    </issue>
+
+</issues>

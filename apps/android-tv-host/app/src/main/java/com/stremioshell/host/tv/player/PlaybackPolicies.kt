@@ -40,6 +40,11 @@ object PlaybackLoadCommand {
  */
 object StreamRequestHeaders {
   private val NAME = Regex("[A-Za-z0-9!#$%&'*+.^_`|~-]+")
+  private val NATIVE_PLAYBACK_HEADERS = setOf(
+    "accept",
+    "accept-language",
+    "user-agent",
+  )
   private val FORBIDDEN = setOf(
     "connection",
     "content-length",
@@ -88,10 +93,18 @@ object StreamRequestHeaders {
 
   /**
    * mpv parses this option as a comma-separated string list. Escape the two list metacharacters so
-   * cookies and other legitimate values containing commas remain one header.
+   * legitimate values containing commas remain one header.
+   *
+   * Native mpv owns redirects and DNS after the initial URL validation. Until playback is routed
+   * through an app-controlled transport, never give that redirect chain credentials, referrers or
+   * arbitrary addon headers. The small allowlist is limited to content negotiation and client
+   * identification; same-origin subtitle downloads may still use the complete sanitized set.
    */
   fun mpvValue(headers: Map<String, String>): String =
-    sanitize(headers).entries.joinToString(",") { (name, value) ->
+    sanitize(headers)
+      .filterKeys { it.lowercase(Locale.ROOT) in NATIVE_PLAYBACK_HEADERS }
+      .entries
+      .joinToString(",") { (name, value) ->
       "$name: ${value.replace("\\", "\\\\").replace(",", "\\,")}"
     }
 
@@ -136,14 +149,17 @@ object StreamRequestHeaders {
  */
 class PlaybackErrorAccumulator {
   private var best: Candidate? = null
+  private var generation: Long = 0L
 
   @Synchronized
-  fun reset() {
+  fun reset(generation: Long = this.generation) {
+    this.generation = generation
     best = null
   }
 
   @Synchronized
-  fun record(prefix: String, text: String) {
+  fun record(prefix: String, text: String, generation: Long = this.generation) {
+    if (generation != this.generation) return
     val sanitized = redact(text.trim())
     if (sanitized.isBlank()) return
     val candidate = Candidate(

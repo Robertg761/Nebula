@@ -1,9 +1,10 @@
 package com.stremioshell.host.tv.player
 
+import com.stremioshell.host.tv.data.PlaybackUrlPolicy
 import com.stremioshell.host.tv.data.addon.AddonStreamSubtitle
 import com.stremioshell.host.tv.data.subtitles.AddonSubtitle
-import java.net.URI
 import java.util.Locale
+import okhttp3.HttpUrl
 
 /**
  * One external subtitle file as the menu offers it, already reduced to the two
@@ -23,7 +24,20 @@ data class ExternalSubtitleOption(
    * than repeat the language back.
    */
   val trackTitle: String,
+  /**
+   * Structured presentation metadata lets the Android UI localize app-authored copy without
+   * putting a Context into this pure filtering policy. Embedded options constructed by the player
+   * keep their existing caller-supplied detail and title through the default.
+   */
+  val source: ExternalSubtitleSource = ExternalSubtitleSource.Embedded,
+  val ordinal: Int = 1,
+  val total: Int = 1,
 )
+
+enum class ExternalSubtitleSource {
+  Embedded,
+  Online,
+}
 
 /**
  * Bounds subtitle rows supplied inside an untrusted stream response.
@@ -44,7 +58,7 @@ object EmbeddedSubtitles {
     return subtitles.asSequence()
       .take(MAX_CANDIDATES)
       .mapNotNull { subtitle ->
-        val url = safeHttpUrl(subtitle.url) ?: return@mapNotNull null
+        val url = SubtitleUrlPolicy.allowedUrlOrNull(subtitle.url) ?: return@mapNotNull null
         if (!seenUrls.add(url)) return@mapNotNull null
         subtitle.copy(
           url = url,
@@ -56,14 +70,22 @@ object EmbeddedSubtitles {
       .toList()
   }
 
-  private fun safeHttpUrl(rawUrl: String): String? {
+}
+
+/**
+ * One policy for every addon-controlled subtitle URL: menu ingestion, direct download and each
+ * redirect hop all audit and then use the same canonical public HTTPS address.
+ */
+internal object SubtitleUrlPolicy {
+  fun allowedUrlOrNull(rawUrl: String): String? {
     val url = rawUrl.trim()
-    if (url.isEmpty() || url.length > MAX_URL_LENGTH) return null
-    val parsed = runCatching { URI(url) }.getOrNull() ?: return null
-    val scheme = parsed.scheme?.lowercase(Locale.ROOT)
-    if (scheme != "http" && scheme != "https") return null
-    if (parsed.rawAuthority.isNullOrBlank()) return null
-    return url
+    if (url.isEmpty() || url.length > EmbeddedSubtitles.MAX_URL_LENGTH) return null
+    return PlaybackUrlPolicy.allowedUrlOrNull(url)
+  }
+
+  fun redirectUrlOrNull(from: HttpUrl, location: String?): String? {
+    val resolved = location?.let(from::resolve) ?: return null
+    return allowedUrlOrNull(resolved.toString())
   }
 }
 
@@ -132,8 +154,8 @@ object ExternalSubtitles {
     // language rather than an arbitrary three of them.
     val byLanguage = LinkedHashMap<String, MutableList<String>>()
     for (subtitle in subtitles) {
-      val url = subtitle.url.trim()
-      if (url.isEmpty() || !seenUrls.add(url)) continue
+      val url = SubtitleUrlPolicy.allowedUrlOrNull(subtitle.url) ?: continue
+      if (!seenUrls.add(url)) continue
       val group = byLanguage.getOrPut(LanguageCodes.normalize(subtitle.lang)) { mutableListOf() }
       if (group.size < PER_LANGUAGE) group += url
     }
@@ -192,6 +214,9 @@ object ExternalSubtitles {
     label = label(code),
     detail = if (total == 1) SOURCE_LABEL else "$SOURCE_LABEL $ordinal of $total",
     trackTitle = if (total == 1) TRACK_LABEL else "$TRACK_LABEL $ordinal",
+    source = ExternalSubtitleSource.Online,
+    ordinal = ordinal,
+    total = total,
   )
 
   private const val SOURCE_LABEL = "Online subtitle"

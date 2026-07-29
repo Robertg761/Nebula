@@ -8,6 +8,8 @@ import com.stremioshell.host.tv.data.AddonProbe
 import com.stremioshell.host.tv.data.MetadataCache
 import com.stremioshell.host.tv.data.NetworkErrorMessage
 import com.stremioshell.host.tv.data.NetworkSource
+import com.stremioshell.host.tv.data.PlayerPrefs
+import com.stremioshell.host.tv.data.PlayerPrefsStore
 import com.stremioshell.host.tv.data.SettingsDraft
 import com.stremioshell.host.tv.data.SettingsSaveGuard
 import com.stremioshell.host.tv.data.SettingsStatus
@@ -35,13 +37,18 @@ import com.stremioshell.host.tv.data.tmdb.MediaPage
 import com.stremioshell.host.tv.data.tmdb.MediaType
 import com.stremioshell.host.tv.data.tmdb.RailPageState
 import com.stremioshell.host.tv.data.tmdb.RailPaging
+import com.stremioshell.host.tv.data.tmdb.SearchPageState
+import com.stremioshell.host.tv.data.tmdb.SearchPaging
 import com.stremioshell.host.tv.data.tmdb.TmdbClient
 import com.stremioshell.host.tv.pairing.ConfigMerge
 import com.stremioshell.host.tv.pairing.ConfigPairingServer
 import com.stremioshell.host.tv.pairing.PairingApplyResult
+import com.stremioshell.host.tv.pairing.PairingConnectionCheck
 import com.stremioshell.host.tv.pairing.PairingReceipt
 import com.stremioshell.host.tv.pairing.PairingSubmission
 import com.stremioshell.host.tv.pairing.PairingTokenGenerator
+import com.stremioshell.host.tv.pairing.PairingValidation
+import com.stremioshell.host.tv.pairing.PairingValidationPolicy
 import com.stremioshell.host.tv.pairing.findLanIpv4
 import com.stremioshell.host.tv.search.LaunchIntents
 import kotlinx.coroutines.CancellationException
@@ -50,6 +57,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -66,6 +74,24 @@ import kotlinx.coroutines.withContext
 
 data class HomeRail(val title: String, val items: List<MediaItem>)
 enum class SettingsMutationResult { Changed, Unchanged, Failed }
+data class PlayerPrefsMutationResult(
+  val outcome: SettingsMutationResult,
+  /** The authoritative post-mutation value, absent only when the DataStore operation failed. */
+  val prefs: PlayerPrefs? = null,
+)
+
+/** Network answers shared by Settings' connection test and phone pairing's save gate. */
+private data class ConfigurationProbe(
+  val hasTmdbKey: Boolean,
+  val tmdbConnected: Boolean,
+  val addons: List<AddonProbe>,
+) {
+  fun pairingValidation(): PairingValidation = PairingValidation(
+    hasTmdbKey = hasTmdbKey,
+    tmdbConnected = tmdbConnected,
+    addons = addons.map { PairingConnectionCheck(it.label, it.name != null) },
+  )
+}
 
 /**
  * Assembles Home's rails from a load that may still be in progress and whose individual endpoints
@@ -126,8 +152,14 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   val watchState = WatchStateStore(application)
   val watchlist = WatchlistStore(application)
   val streamPicks = StreamPickStore(application)
+  private val playerPrefsStore = PlayerPrefsStore(application)
   private val addonClient = AddonClient()
   private val streamCatalog = StreamCatalog(addonClient)
+
+  /** Null only until the player's separate DataStore has answered for the first time. */
+  val playerPrefs: StateFlow<PlayerPrefs?> = playerPrefsStore.prefs
+    .map<PlayerPrefs, PlayerPrefs?> { it }
+    .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
   val tmdbApiKey: StateFlow<String?> = settings.tmdbApiKey
     .stateIn(viewModelScope, SharingStarted.Eagerly, null)
@@ -187,6 +219,8 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
 
   private val _searchResults = MutableStateFlow<LoadState<List<MediaItem>>>(LoadState.Ready(emptyList()))
   val searchResults: StateFlow<LoadState<List<MediaItem>>> = _searchResults
+  private val _searchPaging = MutableStateFlow(SearchPageState())
+  val searchPaging: StateFlow<SearchPageState> = _searchPaging
 
   /**
    * The query [searchResults] belongs to. Exposed because the field is debounced and so runs ahead
@@ -243,6 +277,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   // Every per-screen loader keeps its Job plus the key it was asked for, so a newer request can
   // cancel the older one and a late response can be dropped instead of landing on the wrong screen.
   private var searchJob: Job? = null
+  private var searchPageJob: Job? = null
   private var detailsJob: Job? = null
   private var detailsKey: Pair<MediaType, Int>? = null
   private var seasonJob: Job? = null
@@ -256,6 +291,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    * already succeeded.
    */
   private val settingsMutationMutex = Mutex()
+  private val playerPrefsMutationMutex = Mutex()
 
   // What Details and its episode lists have already shown, so BACK into a title the viewer just
   // left paints it rather than spinning at them. Sized for a browsing session, not for a library:
@@ -271,11 +307,17 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   sealed interface PairingState {
     data object Idle : PairingState
     data class Ready(val url: String) : PairingState
+    data class Validating(val addonCount: Int) : PairingState
+    data class ValidationFailed(
+      val message: String,
+      val checks: List<PairingConnectionCheck>,
+    ) : PairingState
     data class Received(
       val tmdbKeyChanged: Boolean,
       val addonUrlsChanged: Boolean,
       val hasTmdbKey: Boolean,
       val addonCount: Int,
+      val checks: List<PairingConnectionCheck>,
     ) : PairingState
     data class Failed(val message: String) : PairingState
   }
@@ -361,57 +403,108 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   /**
-   * Called on a NanoHTTPD worker thread. It deliberately blocks that one request until the atomic
-   * DataStore edit completes: the phone must never receive a success page for a queued or partial
-   * write. The bounded wait also prevents a broken storage backend from pinning the server worker.
+   * Called on a NanoHTTPD worker thread. It deliberately blocks that one request through connection
+   * validation and the atomic DataStore edit: the phone must never receive a success page for
+   * untested, queued or partially-written configuration. The bounded wait also prevents a dead
+   * network or storage backend from pinning the server worker indefinitely.
    */
   private fun applyPairedConfig(
     session: PairingSession,
     submission: PairingSubmission,
   ): PairingApplyResult =
     runCatching {
-      runBlocking {
-        withTimeout(PAIRING_SAVE_TIMEOUT_MS) {
-          val merged = settingsMutationMutex.withLock {
-            ConfigMerge.merge(
-              submission,
-              currentTmdbKey = settings.tmdbApiKey.first(),
-              currentAddonUrls = settings.addonManifestUrls.first(),
-            ).also { result ->
-              if (result.changed) {
-                settings.setPairedConfiguration(result.tmdbKey, result.addonUrls)
-              }
-            }
-          }
-          // An old server may finish its already-accepted storage request after the viewer left
-          // and opened a new pairing session. The write is still valid, but it must never replace
-          // the new session's QR/receipt state.
-          if (pairingSession === session) {
-            _pairing.value = PairingState.Received(
-              tmdbKeyChanged = merged.tmdbKeyChanged,
-              addonUrlsChanged = merged.addonUrlsChanged,
-              hasTmdbKey = merged.tmdbKey.isNotBlank(),
-              addonCount = merged.addonUrls.size,
-            )
-            // Use the just-received key: the exposed tmdbApiKey flow may not have caught up yet.
-            // loadRails mutates ViewModel-owned jobs, so hop back to the main-scoped coroutine.
-            if (merged.tmdbKey.isNotBlank()) {
-              viewModelScope.launch { loadRails(merged.tmdbKey, force = true) }
-            }
-          }
-          PairingApplyResult.Saved(
-            PairingReceipt(
-              tmdbKeyChanged = merged.tmdbKeyChanged,
-              addonUrlsChanged = merged.addonUrlsChanged,
-              hasTmdbKey = merged.tmdbKey.isNotBlank(),
-              addonCount = merged.addonUrls.size,
-            ),
-          )
+      runBlocking { withTimeout(PAIRING_APPLY_TIMEOUT_MS) { applyPairedConfigChecked(session, submission) } }
+    }.getOrElse {
+      val message = "The connection checks did not finish. Check the TV's network and try again."
+      if (pairingSession === session) {
+        _pairing.value = PairingState.ValidationFailed(message, checks = emptyList())
+      }
+      PairingApplyResult.Failed(message)
+    }
+
+  /**
+   * Probes outside [settingsMutationMutex], then confirms the values did not move before writing.
+   * A pairing POST can stay in flight while the viewer backs out to Settings; holding the mutex
+   * across a 40-second network timeout would otherwise make every settings button appear broken.
+   */
+  private suspend fun applyPairedConfigChecked(
+    session: PairingSession,
+    submission: PairingSubmission,
+  ): PairingApplyResult {
+    while (true) {
+      if (!pairingActive(session)) return PairingApplyResult.Failed(PAIRING_CLOSED_MESSAGE)
+      val candidate = settingsMutationMutex.withLock {
+        ConfigMerge.merge(
+          submission,
+          currentTmdbKey = settings.tmdbApiKey.first(),
+          currentAddonUrls = settings.addonManifestUrls.first(),
+        )
+      }
+      if (pairingSession === session) {
+        _pairing.value = PairingState.Validating(candidate.addonUrls.size)
+      }
+
+      val probe = probeConfiguration(candidate.tmdbKey, candidate.addonUrls)
+      if (!pairingActive(session)) return PairingApplyResult.Failed(PAIRING_CLOSED_MESSAGE)
+      val validation = probe.pairingValidation()
+      val displayChecks = listOf(
+        PairingConnectionCheck("TMDB", validation.hasTmdbKey && validation.tmdbConnected),
+      ) + validation.addons
+      if (!validation.complete) {
+        val message = PairingValidationPolicy.failureMessage(validation)
+        if (pairingSession === session) {
+          _pairing.value = PairingState.ValidationFailed(message, displayChecks)
+        }
+        return PairingApplyResult.Failed(message)
+      }
+
+      // Values from a phone's blank field come from storage. If one changed while the network was
+      // being tested, discard this verdict and test the newly-merged candidate instead of saving
+      // an untested value or overwriting the viewer's newer Settings edit.
+      val committed = settingsMutationMutex.withLock {
+        if (!pairingActive(session)) return@withLock null
+        val latest = ConfigMerge.merge(
+          submission,
+          currentTmdbKey = settings.tmdbApiKey.first(),
+          currentAddonUrls = settings.addonManifestUrls.first(),
+        )
+        if (latest.tmdbKey != candidate.tmdbKey || latest.addonUrls != candidate.addonUrls) {
+          null
+        } else {
+          if (latest.changed) settings.setPairedConfiguration(latest.tmdbKey, latest.addonUrls)
+          latest
         }
       }
-    }.getOrElse {
-      PairingApplyResult.Failed("The TV could not save those settings. Please try again.")
+      if (committed == null) {
+        if (!pairingActive(session)) return PairingApplyResult.Failed(PAIRING_CLOSED_MESSAGE)
+        continue
+      }
+
+      // A stop that wins before the commit gate aborts the request. If the atomic DataStore edit
+      // has already begun, "Leave pairing" remains honest: it leaves the screen rather than
+      // promising that an accepted phone submission can be rolled back.
+      if (pairingSession === session) {
+        _pairing.value = PairingState.Received(
+          tmdbKeyChanged = committed.tmdbKeyChanged,
+          addonUrlsChanged = committed.addonUrlsChanged,
+          hasTmdbKey = committed.tmdbKey.isNotBlank(),
+          addonCount = committed.addonUrls.size,
+          checks = displayChecks,
+        )
+        // Use the just-received key: the exposed tmdbApiKey flow may not have caught up yet.
+        // loadRails mutates ViewModel-owned jobs, so hop back to the main-scoped coroutine.
+        viewModelScope.launch { loadRails(committed.tmdbKey, force = true) }
+      }
+      return PairingApplyResult.Saved(
+        PairingReceipt(
+          tmdbKeyChanged = committed.tmdbKeyChanged,
+          addonUrlsChanged = committed.addonUrlsChanged,
+          hasTmdbKey = committed.tmdbKey.isNotBlank(),
+          addonCount = committed.addonUrls.size,
+        ),
+      )
     }
+  }
 
   fun stopPairing() {
     shutdownPairing()
@@ -435,8 +528,13 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     persistenceScope.launch { runCatching { server.stop() } }
   }
 
+  private fun pairingActive(session: PairingSession): Boolean =
+    !session.stopped && pairingSession === session
+
   private companion object {
-    const val PAIRING_SAVE_TIMEOUT_MS = 10_000L
+    /** One shared HTTP call is capped at 40s; every source is probed in parallel. */
+    const val PAIRING_APPLY_TIMEOUT_MS = 50_000L
+    const val PAIRING_CLOSED_MESSAGE = "Pairing was closed before the settings could be saved."
   }
 
   private fun tmdb(): TmdbClient? = tmdbApiKey.value?.takeIf { it.isNotBlank() }?.let { TmdbClient(it) }
@@ -646,7 +744,9 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     // back through here and must actually retry.
     if (query == _searchQuery.value && _searchResults.value !is LoadState.Failed) return
     searchJob?.cancel()
+    searchPageJob?.cancel()
     _searchQuery.value = query
+    _searchPaging.value = SearchPageState()
     if (query.isBlank()) {
       _searchResults.value = LoadState.Ready(emptyList())
       return
@@ -660,11 +760,48 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     }
     _searchResults.value = LoadState.Loading
     searchJob = viewModelScope.launch {
-      val result: LoadState<List<MediaItem>> = catchingFailure {
-        LoadState.Ready(client.search(query))
-      }.getOrElse { LoadState.Failed(NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, it)) }
-      if (isActive && _searchQuery.value == query) _searchResults.value = result
+      val page = catchingFailure { client.searchPage(query) }
+      if (!isActive || _searchQuery.value != query) return@launch
+      page.onSuccess {
+        _searchResults.value = LoadState.Ready(it.items)
+        _searchPaging.value = SearchPaging.afterFirstPage(it)
+      }.onFailure {
+        _searchResults.value =
+          LoadState.Failed(NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, it))
+      }
     }
+  }
+
+  /** Appends one search page without replacing or reordering cards already under focus. */
+  fun loadNextSearchPage() {
+    val paging = _searchPaging.value
+    if (!SearchPaging.canLoad(paging) || searchPageJob?.isActive == true) return
+    val query = _searchQuery.value
+    if (_searchResults.value !is LoadState.Ready) return
+    val client = tmdb() ?: return
+    val requestedPage = paging.nextPage
+    _searchPaging.value = SearchPaging.begin(paging)
+    searchPageJob = viewModelScope.launch {
+      val page = catchingFailure { client.searchPage(query, requestedPage) }
+      if (!isActive || _searchQuery.value != query) return@launch
+      page.onSuccess {
+        val latest = (_searchResults.value as? LoadState.Ready)?.value ?: return@onSuccess
+        val merged = SearchPaging.merge(latest, it.items)
+        _searchResults.value = LoadState.Ready(merged)
+        _searchPaging.value = SearchPaging.afterPage(paging, it, merged.size)
+      }.onFailure {
+        _searchPaging.value = SearchPaging.failed(
+          paging,
+          NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, it),
+        )
+      }
+    }
+  }
+
+  /** Clears a paging failure only on a deliberate press, then retries the same page. */
+  fun retryNextSearchPage() {
+    _searchPaging.value = SearchPaging.retry(_searchPaging.value)
+    loadNextSearchPage()
   }
 
   /**
@@ -862,9 +999,10 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    * which is what a viewer who started the wrong thing is asking for.
    */
   fun forgetWatchEntry(entry: WatchEntry) {
+    val removedAtMs = System.currentTimeMillis()
     persistenceScope.launch {
       runCatching {
-        watchState.remove(entry.key)
+        watchState.remove(entry.key, removedAtMs)
         WatchNextSync.publish(getApplication(), force = true)
       }
     }
@@ -954,6 +1092,105 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
+  fun savePlaybackLanguages(
+    audioLanguage: String,
+    subtitleLanguage: String,
+    onResult: (PlayerPrefsMutationResult) -> Unit = {},
+  ) = mutatePlayerPrefs(onResult) {
+    playerPrefsStore.setLanguages(audioLanguage, subtitleLanguage)
+  }
+
+  fun setPlaybackSubtitleSize(
+    storageName: String,
+    onResult: (PlayerPrefsMutationResult) -> Unit = {},
+  ) = mutatePlayerPrefs(onResult) {
+    playerPrefsStore.setSubtitleSize(storageName)
+  }
+
+  fun setPlaybackAudioOutput(
+    storageName: String,
+    onResult: (PlayerPrefsMutationResult) -> Unit = {},
+  ) = mutatePlayerPrefs(onResult) {
+    playerPrefsStore.setAudioOutput(storageName)
+  }
+
+  fun setAutoPlayNext(
+    enabled: Boolean,
+    onResult: (PlayerPrefsMutationResult) -> Unit = {},
+  ) = mutatePlayerPrefs(onResult) {
+    playerPrefsStore.setAutoPlayNext(enabled)
+  }
+
+  fun setUpNextCountdownSeconds(
+    seconds: Int,
+    onResult: (PlayerPrefsMutationResult) -> Unit = {},
+  ) = mutatePlayerPrefs(onResult) {
+    playerPrefsStore.setUpNextCountdownSeconds(seconds)
+  }
+
+  fun resetPlaybackPreferences(
+    onResult: (PlayerPrefsMutationResult) -> Unit = {},
+  ) = mutatePlayerPrefs(onResult) {
+    playerPrefsStore.resetPlaybackPreferences()
+  }
+
+  /**
+   * Player preferences have their own DataStore and never wait behind a network settings probe.
+   * Their own mutex preserves press order, and returning the authoritative value prevents a fast
+   * second D-pad press from computing against a StateFlow emission that has not reached Compose yet.
+   */
+  private fun mutatePlayerPrefs(
+    onResult: (PlayerPrefsMutationResult) -> Unit,
+    mutation: suspend () -> Unit,
+  ) {
+    viewModelScope.launch {
+      val result = runCatching {
+        playerPrefsMutationMutex.withLock {
+          val before = playerPrefsStore.get()
+          mutation()
+          val after = playerPrefsStore.get()
+          PlayerPrefsMutationResult(
+            outcome = if (after == before) {
+              SettingsMutationResult.Unchanged
+            } else {
+              SettingsMutationResult.Changed
+            },
+            prefs = after,
+          )
+        }
+      }.getOrElse { PlayerPrefsMutationResult(SettingsMutationResult.Failed) }
+      onResult(result)
+    }
+  }
+
+  /** Runs the TMDB and every-addon checks concurrently for Settings and pairing alike. */
+  private suspend fun probeConfiguration(
+    tmdbKey: String,
+    addonUrls: List<String>,
+  ): ConfigurationProbe = coroutineScope {
+    val tmdbProbe = async {
+      if (tmdbKey.isBlank()) {
+        false
+      } else {
+        catchingFailure { TmdbClient(tmdbKey).probeCredentials() }.isSuccess
+      }
+    }
+    val labels = AddonList.labels(addonUrls)
+    val addonProbes = addonUrls.mapIndexed { index, url ->
+      async {
+        AddonProbe(
+          labels[index],
+          catchingFailure { addonClient.manifest(url) }.getOrNull()?.name,
+        )
+      }
+    }
+    ConfigurationProbe(
+      hasTmdbKey = tmdbKey.isNotBlank(),
+      tmdbConnected = tmdbProbe.await(),
+      addons = addonProbes.awaitAll(),
+    )
+  }
+
   fun saveSettings(
     tmdbKey: String,
     subtitlesBaseUrl: String,
@@ -986,23 +1223,9 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
         val kept = SettingsSaveGuard.keptNotice(resolved)
         onStatus(listOfNotNull(kept, "Saved. Checking connections...").joinToString("  "))
 
-        // Every addon at once, for the reason the stream loader does it: a viewer with
-        // four addons should not wait four timeouts to find out which one is broken.
-        val labels = AddonList.labels(resolved.addonUrls)
-        val probes = resolved.addonUrls.mapIndexed { index, url ->
-          async {
-            AddonProbe(
-              labels[index],
-              runCatching { addonClient.manifest(url) }.getOrNull()?.name,
-            )
-          }
-        }.awaitAll()
-
-        val tmdbConnected = resolved.tmdbKey.takeIf { it.isNotBlank() }?.let {
-          runCatching { TmdbClient(it).trending(MediaType.Movie) }.isSuccess
-        }
-        val status = SettingsStatus.tmdbStatus(resolved.tmdbKey, tmdbConnected) +
-          "   |   " + SettingsStatus.addonStatus(probes)
+        val probe = probeConfiguration(resolved.tmdbKey, resolved.addonUrls)
+        val status = SettingsStatus.tmdbStatus(resolved.tmdbKey, probe.tmdbConnected) +
+          "   |   " + SettingsStatus.addonStatus(probe.addons)
         onStatus(listOfNotNull(kept, status).joinToString("  "))
       } catch (cancelled: CancellationException) {
         throw cancelled

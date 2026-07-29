@@ -157,6 +157,7 @@ private fun UpdateReadyDialog(
   onLater: () -> Unit,
 ) {
   val confirmFocus = rememberInitialFocusTarget()
+  val readyTitle = stringResource(R.string.update_ready_title)
 
   Dialog(
     onDismissRequest = {
@@ -177,17 +178,20 @@ private fun UpdateReadyDialog(
     // The shared sheet: one width, one padding, one hairline, one entrance. This was a
     // hand-rolled Surface 20dp wider than the app's other dialog, carrying a byte-identical
     // copy of the comment explaining why a near-black sheet on a near-black page needs an edge.
-    NebulaDialogSurface(paneLabel = "Update ready") {
+    NebulaDialogSurface(paneLabel = readyTitle) {
       // The version is stated once, in the body, next to the one fact a viewer actually wants -
       // what they are upgrading from. The title used to repeat both the number and the readiness
       // in the line above.
-      Text("Update ready", style = MaterialTheme.typography.headlineSmall)
+      Text(readyTitle, style = MaterialTheme.typography.headlineSmall)
       Text(
         if (needsUnknownSourcesPermission) {
-          "Nebula $version is downloaded. Android needs your permission to let Nebula install " +
-            "apps - we'll open that setting, then come back here. You're on $currentVersionName."
+          stringResource(
+            R.string.update_ready_permission_body,
+            version,
+            currentVersionName,
+          )
         } else {
-          "Nebula $version is downloaded and ready. You're on $currentVersionName."
+          stringResource(R.string.update_ready_body, version, currentVersionName)
         },
         style = MaterialTheme.typography.bodyMedium,
         color = NebulaPalette.TextMuted,
@@ -215,10 +219,10 @@ private fun UpdateReadyDialog(
         NebulaButton(
           // Says that the button leaves the app, which "Enable installs" did not.
           text = when {
-            actionInProgress -> "Checking update..."
-            error != null && canCheckDownload -> "Check download"
-            needsUnknownSourcesPermission -> "Open Android settings"
-            else -> "Install"
+            actionInProgress -> stringResource(R.string.update_checking)
+            error != null && canCheckDownload -> stringResource(R.string.update_check_download)
+            needsUnknownSourcesPermission -> stringResource(R.string.update_open_android_settings)
+            else -> stringResource(R.string.update_install)
           },
           onClick = if (error != null && canCheckDownload) onCheckAgain else onConfirm,
           enabled = !actionInProgress,
@@ -226,7 +230,7 @@ private fun UpdateReadyDialog(
           modifier = Modifier.initialFocusTarget(confirmFocus),
         )
         NebulaButton(
-          text = "Later",
+          text = stringResource(R.string.update_later),
           onClick = onLater,
           style = NebulaButtonStyle.Ghost,
           enabled = !actionInProgress,

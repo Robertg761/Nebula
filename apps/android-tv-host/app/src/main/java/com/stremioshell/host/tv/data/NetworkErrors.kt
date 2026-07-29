@@ -16,7 +16,12 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
  * `api_key=<secret>` in their query string, and exception messages have a habit of ending up
  * rendered on screen. The full (redacted) URL goes to Logcat instead.
  */
-class HttpStatusException(val code: Int, val host: String) : IOException("HTTP $code from $host")
+class HttpStatusException(
+  val code: Int,
+  val host: String,
+  /** Parsed server backoff hint, when Retry-After was present and valid. */
+  val retryAfterSeconds: Long? = null,
+) : IOException("HTTP $code from $host")
 
 /** A successful endpoint returned more JSON than a TV should ever hold in memory. */
 class HttpResponseTooLargeException(val maxBytes: Long) :

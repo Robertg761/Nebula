@@ -26,12 +26,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Card
@@ -40,6 +45,7 @@ import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.stremioshell.host.tv.LoadState
+import com.stremioshell.host.R
 import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.data.addon.AddonStream
 import com.stremioshell.host.tv.data.addon.StreamAutoPick
@@ -105,7 +111,11 @@ fun StreamsScreen(
   // of the top of the list. Deliberately only preselected, never auto-played: the addon's
   // best row for *this* episode may well be better than a memory two episodes old, and a
   // list that played itself would take that choice away.
-  val list = (state as? LoadState.Ready)?.value.orEmpty()
+  val rawList = (state as? LoadState.Ready)?.value.orEmpty()
+  var filters by remember(screen) { mutableStateOf(StreamFilters()) }
+  var streamListFocusTick by remember(screen) { mutableIntStateOf(0) }
+  val sourceOptions = remember(rawList) { StreamFilterPolicy.sources(rawList) }
+  val list = remember(rawList, filters) { StreamFilterPolicy.apply(rawList, filters) }
   val memory = if (screen.season != null) remembered[screen.imdbId] else null
   val matched = remember(list, memory) {
     memory?.let { StreamAutoPick.pick(list, bingeGroup = null, remembered = it) }
@@ -135,7 +145,7 @@ fun StreamsScreen(
 
   RequestInitialFocus(
     target = firstStreamFocus,
-    key = state,
+    key = state to streamListFocusTick,
     label = "Streams first row",
     enabled = state is LoadState.Ready,
   )
@@ -196,17 +206,22 @@ fun StreamsScreen(
     } == true
     LoadStateContent(
       state,
-      loadingText = when {
-        addonCount > 1 -> "Asking $addonCount addons for streams..."
-        addonCount == 1 -> "Asking the addon for streams..."
-        else -> "Looking for configured addons..."
+      loadingText = if (addonCount > 0) {
+        pluralStringResource(
+          R.plurals.streams_loading_addons,
+          addonCount,
+          addonCount,
+        )
+      } else {
+        stringResource(R.string.streams_loading_no_addons)
       },
       onRetry = if (missingAddonFailure) {
         null
       } else {
         { viewModel.loadStreams(screen.imdbId, screen.season, screen.episode) }
       },
-      failureActionLabel = "Open Settings".takeIf { missingAddonFailure },
+      failureActionLabel = stringResource(R.string.action_open_settings)
+        .takeIf { missingAddonFailure },
       onFailureAction = onOpenSettings.takeIf { missingAddonFailure },
     ) { ready ->
       if (ready.isEmpty()) {
@@ -219,82 +234,132 @@ fun StreamsScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
           ) {
             EmptyState(
-              title = "No streams for this title",
+              title = stringResource(R.string.streams_empty_title),
               hint = if (addonCount > 1) {
-                "None of your addons returned anything playable."
+                stringResource(R.string.streams_empty_many_addons)
               } else {
-                "The addon returned nothing playable."
+                stringResource(R.string.streams_empty_one_addon)
               },
               // Not a magnifier: the viewer did not search for this, they pressed Play on Details.
               icon = Icons.Filled.Warning,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
               NebulaButton(
-                text = "Retry",
+                text = stringResource(R.string.action_retry),
                 onClick = { viewModel.loadStreams(screen.imdbId, screen.season, screen.episode) },
                 style = NebulaButtonStyle.Primary,
                 modifier = Modifier.initialFocusTarget(firstStreamFocus),
               )
               NebulaButton(
-                text = "Manage addons",
+                text = stringResource(R.string.action_manage_addons),
                 onClick = onOpenSettings,
                 style = NebulaButtonStyle.Secondary,
               )
-              NebulaButton(text = "Back", onClick = goBack, style = NebulaButtonStyle.Ghost)
+              NebulaButton(
+                text = stringResource(R.string.action_back),
+                onClick = goBack,
+                style = NebulaButtonStyle.Ghost,
+              )
             }
           }
         }
       } else {
-        // How many there are and what order they are in. Forty releases used to arrive as one
-        // undifferentiated column with nothing saying either, so a viewer holding Down had no idea
-        // how far through the list they were or why the top row was the top row.
+        // How many there are, what subset is visible and what order they are in. The raw merged
+        // list remains one "Show all" press away even when the conservative preset is active.
         Text(
-          text = StreamPresentation.summary(ready.size),
+          text = if (list.size == ready.size) {
+            pluralStringResource(
+              R.plurals.streams_release_count,
+              ready.size,
+              ready.size,
+            )
+          } else {
+            pluralStringResource(
+              R.plurals.streams_filtered_release_count,
+              ready.size,
+              list.size,
+              ready.size,
+            )
+          },
           style = MaterialTheme.typography.labelMedium,
           color = NebulaPalette.TextMuted,
           modifier = Modifier.padding(start = NebulaDimens.ScreenEdge, top = NebulaSpace.lg),
         )
-        LazyColumn(
-          state = listState,
-          verticalArrangement = Arrangement.spacedBy(NebulaSpace.sm),
-          contentPadding = PaddingValues(
-            start = NebulaDimens.ScreenEdge,
-            end = NebulaDimens.ScreenEdge,
-            top = NebulaSpace.sm,
-            bottom = 40.dp,
-          ),
-        ) {
-          // Debrid addons hand back the same resolved URL under several quality labels, and the
-          // addon client only drops blank URLs - so a url-only key throws "Key was already used"
-          // and takes the screen down. The position prefix keeps keys unique there while staying
-          // stable for recompositions of the same list.
-          itemsIndexed(
-            rows,
-            key = { position, row ->
+        StreamFilterControls(
+          filters = filters,
+          sources = sourceOptions,
+          onFiltersChanged = { next ->
+            filters = next
+          },
+          modifier = Modifier
+            .padding(horizontal = NebulaDimens.ScreenEdge, vertical = NebulaSpace.sm)
+            .fillMaxWidth(ROW_WIDTH_FRACTION),
+        )
+        if (list.isEmpty()) {
+          Column(
+            verticalArrangement = Arrangement.spacedBy(NebulaSpace.sm),
+            modifier = Modifier.padding(horizontal = NebulaDimens.ScreenEdge, vertical = NebulaSpace.lg),
+          ) {
+            Text(
+              stringResource(R.string.streams_no_filter_matches),
+              style = MaterialTheme.typography.bodyMedium,
+              color = NebulaPalette.TextMuted,
+            )
+            NebulaButton(
+              text = stringResource(R.string.streams_show_all_releases),
+              onClick = {
+                filters = StreamFilters.SHOW_ALL
+                // The button leaves composition as soon as releases return. Re-aim at the
+                // remembered release (or first row) instead of stranding focus on the old node.
+                streamListFocusTick++
+              },
+              style = NebulaButtonStyle.Primary,
+            )
+          }
+        } else {
+          LazyColumn(
+            state = listState,
+            verticalArrangement = Arrangement.spacedBy(NebulaSpace.sm),
+            contentPadding = PaddingValues(
+              start = NebulaDimens.ScreenEdge,
+              end = NebulaDimens.ScreenEdge,
+              top = NebulaSpace.sm,
+              bottom = 40.dp,
+            ),
+            modifier = Modifier.weight(1f),
+          ) {
+            // Debrid addons hand back the same resolved URL under several quality labels, and the
+            // addon client only drops blank URLs - so a url-only key throws "Key was already used"
+            // and takes the screen down. The position prefix keeps keys unique there while staying
+            // stable for recompositions of the same list.
+            itemsIndexed(
+              rows,
+              key = { position, row ->
+                when (row) {
+                  is StreamListItem.Tier -> "tier:$position:${row.label}"
+                  is StreamListItem.Release ->
+                    "row:$position:${row.stream.url ?: row.stream.label}"
+                }
+              },
+            ) { _, row ->
               when (row) {
-                is StreamListItem.Tier -> "tier:$position:${row.label}"
-                is StreamListItem.Release ->
-                  "row:$position:${row.stream.url ?: row.stream.label}"
+                // Carries no focusable, so the D-pad steps straight past it and the screen keeps
+                // every focus target it had.
+                is StreamListItem.Tier -> TierHeading(row)
+                is StreamListItem.Release -> StreamRow(
+                  stream = row.stream,
+                  quality = row.quality,
+                  lastUsed = matched != null && row.index == preselected,
+                  onClick = {
+                    // Recorded before the launch, and only for a series: this is the choice the
+                    // next episode's autoplay resolves against.
+                    if (screen.season != null) viewModel.rememberStreamPick(screen.imdbId, row.stream)
+                    onStreamClick(row.stream)
+                  },
+                  modifier = Modifier.fillMaxWidth(ROW_WIDTH_FRACTION)
+                    .initialFocusTarget(if (row.index == preselected) firstStreamFocus else null),
+                )
               }
-            },
-          ) { _, row ->
-            when (row) {
-              // Carries no focusable, so the D-pad steps straight past it and the screen keeps
-              // every focus target it had.
-              is StreamListItem.Tier -> TierHeading(row)
-              is StreamListItem.Release -> StreamRow(
-                stream = row.stream,
-                quality = row.quality,
-                lastUsed = matched != null && row.index == preselected,
-                onClick = {
-                  // Recorded before the launch, and only for a series: this is the choice the
-                  // next episode's autoplay resolves against.
-                  if (screen.season != null) viewModel.rememberStreamPick(screen.imdbId, row.stream)
-                  onStreamClick(row.stream)
-                },
-                modifier = Modifier.fillMaxWidth(ROW_WIDTH_FRACTION)
-                  .initialFocusTarget(if (row.index == preselected) firstStreamFocus else null),
-              )
             }
           }
         }
@@ -303,11 +368,191 @@ fun StreamsScreen(
   }
 }
 
+/**
+ * Six compact cycling controls instead of six rows of radio buttons. A TV remote can inspect and
+ * change every dimension with OK alone, while the release list still keeps most of the viewport.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun StreamFilterControls(
+  filters: StreamFilters,
+  sources: List<String>,
+  onFiltersChanged: (StreamFilters) -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  FlowRow(
+    horizontalArrangement = Arrangement.spacedBy(NebulaSpace.xs),
+    verticalArrangement = Arrangement.spacedBy(NebulaSpace.xs),
+    modifier = modifier,
+  ) {
+    StreamFilterButton(
+      label = stringResource(
+        R.string.streams_filter_view,
+        filters.viewMode.localizedLabel(),
+      ),
+      active = filters.viewMode == StreamViewMode.Recommended,
+      onClick = {
+        onFiltersChanged(
+          filters.copy(viewMode = nextValue(filters.viewMode, StreamViewMode.entries)),
+        )
+      },
+    )
+    StreamFilterButton(
+      label = stringResource(
+        R.string.streams_filter_availability,
+        filters.availability.localizedLabel(),
+      ),
+      active = filters.availability != StreamAvailability.Any,
+      onClick = {
+        onFiltersChanged(
+          filters.copy(
+            availability = nextValue(filters.availability, StreamAvailability.entries),
+          ),
+        )
+      },
+    )
+    StreamFilterButton(
+      label = stringResource(
+        R.string.streams_filter_range,
+        filters.dynamicRange.localizedLabel(),
+      ),
+      active = filters.dynamicRange != StreamDynamicRange.Any,
+      onClick = {
+        onFiltersChanged(
+          filters.copy(
+            dynamicRange = nextValue(filters.dynamicRange, StreamDynamicRange.entries),
+          ),
+        )
+      },
+    )
+    StreamFilterButton(
+      label = stringResource(
+        R.string.streams_filter_resolution,
+        filters.resolution.localizedLabel(),
+      ),
+      active = filters.resolution != StreamResolution.Any,
+      onClick = {
+        onFiltersChanged(
+          filters.copy(resolution = nextValue(filters.resolution, StreamResolution.entries)),
+        )
+      },
+    )
+    if (sources.isNotEmpty()) {
+      val sourceChoices = listOf<String?>(null) + sources
+      StreamFilterButton(
+        label = stringResource(
+          R.string.streams_filter_source,
+          filters.source ?: stringResource(R.string.streams_filter_any),
+        ),
+        active = filters.source != null,
+        onClick = {
+          onFiltersChanged(filters.copy(source = nextValue(filters.source, sourceChoices)))
+        },
+      )
+    }
+    StreamFilterButton(
+      label = stringResource(
+        R.string.streams_filter_size,
+        filters.sizeLimit.localizedLabel(),
+      ),
+      active = filters.sizeLimit != StreamSizeLimit.Any,
+      onClick = {
+        onFiltersChanged(
+          filters.copy(sizeLimit = nextValue(filters.sizeLimit, StreamSizeLimit.entries)),
+        )
+      },
+    )
+    StreamFilterButton(
+      label = stringResource(R.string.streams_filter_show_all),
+      active = filters == StreamFilters.SHOW_ALL,
+      onClick = { onFiltersChanged(StreamFilters.SHOW_ALL) },
+    )
+  }
+}
+
+@Composable
+private fun StreamFilterButton(
+  label: String,
+  active: Boolean,
+  onClick: () -> Unit,
+) {
+  Card(
+    onClick = onClick,
+    colors = CardDefaults.colors(
+      containerColor = if (active) NebulaPalette.AccentPlate else NebulaPalette.SurfaceVariant,
+      contentColor = if (active) NebulaPalette.VioletBright else NebulaPalette.TextHigh,
+      focusedContainerColor =
+      if (active) NebulaPalette.AccentPlateStrong else NebulaPalette.SurfaceRaised,
+      focusedContentColor = NebulaPalette.TextHigh,
+    ),
+    shape = CardDefaults.shape(shape = NebulaShapes.small),
+    border = nebulaCardBorder(NebulaShapes.small),
+    glow = nebulaCardGlow(),
+    scale = CardDefaults.scale(focusedScale = NebulaDimens.FocusScaleWide),
+    modifier = Modifier.semantics { selected = active },
+  ) {
+    Text(
+      label,
+      style = MaterialTheme.typography.labelMedium,
+      maxLines = 1,
+      modifier = Modifier.padding(horizontal = NebulaSpace.sm, vertical = NebulaSpace.xs),
+    )
+  }
+}
+
+private fun <T> nextValue(current: T, choices: List<T>): T {
+  if (choices.isEmpty()) return current
+  val index = choices.indexOf(current)
+  return choices[(index + 1).mod(choices.size)]
+}
+
+@Composable
+private fun StreamViewMode.localizedLabel(): String = when (this) {
+  StreamViewMode.Recommended -> stringResource(R.string.streams_filter_recommended)
+  StreamViewMode.All -> stringResource(R.string.streams_filter_all)
+}
+
+@Composable
+private fun StreamAvailability.localizedLabel(): String = when (this) {
+  StreamAvailability.Any -> stringResource(R.string.streams_filter_any)
+  StreamAvailability.Instant -> stringResource(R.string.streams_filter_instant)
+}
+
+@Composable
+private fun StreamDynamicRange.localizedLabel(): String = when (this) {
+  StreamDynamicRange.Any -> stringResource(R.string.streams_filter_any)
+  // Free-text addon metadata cannot prove SDR; it can only prove that no HDR/DV tag was found.
+  StreamDynamicRange.Sdr -> stringResource(R.string.streams_filter_unmarked_range)
+  StreamDynamicRange.Hdr -> "HDR"
+  StreamDynamicRange.DolbyVision -> "DV"
+}
+
+@Composable
+private fun StreamResolution.localizedLabel(): String = when (this) {
+  StreamResolution.Any -> stringResource(R.string.streams_filter_any)
+  StreamResolution.Uhd -> "4K"
+  StreamResolution.FullHd -> "1080p"
+  StreamResolution.Hd -> "720p"
+  StreamResolution.Sd -> "SD"
+  StreamResolution.Unknown -> stringResource(R.string.streams_filter_other)
+}
+
+@Composable
+private fun StreamSizeLimit.localizedLabel(): String = when (this) {
+  StreamSizeLimit.Any -> stringResource(R.string.streams_filter_any)
+  else -> label
+}
+
 /** Where one resolution tier starts, and how many releases are in it. */
 @Composable
 private fun TierHeading(tier: StreamListItem.Tier) {
   Text(
-    text = "${tier.label} • ${tier.count}",
+    text = pluralStringResource(
+      R.plurals.streams_tier_count,
+      tier.count,
+      tier.label,
+      tier.count,
+    ),
     style = MaterialTheme.typography.labelLarge,
     color = NebulaPalette.TextMuted,
     modifier = Modifier.padding(top = NebulaSpace.xs, start = NebulaSpace.xxs),
@@ -420,7 +665,9 @@ private fun StreamRow(
             // "Already on the debrid server", i.e. it starts now instead of downloading first -
             // the single strongest reason to pick one row over another, and until now it was
             // thrown away with the addon branding it was hidden inside.
-            if (text.cached) NebulaBadge("Instant", tone = BadgeTone.Good)
+            if (text.cached) {
+              NebulaBadge(stringResource(R.string.streams_badge_instant), tone = BadgeTone.Good)
+            }
             if (quality.dolbyVision) NebulaBadge("DV", tone = BadgeTone.Accent)
             if (quality.hdr) NebulaBadge("HDR", tone = BadgeTone.Accent)
             text.releaseType?.let { NebulaBadge(it, tone = BadgeTone.Neutral) }
@@ -432,7 +679,9 @@ private fun StreamRow(
             }
             // Sentence case, and last: it was the only lowercase, multi-word pill in a run of
             // uppercase acronyms set in a face tuned for short caps-style strings.
-            if (lastUsed) NebulaBadge("Last used", tone = BadgeTone.Accent)
+            if (lastUsed) {
+              NebulaBadge(stringResource(R.string.streams_badge_last_used), tone = BadgeTone.Accent)
+            }
           }
         }
         if (text.detail.isNotEmpty()) {

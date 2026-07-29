@@ -65,11 +65,11 @@ android {
 
   buildTypes {
     debug {
-      // The dev/CI emulators are x86_64 (and libmpv ships no 32-bit x86 that a
-      // TV emulator image would ever load), so debug keeps x86_64 on top of the
-      // shipping ABIs.
+      // Android's API 26/34 TV system images are x86, while local generic
+      // emulators are commonly x86_64. libmpv 0.4.1 ships both, so debug keeps
+      // both emulator ABIs on top of the two shipping ABIs.
       ndk {
-        abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
       }
       manifestPlaceholders["usesCleartextTraffic"] = "true"
     }
@@ -109,6 +109,22 @@ android {
 
   composeOptions {
     kotlinCompilerExtensionVersion = "1.5.14"
+  }
+
+  lint {
+    // Existing reviewed warnings live in source control. New warning classes
+    // fail CI instead of silently growing the baseline.
+    baseline = file("lint-baseline.xml")
+    warningsAsErrors = true
+    checkReleaseBuilds = true
+    // Dependency freshness is enforced by Dependabot and lockfiles. Lint's
+    // online "latest" result changes without a source change and is therefore
+    // unsuitable as a deterministic build failure.
+    disable += "GradleDependency"
+  }
+
+  testOptions {
+    animationsDisabled = true
   }
 }
 
@@ -168,4 +184,5 @@ dependencies {
   androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
   androidTestImplementation("androidx.test:runner:1.6.2")
   androidTestImplementation("androidx.test:rules:1.6.1")
+  androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
 }

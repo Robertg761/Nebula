@@ -19,7 +19,12 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
-private val Context.tvDataStore by preferencesDataStore(name = "tv_app")
+private const val TV_STORE_NAME = "tv_app"
+
+private val Context.tvDataStore by preferencesDataStore(
+  name = TV_STORE_NAME,
+  corruptionHandler = preferencesCorruptionHandler(TV_STORE_NAME),
+)
 
 /**
  * Scope for writes that must outlive the screen that started them. Saving the
@@ -31,8 +36,10 @@ val persistenceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 /** User configuration for the native TV app. */
 class SettingsStore(private val context: Context) {
   private val json = Json { ignoreUnknownKeys = true }
+  private val store = context.tvDataStore
+  private val data = store.recoveringData(TV_STORE_NAME)
 
-  val tmdbApiKey: Flow<String> = context.tvDataStore.data.map { it[KEY_TMDB] .orEmpty() }
+  val tmdbApiKey: Flow<String> = data.map { it[KEY_TMDB].orEmpty() }
 
   /**
    * Every stream addon, in the viewer's own order.
@@ -43,7 +50,7 @@ class SettingsStore(private val context: Context) {
    * than rewritten: nothing reads it once the list key exists, and leaving it makes
    * a downgrade survivable.
    */
-  val addonManifestUrls: Flow<List<String>> = context.tvDataStore.data.map { prefs ->
+  val addonManifestUrls: Flow<List<String>> = data.map { prefs ->
     AddonList.migrated(decodeUrls(prefs[KEY_ADDONS]), prefs[KEY_ADDON].orEmpty())
   }
 
@@ -58,16 +65,16 @@ class SettingsStore(private val context: Context) {
    * community server with no account behind it, and a viewer whose language it
    * covers badly has nowhere else to point.
    */
-  val subtitlesBaseUrl: Flow<String> = context.tvDataStore.data.map { prefs ->
+  val subtitlesBaseUrl: Flow<String> = data.map { prefs ->
     prefs[KEY_SUBTITLES]?.trim()?.ifBlank { null } ?: SubtitlesClient.OPENSUBTITLES_V3_BASE
   }
 
   suspend fun setTmdbApiKey(value: String) {
-    context.tvDataStore.edit { it[KEY_TMDB] = value.trim() }
+    store.edit { it[KEY_TMDB] = value.trim() }
   }
 
   suspend fun setAddonManifestUrls(urls: List<String>) {
-    context.tvDataStore.edit { it[KEY_ADDONS] = json.encodeToString(AddonList.sanitized(urls)) }
+    store.edit { it[KEY_ADDONS] = json.encodeToString(AddonList.sanitized(urls)) }
   }
 
   /**
@@ -77,7 +84,7 @@ class SettingsStore(private val context: Context) {
    * merged values, including whichever stored half the phone deliberately left blank.
    */
   suspend fun setPairedConfiguration(tmdbKey: String, addonUrls: List<String>) {
-    context.tvDataStore.edit { prefs ->
+    store.edit { prefs ->
       prefs[KEY_TMDB] = tmdbKey.trim()
       prefs[KEY_ADDONS] = json.encodeToString(AddonList.sanitized(addonUrls))
     }
@@ -89,7 +96,7 @@ class SettingsStore(private val context: Context) {
     addonUrls: List<String>,
     subtitlesBaseUrl: String,
   ) {
-    context.tvDataStore.edit { prefs ->
+    store.edit { prefs ->
       prefs[KEY_TMDB] = tmdbKey.trim()
       prefs[KEY_ADDONS] = json.encodeToString(AddonList.sanitized(addonUrls))
       prefs[KEY_SUBTITLES] = subtitlesBaseUrl.trim()
@@ -98,7 +105,7 @@ class SettingsStore(private val context: Context) {
 
   /** Replaces the first addon, leaving any others alone. See [AddonList.replacingFirst]. */
   suspend fun setAddonManifestUrl(value: String) {
-    context.tvDataStore.edit { prefs ->
+    store.edit { prefs ->
       val current = AddonList.migrated(decodeUrls(prefs[KEY_ADDONS]), prefs[KEY_ADDON].orEmpty())
       prefs[KEY_ADDONS] = json.encodeToString(AddonList.replacingFirst(current, value))
     }
@@ -106,7 +113,7 @@ class SettingsStore(private val context: Context) {
 
   /** Blank resets to [SubtitlesClient.OPENSUBTITLES_V3_BASE]. */
   suspend fun setSubtitlesBaseUrl(value: String) {
-    context.tvDataStore.edit { it[KEY_SUBTITLES] = value.trim() }
+    store.edit { it[KEY_SUBTITLES] = value.trim() }
   }
 
   /**
@@ -167,6 +174,13 @@ data class WatchEntry(
     }
 }
 
+/** Bounded deletion marker preventing a delayed player save from resurrecting a removed row. */
+@Serializable
+private data class WatchRemoval(
+  val key: String,
+  val removedAtMs: Long,
+)
+
 /**
  * Resume positions, watched history and the Continue Watching rail, newest first.
  *
@@ -177,19 +191,30 @@ data class WatchEntry(
  */
 class WatchStateStore(private val context: Context) {
   private val json = Json { ignoreUnknownKeys = true }
+  private val store = context.tvDataStore
+  private val data = store.recoveringData(TV_STORE_NAME)
 
-  val entries: Flow<List<WatchEntry>> = context.tvDataStore.data.map { prefs ->
+  val entries: Flow<List<WatchEntry>> = data.map { prefs ->
     decode(prefs[KEY_WATCH]).sortedByDescending { it.updatedAtMs }
   }
 
   suspend fun get(key: String): WatchEntry? {
-    return decode(context.tvDataStore.data.first()[KEY_WATCH]).firstOrNull { it.key == key }
+    return decode(data.first()[KEY_WATCH]).firstOrNull { it.key == key }
   }
 
   suspend fun upsert(entry: WatchEntry) {
-    context.tvDataStore.edit { prefs ->
-      val rest = decode(prefs[KEY_WATCH]).filterNot { it.key == entry.key }
+    store.edit { prefs ->
+      val stored = decode(prefs[KEY_WATCH])
+      val existing = stored.firstOrNull { it.key == entry.key }
+      if (!PersistenceOrdering.accepts(existing?.updatedAtMs, entry.updatedAtMs)) return@edit
+      val removals = decodeRemovals(prefs[KEY_WATCH_REMOVALS])
+      val removedAt = removals.firstOrNull { it.key == entry.key }?.removedAtMs
+      if (!PersistenceOrdering.acceptsAfterRemoval(removedAt, entry.updatedAtMs)) return@edit
+      val rest = stored.filterNot { it.key == entry.key }
       prefs[KEY_WATCH] = json.encodeToString(WatchStateRetention.prune(rest + entry))
+      if (removedAt != null) {
+        prefs[KEY_WATCH_REMOVALS] = json.encodeToString(removals.filterNot { it.key == entry.key })
+      }
     }
   }
 
@@ -199,10 +224,16 @@ class WatchStateStore(private val context: Context) {
    * in it (a re-watch that stopped part-way through episode 4).
    */
   suspend fun upsertIfAbsent(entry: WatchEntry) {
-    context.tvDataStore.edit { prefs ->
+    store.edit { prefs ->
       val stored = decode(prefs[KEY_WATCH])
       if (stored.any { it.key == entry.key }) return@edit
+      val removals = decodeRemovals(prefs[KEY_WATCH_REMOVALS])
+      val removedAt = removals.firstOrNull { it.key == entry.key }?.removedAtMs
+      if (!PersistenceOrdering.acceptsAfterRemoval(removedAt, entry.updatedAtMs)) return@edit
       prefs[KEY_WATCH] = json.encodeToString(WatchStateRetention.prune(stored + entry))
+      if (removedAt != null) {
+        prefs[KEY_WATCH_REMOVALS] = json.encodeToString(removals.filterNot { it.key == entry.key })
+      }
     }
   }
 
@@ -212,9 +243,10 @@ class WatchStateStore(private val context: Context) {
    * and inventing an entry from a key alone would produce one with no title.
    */
   suspend fun markWatched(key: String, watchedAtMs: Long) {
-    context.tvDataStore.edit { prefs ->
+    store.edit { prefs ->
       val stored = decode(prefs[KEY_WATCH])
       val entry = stored.firstOrNull { it.key == key } ?: return@edit
+      if (!PersistenceOrdering.accepts(entry.updatedAtMs, watchedAtMs)) return@edit
       val marked = entry.copy(positionMs = 0, updatedAtMs = watchedAtMs, watchedAtMs = watchedAtMs)
       prefs[KEY_WATCH] = json.encodeToString(
         WatchStateRetention.prune(stored.filterNot { it.key == key } + marked),
@@ -222,9 +254,23 @@ class WatchStateStore(private val context: Context) {
     }
   }
 
-  suspend fun remove(key: String) {
-    context.tvDataStore.edit { prefs ->
-      prefs[KEY_WATCH] = json.encodeToString(decode(prefs[KEY_WATCH]).filterNot { it.key == key })
+  suspend fun remove(key: String, removedAtMs: Long = System.currentTimeMillis()) {
+    store.edit { prefs ->
+      val stored = decode(prefs[KEY_WATCH])
+      val existing = stored.firstOrNull { it.key == key }
+      if (existing != null && existing.updatedAtMs > removedAtMs) return@edit
+      prefs[KEY_WATCH] = json.encodeToString(stored.filterNot { it.key == key })
+      val storedRemovals = decodeRemovals(prefs[KEY_WATCH_REMOVALS])
+      val effectiveRemovedAtMs = PersistenceOrdering.latestRemoval(
+        existingRemovedAtMs = storedRemovals.firstOrNull { it.key == key }?.removedAtMs,
+        incomingRemovedAtMs = removedAtMs,
+      )
+      val removals = storedRemovals
+        .filterNot { it.key == key }
+        .plus(WatchRemoval(key, effectiveRemovedAtMs))
+        .sortedByDescending { it.removedAtMs }
+        .take(MAX_WATCH_REMOVALS)
+      prefs[KEY_WATCH_REMOVALS] = json.encodeToString(removals)
     }
   }
 
@@ -233,8 +279,16 @@ class WatchStateStore(private val context: Context) {
     return runCatching { json.decodeFromString<List<WatchEntry>>(raw) }.getOrDefault(emptyList())
   }
 
+  private fun decodeRemovals(raw: String?): List<WatchRemoval> {
+    if (raw.isNullOrBlank()) return emptyList()
+    return runCatching { json.decodeFromString<List<WatchRemoval>>(raw) }
+      .getOrDefault(emptyList())
+  }
+
   private companion object {
     val KEY_WATCH = stringPreferencesKey("watch_state")
+    val KEY_WATCH_REMOVALS = stringPreferencesKey("watch_state_removals")
+    const val MAX_WATCH_REMOVALS = 200
   }
 }
 
@@ -299,8 +353,10 @@ data class WatchlistEntry(
 /** "My List": titles saved for later, newest first. */
 class WatchlistStore(private val context: Context) {
   private val json = Json { ignoreUnknownKeys = true }
+  private val store = context.tvDataStore
+  private val data = store.recoveringData(TV_STORE_NAME)
 
-  val entries: Flow<List<WatchlistEntry>> = context.tvDataStore.data.map { prefs ->
+  val entries: Flow<List<WatchlistEntry>> = data.map { prefs ->
     WatchlistRetention.ordered(decode(prefs[KEY_LIST]))
   }
 
@@ -309,14 +365,14 @@ class WatchlistStore(private val context: Context) {
    * membership value that has already changed underneath it.
    */
   suspend fun toggle(entry: WatchlistEntry) {
-    context.tvDataStore.edit { prefs ->
+    store.edit { prefs ->
       val next = WatchlistRetention.toggled(decode(prefs[KEY_LIST]), entry)
       prefs[KEY_LIST] = json.encodeToString(next)
     }
   }
 
   suspend fun remove(key: String) {
-    context.tvDataStore.edit { prefs ->
+    store.edit { prefs ->
       prefs[KEY_LIST] = json.encodeToString(WatchlistRetention.remove(decode(prefs[KEY_LIST]), key))
     }
   }
@@ -341,18 +397,23 @@ class WatchlistStore(private val context: Context) {
  */
 class StreamPickStore(private val context: Context) {
   private val json = Json { ignoreUnknownKeys = true }
+  private val store = context.tvDataStore
+  private val data = store.recoveringData(TV_STORE_NAME)
 
-  val selections: Flow<Map<String, StreamSelection>> = context.tvDataStore.data.map { prefs ->
+  val selections: Flow<Map<String, StreamSelection>> = data.map { prefs ->
     decode(prefs[KEY_PICKS]).associateBy { it.seriesId }
   }
 
   suspend fun get(seriesId: String): StreamSelection? {
-    return decode(context.tvDataStore.data.first()[KEY_PICKS]).firstOrNull { it.seriesId == seriesId }
+    return decode(data.first()[KEY_PICKS]).firstOrNull { it.seriesId == seriesId }
   }
 
   suspend fun remember(selection: StreamSelection) {
-    context.tvDataStore.edit { prefs ->
-      val rest = decode(prefs[KEY_PICKS]).filterNot { it.seriesId == selection.seriesId }
+    store.edit { prefs ->
+      val stored = decode(prefs[KEY_PICKS])
+      val existing = stored.firstOrNull { it.seriesId == selection.seriesId }
+      if (!PersistenceOrdering.accepts(existing?.updatedAtMs, selection.updatedAtMs)) return@edit
+      val rest = stored.filterNot { it.seriesId == selection.seriesId }
       val next = (rest + selection).sortedByDescending { it.updatedAtMs }.take(MAX_SERIES)
       prefs[KEY_PICKS] = json.encodeToString(next)
     }

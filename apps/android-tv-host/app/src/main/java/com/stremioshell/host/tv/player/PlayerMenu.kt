@@ -46,6 +46,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
@@ -57,18 +59,20 @@ import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.stremioshell.host.R
 import com.stremioshell.host.tv.ui.EmptyState
 import com.stremioshell.host.tv.ui.theme.NebulaDimens
 import com.stremioshell.host.tv.ui.theme.NebulaMotion
 import com.stremioshell.host.tv.ui.theme.NebulaPalette
 import com.stremioshell.host.tv.ui.theme.NebulaShapes
 import com.stremioshell.host.tv.ui.theme.NebulaSpace
+import java.util.Locale
 
 /** The menu's three sections. */
-enum class PlayerMenuTab(val label: String) {
-  Audio("Audio"),
-  Subtitles("Subtitles"),
-  Options("Options"),
+enum class PlayerMenuTab {
+  Audio,
+  Subtitles,
+  Options,
 }
 
 /** Everything the menu renders, so the composable itself holds no playback state. */
@@ -185,7 +189,7 @@ fun BoxScope.PlayerMenu(state: PlayerMenuState, actions: PlayerMenuActions) {
       ) {
         PlayerMenuTab.entries.forEach { tab ->
           TabButton(
-            tab = tab,
+            label = localizedPlayerMenuTab(tab),
             active = tab == state.tab,
             onFocused = { actions.onTab(tab) },
             modifier = Modifier
@@ -199,8 +203,8 @@ fun BoxScope.PlayerMenu(state: PlayerMenuState, actions: PlayerMenuActions) {
         when (state.tab) {
           PlayerMenuTab.Audio -> TrackSection(
             rows = state.audioRows,
-            emptyTitle = "No audio tracks",
-            emptyHint = "This release has no selectable audio.",
+            emptyTitle = stringResource(R.string.player_menu_no_audio_tracks),
+            emptyHint = stringResource(R.string.player_menu_no_audio_tracks_hint),
             focusRequester = contentFocus,
             onSelect = { row -> row.trackId?.let(actions.onSelectAudio) },
           )
@@ -226,9 +230,17 @@ fun BoxScope.PlayerMenu(state: PlayerMenuState, actions: PlayerMenuActions) {
       // no line, and BACK is the one mapping a viewer cannot guess.
       Text(
         if (state.tab == PlayerMenuTab.Options) {
-          "LEFT/RIGHT chooses −/+   |   OK adjusts   |   BACK closes"
+          stringResource(
+            R.string.player_menu_options_controls_hint,
+            stringResource(R.string.player_key_left_right),
+            stringResource(R.string.player_key_ok),
+            stringResource(R.string.player_key_back),
+          )
         } else {
-          "BACK closes"
+          stringResource(
+            R.string.player_menu_back_closes,
+            stringResource(R.string.player_key_back),
+          )
         },
         modifier = Modifier.padding(top = NebulaSpace.sm),
         color = NebulaPalette.TextFaint,
@@ -266,8 +278,163 @@ fun BoxScope.PlayerMenu(state: PlayerMenuState, actions: PlayerMenuActions) {
 }
 
 @Composable
+private fun localizedPlayerMenuTab(tab: PlayerMenuTab): String = stringResource(
+  when (tab) {
+    PlayerMenuTab.Audio -> R.string.player_menu_tab_audio
+    PlayerMenuTab.Subtitles -> R.string.player_menu_tab_subtitles
+    PlayerMenuTab.Options -> R.string.player_menu_tab_options
+  },
+)
+
+private data class LocalizedExternalSubtitlesAction(
+  val label: String,
+  val detail: String,
+  val enabled: Boolean,
+)
+
+/**
+ * The pure subtitle policy keeps testable fallback wording; the Android boundary owns what is
+ * actually rendered so translations never become protocol or filtering dependencies.
+ */
+@Composable
+private fun localizedExternalSubtitlesAction(
+  state: ExternalSubtitlesState,
+): LocalizedExternalSubtitlesAction? {
+  val enabled = ExternalSubtitles.action(state)?.enabled ?: return null
+  val source = stringResource(R.string.player_menu_opensubtitles)
+  return when (state) {
+    ExternalSubtitlesState.Unavailable -> null
+    ExternalSubtitlesState.Idle -> LocalizedExternalSubtitlesAction(
+      label = stringResource(R.string.player_menu_search_online_subtitles),
+      detail = source,
+      enabled = enabled,
+    )
+    ExternalSubtitlesState.Loading -> LocalizedExternalSubtitlesAction(
+      label = stringResource(R.string.player_menu_searching_subtitles),
+      detail = "",
+      enabled = enabled,
+    )
+    ExternalSubtitlesState.Failed -> LocalizedExternalSubtitlesAction(
+      label = stringResource(R.string.player_menu_subtitle_search_failed),
+      detail = stringResource(
+        R.string.player_menu_ok_tries_again,
+        stringResource(R.string.player_key_ok),
+      ),
+      enabled = enabled,
+    )
+    is ExternalSubtitlesState.Ready -> if (state.options.isEmpty()) {
+      LocalizedExternalSubtitlesAction(
+        label = stringResource(R.string.player_menu_no_subtitles_found),
+        detail = stringResource(
+          R.string.player_menu_ok_searches_again,
+          stringResource(R.string.player_key_ok),
+        ),
+        enabled = enabled,
+      )
+    } else {
+      LocalizedExternalSubtitlesAction(
+        label = stringResource(R.string.player_menu_search_again),
+        detail = source,
+        enabled = enabled,
+      )
+    }
+  }
+}
+
+@Composable
+private fun localizedExternalSubtitleOption(
+  option: ExternalSubtitleOption,
+): ExternalSubtitleOption {
+  val label = localizedLanguageName(option.lang, option.label)
+  if (option.source != ExternalSubtitleSource.Online) return option.copy(label = label)
+  val total = option.total.coerceAtLeast(1)
+  val ordinal = option.ordinal.coerceIn(1, total)
+  return option.copy(
+    label = label,
+    detail = pluralStringResource(
+      R.plurals.player_menu_online_subtitle_position,
+      total,
+      ordinal,
+      total,
+    ),
+    trackTitle = if (total == 1) {
+      stringResource(R.string.player_menu_online_track_title)
+    } else {
+      stringResource(R.string.player_menu_online_track_title_numbered, ordinal)
+    },
+  )
+}
+
+@Composable
+private fun localizedTrackLabel(row: TrackRow): String {
+  val track = row.track ?: return stringResource(R.string.player_menu_subtitles_off)
+  val sourceLanguage = LanguageNames.display(track.lang)
+  val language = if (LanguageCodes.normalize(track.lang).isBlank()) {
+    ""
+  } else {
+    localizedLanguageName(track.lang, sourceLanguage)
+  }
+  val title = track.title.trim()
+    .takeIf { it.isNotEmpty() && !it.equals(sourceLanguage, ignoreCase = true) }
+  val label = listOfNotNull(language.ifBlank { null }, title)
+    .joinToString(" - ")
+  return if (label.isBlank()) {
+    stringResource(R.string.player_menu_track_number, track.id)
+  } else {
+    label
+  }
+}
+
+@Composable
+private fun localizedTrackDetail(row: TrackRow): String {
+  if (row.track == null || row.detail.isBlank()) return row.detail
+  val localizedParts = mapOf(
+    "Default" to stringResource(R.string.player_menu_track_default),
+    "Forced" to stringResource(R.string.player_menu_track_forced),
+    "External" to stringResource(R.string.player_menu_track_external),
+    "Audio description" to stringResource(R.string.player_menu_audio_description),
+    "Visual impaired" to stringResource(R.string.player_menu_visual_impaired),
+    "SDH" to stringResource(R.string.player_menu_sdh),
+    "Hearing impaired" to stringResource(R.string.player_menu_hearing_impaired),
+  )
+  return row.detail.split(TRACK_DETAIL_SEPARATOR)
+    .joinToString(TRACK_DETAIL_SEPARATOR) { detail ->
+      detail.split(TRACK_ACCESSIBILITY_SEPARATOR)
+        .joinToString(TRACK_ACCESSIBILITY_SEPARATOR) { part -> localizedParts[part] ?: part }
+    }
+}
+
+@Composable
+private fun localizedLanguageName(code: String, fallback: String): String {
+  val normalized = LanguageCodes.normalize(code)
+  if (normalized.isBlank()) return stringResource(R.string.player_unknown_language)
+  val localized = Locale.forLanguageTag(normalized).getDisplayLanguage(Locale.getDefault()).trim()
+  return localized.takeUnless {
+    it.isBlank() || it.equals(normalized, ignoreCase = true)
+  } ?: fallback
+}
+
+@Composable
+private fun localizedSubtitleSize(size: SubtitleSize): String = stringResource(
+  when (size) {
+    SubtitleSize.Small -> R.string.player_menu_subtitle_size_small
+    SubtitleSize.Medium -> R.string.player_menu_subtitle_size_medium
+    SubtitleSize.Large -> R.string.player_menu_subtitle_size_large
+    SubtitleSize.Huge -> R.string.player_menu_subtitle_size_huge
+  },
+)
+
+@Composable
+private fun localizedAudioOutput(output: AudioOutputMode): String = stringResource(
+  when (output) {
+    AudioOutputMode.Decode -> R.string.player_menu_audio_output_decode
+    AudioOutputMode.Passthrough -> R.string.player_menu_audio_output_passthrough
+  },
+)
+
+@Composable
 private fun TabButton(
-  tab: PlayerMenuTab,
+  label: String,
   active: Boolean,
   onFocused: () -> Unit,
   modifier: Modifier = Modifier,
@@ -306,7 +473,7 @@ private fun TabButton(
     contentAlignment = Alignment.Center,
   ) {
     Text(
-      tab.label,
+      label,
       color = when {
         focused -> NebulaPalette.OnAccent
         active -> NebulaPalette.TextHigh
@@ -345,8 +512,8 @@ private fun TrackSection(
   LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(ROW_GAP)) {
     itemsIndexed(rows, key = { _, row -> row.trackId ?: OFF_ROW_KEY }) { index, row ->
       LabelledRow(
-        label = row.label,
-        detail = row.detail,
+        label = localizedTrackLabel(row),
+        detail = localizedTrackDetail(row),
         selected = row.selected,
         onClick = { onSelect(row) },
         modifier = if (index == focusIndex) Modifier.focusRequester(focusRequester) else Modifier,
@@ -378,11 +545,12 @@ private fun SubtitleSection(
   // As in [TrackSection]: the row the focus request aims at has to have been
   // composed, and a lazy list only composes what is visible.
   val listState = rememberLazyListState(initialFirstVisibleItemIndex = focusIndex)
+  val externalAction = localizedExternalSubtitlesAction(external)
   LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(ROW_GAP)) {
     itemsIndexed(rows, key = { _, row -> "track:${row.trackId ?: OFF_ROW_KEY}" }) { index, row ->
       LabelledRow(
-        label = row.label,
-        detail = row.detail,
+        label = localizedTrackLabel(row),
+        detail = localizedTrackDetail(row),
         selected = row.selected,
         onClick = { onSelect(row) },
         modifier = if (index == focusIndex) Modifier.focusRequester(focusRequester) else Modifier,
@@ -390,26 +558,30 @@ private fun SubtitleSection(
     }
     // Null means there is no id to ask an addon with, and offering a search that
     // cannot run is worse than not offering one.
-    val action = ExternalSubtitles.action(external) ?: return@LazyColumn
-    item(key = "external:header") { SectionHeader("Get subtitles") }
-    // One item, one key, whatever the state: the row focus is on when the search
-    // starts is the row it is still on when the results arrive below it.
-    item(key = "external:action") {
-      LabelledRow(
-        label = action.label,
-        detail = action.detail,
-        selected = false,
-        onClick = { if (action.enabled) onFetch() },
-      )
-    }
-    val options = (external as? ExternalSubtitlesState.Ready)?.options ?: return@LazyColumn
-    items(options, key = { "external:${it.url}" }) { option ->
-      LabelledRow(
-        label = option.label,
-        detail = option.detail,
-        selected = false,
-        onClick = { onSelectExternal(option) },
-      )
+    if (externalAction != null) {
+      item(key = "external:header") {
+        SectionHeader(stringResource(R.string.player_menu_get_subtitles))
+      }
+      // One item, one key, whatever the state: the row focus is on when the search
+      // starts is the row it is still on when the results arrive below it.
+      item(key = "external:action") {
+        LabelledRow(
+          label = externalAction.label,
+          detail = externalAction.detail,
+          selected = false,
+          onClick = { if (externalAction.enabled) onFetch() },
+        )
+      }
+      val options = (external as? ExternalSubtitlesState.Ready)?.options.orEmpty()
+      items(options, key = { "external:${it.url}" }) { option ->
+        val localizedOption = localizedExternalSubtitleOption(option)
+        LabelledRow(
+          label = localizedOption.label,
+          detail = localizedOption.detail,
+          selected = false,
+          onClick = { onSelectExternal(localizedOption) },
+        )
+      }
     }
   }
 }
@@ -478,44 +650,46 @@ private fun OptionsSection(
   actions: PlayerMenuActions,
   focusRequester: FocusRequester,
 ) {
-  var help by remember { mutableStateOf(SPEED_HELP) }
+  val speedHelp = stringResource(R.string.player_menu_speed_help)
+  val delayHelp = stringResource(R.string.player_menu_delay_help)
+  var help by remember(speedHelp) { mutableStateOf(speedHelp) }
   Column(
     modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
     verticalArrangement = Arrangement.spacedBy(10.dp),
   ) {
     AdjusterRow(
-      label = "Playback speed",
+      label = stringResource(R.string.player_menu_playback_speed),
       value = PlaybackSpeeds.label(state.speed),
-      help = SPEED_HELP,
+      help = speedHelp,
       onStep = actions.onSpeedStep,
       onFocusedHelp = { help = it },
       decreaseFocus = focusRequester,
     )
     AdjusterRow(
-      label = "Subtitle size",
-      value = state.subtitleSize.label,
-      help = "Changes text subtitles. Bitmap PGS/DVD subtitles keep their encoded size.",
+      label = stringResource(R.string.player_menu_subtitle_size),
+      value = localizedSubtitleSize(state.subtitleSize),
+      help = stringResource(R.string.player_menu_subtitle_help),
       onStep = actions.onSubtitleSizeStep,
       onFocusedHelp = { help = it },
     )
     AdjusterRow(
-      label = "Audio output",
-      value = state.audioOutput.label,
-      help = "Passthrough is session-only and appears only when a receiver reports support.",
+      label = stringResource(R.string.player_menu_audio_output),
+      value = localizedAudioOutput(state.audioOutput),
+      help = stringResource(R.string.player_menu_audio_output_help),
       onStep = actions.onAudioOutputStep,
       onFocusedHelp = { help = it },
     )
     AdjusterRow(
-      label = "Audio delay",
+      label = stringResource(R.string.player_menu_audio_delay),
       value = DelaySteps.label(state.audioDelaySec),
-      help = DELAY_HELP,
+      help = delayHelp,
       onStep = actions.onAudioDelayStep,
       onFocusedHelp = { help = it },
     )
     AdjusterRow(
-      label = "Subtitle delay",
+      label = stringResource(R.string.player_menu_subtitle_delay),
       value = DelaySteps.label(state.subtitleDelaySec),
-      help = DELAY_HELP,
+      help = delayHelp,
       onStep = actions.onSubtitleDelayStep,
       onFocusedHelp = { help = it },
     )
@@ -548,6 +722,8 @@ private fun AdjusterRow(
   onFocusedHelp: (String) -> Unit,
   decreaseFocus: FocusRequester? = null,
 ) {
+  val decreaseLabel = stringResource(R.string.player_menu_decrease, label)
+  val increaseLabel = stringResource(R.string.player_menu_increase, label)
   Row(
     verticalAlignment = Alignment.CenterVertically,
     modifier = Modifier
@@ -567,7 +743,7 @@ private fun AdjusterRow(
       // and low on its own axis, so beside a full-height "+" in an identical circle
       // the pair read as two different weights at two different heights.
       text = "−",
-      label = "Decrease $label",
+      label = decreaseLabel,
       onClick = { onStep(-1) },
       modifier = if (decreaseFocus != null) Modifier.focusRequester(decreaseFocus) else Modifier,
     )
@@ -588,7 +764,7 @@ private fun AdjusterRow(
       maxLines = 1,
       overflow = TextOverflow.Ellipsis,
     )
-    StepButton(text = "+", label = "Increase $label", onClick = { onStep(1) })
+    StepButton(text = "+", label = increaseLabel, onClick = { onStep(1) })
   }
 }
 
@@ -696,7 +872,7 @@ private fun SelectionMarker(selected: Boolean, focused: Boolean) {
     if (selected) {
       Icon(
         Icons.Filled.Check,
-        contentDescription = "Selected",
+        contentDescription = stringResource(R.string.player_menu_selected),
         tint = if (focused) NebulaPalette.OnAccent else NebulaPalette.VioletBright,
         modifier = Modifier.size(18.dp),
       )
@@ -708,12 +884,10 @@ private fun SelectionMarker(selected: Boolean, focused: Boolean) {
 // comment asserting it matched the app's buttons. It is now NebulaPalette.OnAccent,
 // so the assertion is a definition.
 
-/** Two sentences that are true of more than one row; the rest are written inline. */
-private const val SPEED_HELP = "Lasts until you leave the player."
-private const val DELAY_HELP = "Per file; reset when you leave this stream."
-
 private val VALUE_WIDTH = 124.dp
 private val ROW_GAP = 8.dp
+private const val TRACK_DETAIL_SEPARATOR = "   |   "
+private const val TRACK_ACCESSIBILITY_SEPARATOR = " + "
 
 /**
  * How much of the screen the panel takes.

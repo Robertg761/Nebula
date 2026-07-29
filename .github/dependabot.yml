@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: /apps/android-tv-host
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/St_Johns
+    open-pull-requests-limit: 5
+    groups:
+      androidx:
+        patterns:
+          - "androidx.*"
+      kotlin:
+        patterns:
+          - "org.jetbrains.kotlin*"
+          - "org.jetbrains.kotlinx*"
+    ignore:
+      # libmpv carries the playback engine and native FFmpeg stack. Major
+      # updates require the physical playback matrix, never an unattended bump.
+      - dependency-name: dev.jdtech.mpv:libmpv
+        update-types:
+          - version-update:semver-major
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:30"
+      timezone: America/St_Johns
+    open-pull-requests-limit: 5

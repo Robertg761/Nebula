@@ -31,6 +31,8 @@ import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -43,7 +45,9 @@ import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Surface
 import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
+import com.stremioshell.host.R
 import com.stremioshell.host.tv.TvAppViewModel
+import com.stremioshell.host.tv.pairing.PairingConnectionCheck
 import com.stremioshell.host.tv.pairing.encodeQrBitmap
 import com.stremioshell.host.tv.ui.theme.NebulaDimens
 import com.stremioshell.host.tv.ui.theme.NebulaIcon
@@ -102,7 +106,7 @@ fun PairScreen(viewModel: TvAppViewModel, onPaired: () -> Unit) {
         // line. Inside a card that indent is the card's padding instead, so the header is pulled
         // back by its own inset: the words land flush with the copy below and the tick hangs.
         ScreenHeader(
-          title = "Set up with your phone",
+          title = stringResource(R.string.pair_title),
           modifier = Modifier.offset(x = -NebulaDimens.ScreenEdge),
         )
         Row(
@@ -119,6 +123,9 @@ fun PairScreen(viewModel: TvAppViewModel, onPaired: () -> Unit) {
             when (val s = state) {
               is TvAppViewModel.PairingState.Ready -> ReadyInstructions(s.url)
               is TvAppViewModel.PairingState.Failed -> PairingFailure(s.message)
+              is TvAppViewModel.PairingState.Validating -> PairingValidationProgress(s.addonCount)
+              is TvAppViewModel.PairingState.ValidationFailed ->
+                PairingValidationFailure(s.message, s.checks)
               is TvAppViewModel.PairingState.Received -> PairedConfirmation(s)
               else -> PairingProgress()
             }
@@ -127,7 +134,7 @@ fun PairScreen(viewModel: TvAppViewModel, onPaired: () -> Unit) {
               // start on "give up" with the obvious move sitting to its right.
               if (failed) {
                 NebulaButton(
-                  text = "Retry",
+                  text = stringResource(R.string.action_retry),
                   onClick = { viewModel.startPairing() },
                   style = NebulaButtonStyle.Primary,
                   icon = Icons.Filled.Refresh,
@@ -139,7 +146,13 @@ fun PairScreen(viewModel: TvAppViewModel, onPaired: () -> Unit) {
               // answers. In Received this is the only thing on screen a remote can land on,
               // which is what keeps the D-pad alive during the wait.
               NebulaButton(
-                text = if (received) "Continue" else "Cancel",
+                text = if (received) {
+                  stringResource(R.string.action_continue)
+                } else {
+                  // An already-started atomic DataStore commit cannot be rolled back. "Leave"
+                  // accurately describes closing this screen/server without promising otherwise.
+                  stringResource(R.string.action_leave_pairing)
+                },
                 onClick = if (received) onPaired else goBack,
                 style = if (received) NebulaButtonStyle.Primary else NebulaButtonStyle.Ghost,
                 modifier = Modifier.initialFocusTarget(primaryFocus.takeIf { !failed }),
@@ -156,55 +169,146 @@ fun PairScreen(viewModel: TvAppViewModel, onPaired: () -> Unit) {
 @Composable
 private fun PairingProgress() {
   Text(
-    "Opening a pairing link on this TV...",
+    stringResource(R.string.pair_opening),
     style = MaterialTheme.typography.bodyLarge,
     color = NebulaPalette.TextMuted,
   )
 }
 
 @Composable
-private fun PairedConfirmation(receipt: TvAppViewModel.PairingState.Received) {
-  val summary = when {
-    receipt.tmdbKeyChanged && receipt.addonUrlsChanged ->
-      "Your TMDB key and ${addonCountLabel(receipt.addonCount)} were saved."
-    receipt.tmdbKeyChanged ->
-      "Your TMDB key was saved. Stream addons were unchanged."
-    receipt.addonUrlsChanged ->
-      "${addonCountLabel(receipt.addonCount, capitalized = true)} " +
-        "${if (receipt.addonCount == 1) "was" else "were"} saved. Your TMDB key was unchanged."
-    else ->
-      "Those settings already matched what was saved on this TV."
-  }
-  val readiness = when {
-    !receipt.hasTmdbKey && receipt.addonCount == 0 ->
-      "A TMDB key and stream addon are still needed before setup is complete."
-    !receipt.hasTmdbKey ->
-      "A TMDB key is still needed to load catalogs and search."
-    receipt.addonCount == 0 ->
-      "A stream addon is still needed before Play can find releases."
-    else ->
-      "Setup is complete. Continue when you're ready."
-  }
+private fun PairingValidationProgress(addonCount: Int) {
   Column(
     verticalArrangement = Arrangement.spacedBy(NebulaSpace.xs),
     modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
   ) {
     Text(
-      "Settings received",
+      stringResource(R.string.pair_testing_title),
       style = MaterialTheme.typography.titleMedium,
       color = NebulaPalette.TextHigh,
     )
     Text(
-      "$summary $readiness",
+      if (addonCount == 0) {
+        stringResource(R.string.pair_validation_tmdb_only)
+      } else {
+        pluralStringResource(
+          R.plurals.pair_validation_progress,
+          addonCount,
+          addonCount,
+        )
+      },
       style = MaterialTheme.typography.bodyMedium,
       color = NebulaPalette.TextMuted,
     )
   }
 }
 
-private fun addonCountLabel(count: Int, capitalized: Boolean = false): String {
-  val label = if (count == 1) "1 stream addon" else "$count stream addons"
-  return if (capitalized) label.replaceFirstChar { it.uppercase() } else label
+@Composable
+private fun PairingValidationFailure(
+  message: String,
+  checks: List<PairingConnectionCheck>,
+) {
+  Column(
+    verticalArrangement = Arrangement.spacedBy(NebulaSpace.sm),
+    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Assertive },
+  ) {
+    Text(
+      stringResource(R.string.pair_attention_title),
+      style = MaterialTheme.typography.titleMedium,
+      color = NebulaPalette.TextHigh,
+    )
+    Text(
+      message,
+      style = MaterialTheme.typography.bodyMedium,
+      color = NebulaPalette.TextMuted,
+    )
+    ConnectionChecks(checks)
+    Text(
+      stringResource(R.string.pair_fix_hint),
+      style = MaterialTheme.typography.bodySmall,
+      color = NebulaPalette.TextMuted,
+    )
+  }
+}
+
+@Composable
+private fun PairedConfirmation(receipt: TvAppViewModel.PairingState.Received) {
+  val summary = when {
+    receipt.tmdbKeyChanged && receipt.addonUrlsChanged && receipt.addonCount == 0 ->
+      stringResource(R.string.pair_key_saved_addons_cleared)
+    receipt.tmdbKeyChanged && receipt.addonUrlsChanged ->
+      pluralStringResource(
+        R.plurals.pair_key_and_addons_saved,
+        receipt.addonCount,
+        receipt.addonCount,
+      )
+    receipt.tmdbKeyChanged ->
+      stringResource(R.string.pair_key_saved_addons_unchanged)
+    receipt.addonUrlsChanged && receipt.addonCount == 0 ->
+      stringResource(R.string.pair_addons_cleared_key_unchanged)
+    receipt.addonUrlsChanged ->
+      pluralStringResource(
+        R.plurals.pair_addons_saved_key_unchanged,
+        receipt.addonCount,
+        receipt.addonCount,
+      )
+    else ->
+      stringResource(R.string.pair_settings_unchanged)
+  }
+  val readiness = when {
+    !receipt.hasTmdbKey && receipt.addonCount == 0 ->
+      stringResource(R.string.pair_needs_key_and_addon)
+    !receipt.hasTmdbKey ->
+      stringResource(R.string.pair_needs_key)
+    receipt.addonCount == 0 ->
+      stringResource(R.string.pair_needs_addon)
+    else ->
+      stringResource(R.string.pair_complete)
+  }
+  Column(
+    verticalArrangement = Arrangement.spacedBy(NebulaSpace.xs),
+    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+  ) {
+    Text(
+      stringResource(R.string.pair_received_title),
+      style = MaterialTheme.typography.titleMedium,
+      color = NebulaPalette.TextHigh,
+    )
+    Text(
+      stringResource(R.string.pair_confirmation_body, summary, readiness),
+      style = MaterialTheme.typography.bodyMedium,
+      color = NebulaPalette.TextMuted,
+    )
+    ConnectionChecks(receipt.checks)
+  }
+}
+
+@Composable
+private fun ConnectionChecks(checks: List<PairingConnectionCheck>) {
+  if (checks.isEmpty()) return
+  Column(verticalArrangement = Arrangement.spacedBy(NebulaSpace.xs)) {
+    checks.forEach { check ->
+      Row(
+        horizontalArrangement = Arrangement.spacedBy(NebulaSpace.xs),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Icon(
+          if (check.connected) Icons.Filled.CheckCircle else Icons.Filled.Warning,
+          contentDescription = null,
+          tint = if (check.connected) NebulaPalette.Success else NebulaPalette.Danger,
+          modifier = Modifier.size(NebulaIcon.sm),
+        )
+        Text(
+          if (check.connected) {
+            stringResource(R.string.pair_status_connected, check.label)
+          } else {
+            stringResource(R.string.pair_status_failed, check.label)
+          },
+          style = MaterialTheme.typography.bodySmall,
+          color = if (check.connected) NebulaPalette.Success else NebulaPalette.Danger,
+        )
+      }
+    }
+  }
 }
 
 /**
@@ -217,7 +321,7 @@ private fun addonCountLabel(count: Int, capitalized: Boolean = false): String {
 private fun PairingFailure(message: String) {
   Column(verticalArrangement = Arrangement.spacedBy(NebulaSpace.xs)) {
     Text(
-      "Pairing could not start",
+      stringResource(R.string.pair_start_failed_title),
       style = MaterialTheme.typography.titleMedium,
       color = NebulaPalette.TextHigh,
     )
@@ -233,7 +337,7 @@ private fun PairingFailure(message: String) {
 private fun ReadyInstructions(url: String) {
   Column(verticalArrangement = Arrangement.spacedBy(NebulaSpace.sm)) {
     Text(
-      "Scan this code with your phone's camera, then paste your TMDB key and addon URLs there.",
+      stringResource(R.string.pair_scan_instructions),
       style = MaterialTheme.typography.bodyLarge,
       color = NebulaPalette.TextMuted,
     )
@@ -241,7 +345,7 @@ private fun ReadyInstructions(url: String) {
     // set apart as its own chip rather than run into the sentence around it. TextMuted, not
     // TextFaint: this is the alternative route in, not decoration.
     Text(
-      "or open this in your phone's browser",
+      stringResource(R.string.pair_browser_alternative),
       style = MaterialTheme.typography.bodySmall,
       color = NebulaPalette.TextMuted,
     )
@@ -267,8 +371,7 @@ private fun ReadyInstructions(url: String) {
         modifier = Modifier.size(NebulaIcon.sm),
       )
       Text(
-        "Your phone must be on the same trusted private Wi-Fi as this TV. The local setup page " +
-          "is not encrypted.",
+        stringResource(R.string.pair_network_warning),
         style = MaterialTheme.typography.bodyMedium,
         color = NebulaPalette.TextMuted,
       )
@@ -297,7 +400,8 @@ private fun PairPanel(state: TvAppViewModel.PairingState) {
   ) {
     when {
       ready != null -> QrImage(ready.url)
-      state is TvAppViewModel.PairingState.Failed -> Icon(
+      state is TvAppViewModel.PairingState.Failed ||
+        state is TvAppViewModel.PairingState.ValidationFailed -> Icon(
         Icons.Filled.Warning,
         contentDescription = null,
         tint = NebulaPalette.Danger,
@@ -333,7 +437,7 @@ private fun QrImage(url: String) {
   if (bitmap != null) {
     Image(
       bitmap = bitmap,
-      contentDescription = "Pairing QR code",
+      contentDescription = stringResource(R.string.pair_qr_description),
       // Nearest-neighbour. The default bilinear filter turns every module edge into a grey ramp
       // when 520px is drawn at 260dp on a 4K panel, which is a code that looks soft and takes
       // longer to lock. Costs nothing.

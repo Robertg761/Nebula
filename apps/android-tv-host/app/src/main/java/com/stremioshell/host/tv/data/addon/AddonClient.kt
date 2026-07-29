@@ -2,6 +2,7 @@ package com.stremioshell.host.tv.data.addon
 
 import com.stremioshell.host.tv.data.HttpFetcher
 import com.stremioshell.host.tv.data.OkHttpFetcher
+import com.stremioshell.host.tv.data.decodeJsonOffMain
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
@@ -21,7 +22,7 @@ class AddonClient(
 
   suspend fun manifest(manifestUrl: String): AddonManifest {
     val body = fetcher.get(manifestUrl.trim())
-    return json.decodeFromString<AddonManifest>(body)
+    return decodeJsonOffMain { json.decodeFromString<AddonManifest>(body) }
   }
 
   suspend fun movieStreams(manifestUrl: String, imdbId: String): List<AddonStream> {
@@ -39,7 +40,7 @@ class AddonClient(
 
   private suspend fun streams(manifestUrl: String, type: String, id: String): List<AddonStream> {
     val body = fetcher.get(streamUrl(manifestUrl, type, id))
-    return json.decodeFromString<AddonStreamsResponse>(body).streams
+    return decodeJsonOffMain { json.decodeFromString<AddonStreamsResponse>(body) }.streams
       .filter { !it.url.isNullOrBlank() }
   }
 

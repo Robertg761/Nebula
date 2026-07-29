@@ -1,9 +1,457 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-  <string name="app_name">Nebula</string>
+  <string name="app_name" translatable="false">Nebula</string>
   <!-- Shown by the system's voice search UI, not by our own field. -->
   <string name="search_hint">Search movies and shows</string>
   <string name="update_install_failed">The downloaded update is missing or did not pass verification. Please download it again.</string>
   <string name="update_installer_open_failed">Android could not open its package installer on this TV. Try again or install the update manually.</string>
   <string name="update_settings_open_failed">Android could not open the install-permission settings on this TV. Check Nebula\u2019s app permissions in Android settings.</string>
+  <string name="update_ready_title">Update ready</string>
+  <string name="update_ready_permission_body">Nebula %1$s is downloaded. Android needs your permission to let Nebula install apps \u2014 we\u2019ll open that setting, then come back here. You\u2019re on %2$s.</string>
+  <string name="update_ready_body">Nebula %1$s is downloaded and ready. You\u2019re on %2$s.</string>
+  <string name="update_checking">Checking update\u2026</string>
+  <string name="update_check_download">Check download</string>
+  <string name="update_open_android_settings">Open Android settings</string>
+  <string name="update_install">Install</string>
+  <string name="update_later">Later</string>
+  <string name="playback_url_blocked">This addon returned a stream address Nebula cannot open safely.</string>
+
+  <!-- Native player. Format names, upstream track labels, and remote key names stay literal. -->
+  <string name="player_start_failed">The video player could not start.</string>
+  <string name="player_unknown_language">Unknown language</string>
+  <string name="player_subtitle_included">Included with this stream</string>
+  <string name="player_stream_subtitle_number">Stream subtitle %1$d</string>
+  <string name="player_stream_open_failed">The stream could not be opened.</string>
+  <string name="player_stream_stopped">The stream stopped unexpectedly.</string>
+  <plurals name="player_stream_stalled">
+    <item quantity="one">The stream stalled: no data for %1$d second.</item>
+    <item quantity="other">The stream stalled: no data for %1$d seconds.</item>
+  </plurals>
+  <string name="player_refreshing_stream">Refreshing stream link\u2026</string>
+  <string name="player_refreshed_stream_blocked">The refreshed stream address was blocked for safety.</string>
+  <string name="player_seeking">Seeking</string>
+  <string name="player_buffering">Buffering</string>
+  <string name="player_playback_failed">Playback failed</string>
+  <string name="player_retry_hint">OK retries from where it stopped   |   BACK tries another stream</string>
+  <string name="player_paused">Paused</string>
+  <string name="player_none">none</string>
+  <string name="player_off">off</string>
+  <string name="player_audio_track">Audio  %1$s</string>
+  <string name="player_subtitle_track">Subtitles  %1$s</string>
+  <string name="player_pause">Pause</string>
+  <string name="player_restart">Restart</string>
+  <string name="player_audio_and_subtitles">Audio &amp; subtitles</string>
+  <string name="player_playback_options">Playback options</string>
+  <string name="player_next_episode">Next episode</string>
+  <string name="player_controls_hint">OK selects   |   LEFT/RIGHT moves   |   DOWN to the bar   |   BACK hides</string>
+  <string name="player_scrub_hint">OK play/pause   |   LEFT/RIGHT 10s   |   UP for controls   |   DOWN hides</string>
+  <string name="player_ends_at">Ends at %1$s</string>
+  <string name="player_no_next_episode">No next episode</string>
+  <string name="player_starting_next_episode">Starting next episode</string>
+  <string name="player_subtitle_fetch_failed">Couldn\u2019t load subtitles.</string>
+  <string name="player_loading_subtitles">Loading %1$s subtitles\u2026</string>
+  <string name="player_subtitle_add_failed">Couldn\u2019t load subtitle.</string>
+  <string name="player_subtitles_added">%1$s subtitles added</string>
+  <string name="player_passthrough_unavailable">Passthrough unavailable on the connected audio device</string>
+  <string name="player_audio_route_decode">Audio route changed \u2014 switched to Decode</string>
+  <string name="player_key_ok" translatable="false">OK</string>
+  <string name="player_key_back" translatable="false">BACK</string>
+  <string name="player_key_left_right" translatable="false">LEFT/RIGHT</string>
+
+  <!-- Player menu. Codec names, channel layouts, bit-rate units, and provider track titles stay literal. -->
+  <string name="player_menu_tab_audio">Audio</string>
+  <string name="player_menu_tab_subtitles">Subtitles</string>
+  <string name="player_menu_tab_options">Options</string>
+  <string name="player_menu_no_audio_tracks">No audio tracks</string>
+  <string name="player_menu_no_audio_tracks_hint">This release has no selectable audio.</string>
+  <string name="player_menu_options_controls_hint">%1$s chooses \u2212/+   |   %2$s adjusts   |   %3$s closes</string>
+  <string name="player_menu_back_closes">%1$s closes</string>
+  <string name="player_menu_get_subtitles">Get subtitles</string>
+  <string name="player_menu_search_online_subtitles">Search online subtitles</string>
+  <string name="player_menu_searching_subtitles">Searching\u2026</string>
+  <string name="player_menu_subtitle_search_failed">Couldn\u2019t load subtitles</string>
+  <string name="player_menu_ok_tries_again">%1$s tries again</string>
+  <string name="player_menu_no_subtitles_found">No subtitles found</string>
+  <string name="player_menu_ok_searches_again">%1$s searches again</string>
+  <string name="player_menu_search_again">Search again</string>
+  <string name="player_menu_opensubtitles" translatable="false">OpenSubtitles</string>
+  <plurals name="player_menu_online_subtitle_position">
+    <item quantity="one">Online subtitle</item>
+    <item quantity="other">Online subtitle %1$d of %2$d</item>
+  </plurals>
+  <string name="player_menu_online_track_title">Online</string>
+  <string name="player_menu_online_track_title_numbered">Online %1$d</string>
+  <string name="player_menu_playback_speed">Playback speed</string>
+  <string name="player_menu_subtitle_size">Subtitle size</string>
+  <string name="player_menu_subtitle_help">Changes text subtitles. Bitmap PGS/DVD subtitles keep their encoded size.</string>
+  <string name="player_menu_audio_output">Audio output</string>
+  <string name="player_menu_audio_output_help">Passthrough is session-only and appears only when a receiver reports support.</string>
+  <string name="player_menu_audio_delay">Audio delay</string>
+  <string name="player_menu_subtitle_delay">Subtitle delay</string>
+  <string name="player_menu_speed_help">Lasts until you leave the player.</string>
+  <string name="player_menu_delay_help">Per file; reset when you leave this stream.</string>
+  <string name="player_menu_subtitle_size_small">Small</string>
+  <string name="player_menu_subtitle_size_medium">Medium</string>
+  <string name="player_menu_subtitle_size_large">Large</string>
+  <string name="player_menu_subtitle_size_huge">Huge</string>
+  <string name="player_menu_audio_output_decode">Decode</string>
+  <string name="player_menu_audio_output_passthrough">Passthrough</string>
+  <string name="player_menu_decrease">Decrease %1$s</string>
+  <string name="player_menu_increase">Increase %1$s</string>
+  <string name="player_menu_selected">Selected</string>
+  <string name="player_menu_subtitles_off">Off</string>
+  <string name="player_menu_track_number">Track %1$d</string>
+  <string name="player_menu_track_default">Default</string>
+  <string name="player_menu_track_forced">Forced</string>
+  <string name="player_menu_track_external">External</string>
+  <string name="player_menu_audio_description">Audio description</string>
+  <string name="player_menu_visual_impaired">Visual impaired</string>
+  <string name="player_menu_sdh" translatable="false">SDH</string>
+  <string name="player_menu_hearing_impaired">Hearing impaired</string>
+
+  <!-- Up next. Episode names and caller-supplied failure details remain unchanged. -->
+  <string name="player_up_next_heading">Up next</string>
+  <string name="player_up_next_default_failure">Couldn\u2019t start the next episode.</string>
+  <string name="player_up_next_episode_code">S%1$dE%2$d</string>
+  <string name="player_up_next_episode_line">%1$s  %2$s</string>
+  <string name="player_up_next_finding_stream">Finding a stream\u2026</string>
+  <plurals name="player_up_next_playing_in">
+    <item quantity="one">Playing in %ds</item>
+    <item quantity="other">Playing in %ds</item>
+  </plurals>
+  <string name="player_up_next_press_to_play">Press %1$s to play</string>
+  <string name="player_up_next_hint_retry">%1$s retry   |   %2$s stop</string>
+  <string name="player_up_next_hint_resolving">%1$s to stop</string>
+  <string name="player_up_next_hint_ready">%1$s play now   |   %2$s stop</string>
+  <string name="player_up_next_action_play">Play %1$s now</string>
+  <string name="player_up_next_action_retry">Retry %1$s</string>
+  <string name="player_up_next_action_cancel">Cancel up next</string>
+  <string name="player_up_next_announcement">Up next, %1$s. %2$s</string>
+  <string name="player_up_next_failure_announcement">Up next, %1$s. %2$s Press %3$s to retry, or %4$s to stop.</string>
+  <string name="player_up_next_resolving_announcement">Up next, %1$s. %2$s Press %3$s to stop.</string>
+
+  <!-- Shared navigation and actions. -->
+  <string name="nav_home">Home</string>
+  <string name="nav_search">Search</string>
+  <string name="nav_settings">Settings</string>
+  <string name="action_back">Back</string>
+  <string name="action_cancel">Cancel</string>
+  <string name="action_leave_pairing">Leave pairing</string>
+  <string name="action_continue">Continue</string>
+  <string name="action_clear">Clear</string>
+  <string name="action_retry">Retry</string>
+  <string name="action_open_settings">Open Settings</string>
+  <string name="action_manage_addons">Manage addons</string>
+  <string name="action_play">Play</string>
+  <string name="action_resume">Resume</string>
+  <string name="action_watch_again">Watch again</string>
+  <string name="action_start_over">Start over</string>
+  <string name="action_watch_trailer">Watch trailer</string>
+  <string name="action_more">More</string>
+  <string name="action_less">Less</string>
+  <string name="action_add_to_my_list">Add to My List</string>
+  <string name="action_remove_from_my_list">Remove from My List</string>
+  <string name="action_in_my_list">In My List</string>
+
+  <!-- Navigation guard. -->
+  <string name="unsaved_settings_title">Unsaved settings</string>
+  <string name="unsaved_settings_phone_message">Save or finish adding your settings changes before continuing to phone setup?</string>
+  <string name="unsaved_settings_leave_message">Save or finish adding your settings changes before leaving?</string>
+  <string name="action_save_and_continue">Save &amp; continue</string>
+  <string name="action_save_and_leave">Save &amp; leave</string>
+  <string name="action_discard_and_continue">Discard &amp; continue</string>
+  <string name="action_discard_draft">Discard draft</string>
+
+  <!-- Home. Catalog titles are mapped at the UI boundary so their stable paging keys stay intact. -->
+  <string name="home_wordmark" translatable="false">NEBULA</string>
+  <string name="home_setup_missing_key_and_addon">Add a TMDB key and a stream addon to browse and play. Use your phone, or enter them with the remote.</string>
+  <string name="home_setup_missing_key">Add a TMDB key to load catalogs and search. Your stream addon is already saved.</string>
+  <string name="home_setup_missing_addon">Add a stream addon before you start browsing, so Play can always lead somewhere.</string>
+  <string name="home_action_setup_phone">Set up with phone</string>
+  <string name="home_action_enter_manually">Enter manually</string>
+  <string name="home_loading_description">Loading Home</string>
+  <string name="home_empty_title">Nothing to browse yet</string>
+  <string name="home_empty_hint">TMDB returned no catalog titles. Check your key or try refreshing.</string>
+  <string name="home_action_refresh">Refresh</string>
+  <string name="home_loading_catalogs">Loading the rest of your catalogs\u2026</string>
+  <string name="home_action_remove_continue_watching">Remove from Continue Watching</string>
+  <string name="home_action_mark_watched">Mark watched</string>
+  <string name="home_action_view_details">View details</string>
+  <string name="home_rail_my_list">My List</string>
+  <string name="home_rail_continue_watching">Continue Watching</string>
+  <string name="home_rail_trending_movies">Trending Movies</string>
+  <string name="home_rail_trending_shows">Trending Shows</string>
+  <string name="home_rail_popular_movies">Popular Movies</string>
+  <string name="home_rail_popular_shows">Popular Shows</string>
+  <string name="home_rail_action">Action</string>
+  <string name="home_rail_comedy_shows">Comedy Shows</string>
+  <string name="home_rail_scifi_fantasy">Sci-Fi &amp; Fantasy</string>
+  <string name="home_rail_documentaries">Documentaries</string>
+  <string name="home_rail_animation">Animation</string>
+  <string name="home_hero_description">Featured: %1$s, View details</string>
+  <string name="home_hero_description_with_metadata">Featured: %1$s, %2$s, View details</string>
+  <string name="home_episode_code">S%1$dE%2$d</string>
+  <string name="home_spoken_season_episode">Season %1$d, episode %2$d</string>
+  <string name="home_continue_fallback">Pick up where you left off.</string>
+  <string name="home_watchlist_fallback">Saved to My List.</string>
+  <string name="home_media_type_film">Film</string>
+  <string name="home_watched">Watched</string>
+  <string name="home_hours_minutes_left">%1$dh %2$dm left</string>
+  <plurals name="home_minutes_left">
+    <item quantity="one">%d m left</item>
+    <item quantity="other">%d m left</item>
+  </plurals>
+  <string name="home_fact_separator" translatable="false">" \u2022 "</string>
+
+  <!-- Settings. Brand names and technical examples are passed through protected placeholders. -->
+  <string name="settings_version">%1$s %2$s</string>
+  <string name="settings_save_playback_in_progress">A playback preference is still being saved. Try again in a moment.</string>
+  <string name="settings_addon_draft_pending">Press Add addon to use the URL you typed \u2014 Save does not add it.</string>
+  <string name="settings_save_playback_languages_failed">Could not save playback language preferences. Try again.</string>
+  <string name="settings_save_watchdog_persisted">Settings saved. Connection tests are taking too long; you can leave and test again later.</string>
+  <string name="settings_save_watchdog_unconfirmed">%1$s could not confirm that Settings were saved. Try again.</string>
+  <string name="settings_quick_setup_title">Quick setup</string>
+  <string name="settings_quick_setup_description">Type your key and addon URLs on your phone instead of with the remote.</string>
+  <string name="settings_tmdb_title" translatable="false">TMDB</string>
+  <string name="settings_tmdb_key_path" translatable="false">themoviedb.org \u2192 Settings \u2192 API</string>
+  <string name="settings_tmdb_description">%1$s gets every catalog, poster and description from TMDB. Create a free key at %2$s.</string>
+  <string name="settings_tmdb_key_placeholder">Paste or type your key</string>
+  <string name="settings_tmdb_api_key">TMDB API key</string>
+  <string name="settings_hide_key">Hide key</string>
+  <string name="settings_show_key">Show key</string>
+  <string name="settings_hide_tmdb_key_description">Hide TMDB API key</string>
+  <string name="settings_show_tmdb_key_description">Show TMDB API key</string>
+  <string name="settings_clear_key">Clear key</string>
+  <string name="settings_no_tmdb_key_to_clear">There is no TMDB key to clear.</string>
+  <string name="settings_stream_addons_title">Stream addons</string>
+  <string name="settings_stream_addons_description">Asked in this order. The first addon offering a release is the one you get; everything else is merged in and sorted by quality.</string>
+  <string name="settings_saves_immediately">Saves immediately</string>
+  <string name="settings_no_addons">No addons yet \u2014 add your Comet manifest URL below</string>
+  <string name="settings_move_up">Up</string>
+  <string name="settings_move_down">Down</string>
+  <string name="settings_remove">Remove</string>
+  <string name="settings_addon_moved_earlier">Moved %1$s earlier.</string>
+  <string name="settings_addon_moved_later">Moved %1$s later.</string>
+  <string name="settings_addon_already_positioned">%1$s is already in that position.</string>
+  <string name="settings_addon_move_failed">Could not move %1$s. Try again.</string>
+  <string name="settings_move_addon_earlier_description">Move %1$s earlier</string>
+  <string name="settings_move_addon_later_description">Move %1$s later</string>
+  <string name="settings_remove_addon_description">Remove %1$s</string>
+  <string name="settings_addon_url_placeholder" translatable="false">https://comet.../&lt;config&gt;/manifest.json</string>
+  <string name="settings_new_addon_url_description">New stream addon manifest URL</string>
+  <string name="settings_hide_url">Hide URL</string>
+  <string name="settings_show_url">Show URL</string>
+  <string name="settings_hide_new_addon_url_description">Hide new stream addon URL</string>
+  <string name="settings_show_new_addon_url_description">Show new stream addon URL</string>
+  <string name="settings_add_addon">Add addon</string>
+  <string name="settings_enter_addon_url_first">Enter an addon URL first.</string>
+  <string name="settings_addon_already_in_list">That addon is already in the list.</string>
+  <string name="settings_addon_limit_reached">That\u2019s the most addons the list holds.</string>
+  <string name="settings_addon_added">Added %1$s.</string>
+  <string name="settings_addon_add_failed">Could not add %1$s. Check the URL and try again.</string>
+  <string name="settings_playback_title">Playback</string>
+  <string name="settings_playback_description">Defaults used when a video starts. You can still change tracks and output from the player menu for the current video.</string>
+  <string name="settings_audio_language_label">Preferred audio language</string>
+  <string name="settings_subtitle_language_label">Preferred subtitle language</string>
+  <string name="settings_language_code_english" translatable="false">eng</string>
+  <string name="settings_subtitle_off_code" translatable="false">off</string>
+  <string name="settings_audio_language_placeholder">Blank = Auto; e.g. %1$s</string>
+  <string name="settings_subtitle_language_placeholder">Blank = Auto; use %1$s or %2$s</string>
+  <string name="settings_apply_language_preferences">Apply language preferences</string>
+  <string name="settings_language_preferences_saved">Language preferences saved.</string>
+  <string name="settings_language_preferences_unchanged">Language preferences were already set.</string>
+  <string name="settings_language_preferences_failed">Could not save language preferences. Try again.</string>
+  <string name="settings_subtitle_size">Subtitle size: %1$s</string>
+  <string name="settings_subtitle_size_small">Small</string>
+  <string name="settings_subtitle_size_medium">Medium</string>
+  <string name="settings_subtitle_size_large">Large</string>
+  <string name="settings_subtitle_size_huge">Huge</string>
+  <string name="settings_subtitle_size_failed">Could not save subtitle size. Try again.</string>
+  <string name="settings_subtitle_size_saved">Subtitle size set to %1$s.</string>
+  <string name="settings_audio_output">Audio output: %1$s</string>
+  <string name="settings_audio_output_decode">Decode</string>
+  <string name="settings_audio_output_passthrough">Passthrough</string>
+  <string name="settings_audio_output_failed">Could not save audio output. Try again.</string>
+  <string name="settings_audio_output_saved">Audio output set to %1$s.</string>
+  <string name="settings_passthrough_description">Passthrough is used only when the active device and audio route report compatible codecs. %1$s falls back to %2$s rather than risk silent playback.</string>
+  <string name="settings_autoplay_next_on">Autoplay next: On</string>
+  <string name="settings_autoplay_next_off">Autoplay next: Off</string>
+  <string name="settings_autoplay_failed">Could not save autoplay. Try again.</string>
+  <string name="settings_autoplay_enabled">Autoplay next turned on.</string>
+  <string name="settings_autoplay_disabled">Autoplay next turned off.</string>
+  <plurals name="settings_countdown">
+    <item quantity="one">Countdown: %d s</item>
+    <item quantity="other">Countdown: %d s</item>
+  </plurals>
+  <string name="settings_countdown_failed">Could not save the countdown. Try again.</string>
+  <plurals name="settings_countdown_saved">
+    <item quantity="one">Up-next countdown set to %d second.</item>
+    <item quantity="other">Up-next countdown set to %d seconds.</item>
+  </plurals>
+  <string name="settings_reset_playback_defaults">Reset playback defaults</string>
+  <string name="settings_support_title">Support &amp; local data</string>
+  <string name="settings_support_description">Diagnostics stay on this TV until you explicitly share a redacted report.</string>
+  <string name="settings_preparing_diagnostics">Preparing diagnostics\u2026</string>
+  <string name="settings_share_diagnostics">Share diagnostics</string>
+  <string name="settings_share_diagnostics_chooser">Share %1$s diagnostics</string>
+  <string name="settings_share_app_failed">Android could not open an app to share the report.</string>
+  <string name="settings_create_diagnostics_failed">%1$s could not create the diagnostics report.</string>
+  <string name="settings_erase_all_app_data">Erase all app data</string>
+  <string name="settings_advanced">Advanced</string>
+  <string name="settings_advanced_expanded">Advanced, expanded</string>
+  <string name="settings_advanced_collapsed">Advanced, collapsed</string>
+  <string name="settings_subtitles_addon_title">Subtitles addon</string>
+  <string name="settings_subtitles_addon_description">Leave blank for the built-in OpenSubtitles v3 addon.</string>
+  <string name="settings_currently_using">Currently using: %1$s</string>
+  <string name="settings_subtitles_addon_url_description">Subtitles addon URL</string>
+  <string name="settings_hide_subtitles_url_description">Hide subtitles addon URL</string>
+  <string name="settings_show_subtitles_url_description">Show subtitles addon URL</string>
+  <string name="settings_save_and_test">Save &amp; test connections</string>
+  <string name="settings_unsaved_changes">Unsaved changes</string>
+  <string name="settings_dialog_with_feedback">%1$s\n\n%2$s</string>
+  <string name="settings_remove_addon_message">Remove this addon? Its manifest URL is deleted, and putting it back means typing the whole thing on the remote again.</string>
+  <string name="settings_remove_addon">Remove addon</string>
+  <string name="settings_addon_removed">Removed %1$s.</string>
+  <string name="settings_addon_not_found">%1$s was not in the addon list.</string>
+  <string name="settings_remove_addon_failed">Could not remove %1$s. Try again.</string>
+  <string name="settings_clear_key_message">Clear the saved key? Catalogs, search, and metadata will stop loading until you enter another one.</string>
+  <string name="settings_tmdb_key_cleared">TMDB key cleared. Enter a new one to load catalogs again.</string>
+  <string name="settings_no_saved_tmdb_key">There was no saved TMDB key to clear.</string>
+  <string name="settings_clear_tmdb_key_failed">Could not clear the TMDB key. Try again.</string>
+  <string name="settings_playback_defaults_title">Playback defaults</string>
+  <string name="settings_reset_playback_message">Reset audio and subtitle languages, subtitle size, audio output, autoplay, and the up-next countdown?</string>
+  <string name="settings_playback_defaults_reset">Playback preferences reset to defaults.</string>
+  <string name="settings_reset_playback_failed">Could not reset playback preferences. Try again.</string>
+  <string name="settings_erase_all_data_title">Erase all %1$s data</string>
+  <string name="settings_erase_all_data_message">This removes the TMDB key, addon URLs, playback preferences, watch history, My List, downloaded updates, and local diagnostics. %1$s will close and return to first-run setup the next time it opens. This cannot be undone.</string>
+  <string name="settings_reset_request_rejected">Android did not accept the reset request. Try clearing %1$s storage in TV settings.</string>
+
+  <!-- Search. -->
+  <string name="search_idle_title">What do you want to watch?</string>
+  <string name="search_idle_hint">Type a title, or press the mic key on your remote.</string>
+  <string name="search_searching">Searching\u2026</string>
+  <string name="search_empty_all">No results for \u201c%1$s\u201d</string>
+  <string name="search_empty_movies">No movies match \u201c%1$s\u201d</string>
+  <string name="search_empty_shows">No shows match \u201c%1$s\u201d</string>
+  <string name="search_empty_other_type_hint">There are matches of another type \u2014 try All.</string>
+  <string name="search_empty_spelling_hint">Try fewer words, or check the spelling.</string>
+  <string name="search_loading_more_description">Loading more search results</string>
+  <string name="search_retry_more">Retry more results</string>
+  <string name="search_title_in_list">This title is in My List.</string>
+  <string name="search_save_title_for_later">Save this title for later.</string>
+  <string name="search_filter_all">All</string>
+  <string name="search_filter_movies">Movies</string>
+  <string name="search_filter_shows">Shows</string>
+  <string name="media_type_movie">Movie</string>
+  <string name="media_type_series">Series</string>
+  <plurals name="search_results_count">
+    <item quantity="one">%d result</item>
+    <item quantity="other">%d results</item>
+  </plurals>
+
+  <!-- Phone pairing. -->
+  <string name="pair_title">Set up with your phone</string>
+  <string name="pair_opening">Opening a pairing link on this TV\u2026</string>
+  <string name="pair_testing_title">Testing your setup</string>
+  <string name="pair_validation_tmdb_only">Checking TMDB before anything is saved\u2026</string>
+  <plurals name="pair_validation_progress">
+    <item quantity="one">Checking TMDB and your stream addon before anything is saved\u2026</item>
+    <item quantity="other">Checking TMDB and all %d stream addons before anything is saved\u2026</item>
+  </plurals>
+  <string name="pair_attention_title">Setup needs attention</string>
+  <string name="pair_fix_hint">Review the error on your phone, correct the value, then submit the form again.</string>
+  <string name="pair_received_title">Settings received</string>
+  <plurals name="pair_key_and_addons_saved">
+    <item quantity="one">Your TMDB key and %d stream addon were saved.</item>
+    <item quantity="other">Your TMDB key and %d stream addons were saved.</item>
+  </plurals>
+  <string name="pair_key_saved_addons_cleared">Your TMDB key was saved, and stream addons were cleared.</string>
+  <string name="pair_key_saved_addons_unchanged">Your TMDB key was saved. Stream addons were unchanged.</string>
+  <plurals name="pair_addons_saved_key_unchanged">
+    <item quantity="one">%d stream addon was saved. Your TMDB key was unchanged.</item>
+    <item quantity="other">%d stream addons were saved. Your TMDB key was unchanged.</item>
+  </plurals>
+  <string name="pair_addons_cleared_key_unchanged">Stream addons were cleared. Your TMDB key was unchanged.</string>
+  <string name="pair_settings_unchanged">Those settings already matched what was saved on this TV.</string>
+  <string name="pair_needs_key_and_addon">A TMDB key and stream addon are still needed before setup is complete.</string>
+  <string name="pair_needs_key">A TMDB key is still needed to load catalogs and search.</string>
+  <string name="pair_needs_addon">A stream addon is still needed before Play can find releases.</string>
+  <string name="pair_complete">Setup is complete. Continue when you\u2019re ready.</string>
+  <string name="pair_confirmation_body">%1$s %2$s</string>
+  <string name="pair_status_connected">%1$s: connected</string>
+  <string name="pair_status_failed">%1$s: failed</string>
+  <string name="pair_start_failed_title">Pairing could not start</string>
+  <string name="pair_scan_instructions">Scan this code with your phone\u2019s camera, then paste your TMDB key and addon URLs there.</string>
+  <string name="pair_browser_alternative">or open this in your phone\u2019s browser</string>
+  <string name="pair_network_warning">Your phone must be on the same trusted private Wi-Fi as this TV. The local setup page is not encrypted.</string>
+  <string name="pair_qr_description">Pairing QR code</string>
+
+  <!-- Details. -->
+  <string name="details_loading">Loading details\u2026</string>
+  <string name="details_action_resume_episode">Resume S%1$dE%2$d</string>
+  <string name="details_action_play_episode">Play S%1$dE%2$d</string>
+  <string name="details_spoken_season_episode">season %1$d, episode %2$d</string>
+  <string name="details_spoken_resume_episode">Resume %1$s</string>
+  <string name="details_spoken_play_episode">Play %1$s</string>
+  <string name="details_stream_lookup_unavailable">We can\u2019t look up streams for this title yet \u2014 TMDB has no IMDb id for it.</string>
+  <string name="details_checking_episodes">Checking this season for playable episodes\u2026</string>
+  <string name="details_episodes_not_aired">The listed episodes have not aired yet.</string>
+  <string name="details_no_seasons">No seasons have been listed for this title yet.</string>
+  <string name="details_no_playable_episodes">No playable episodes are available for this season.</string>
+  <string name="details_trailer_invalid">This trailer link is not valid anymore.</string>
+  <string name="details_trailer_no_handler">No YouTube app or web browser is available to open this trailer.</string>
+  <string name="details_episodes_heading">Episodes</string>
+  <string name="details_more_like_this">More like this</string>
+  <string name="details_cast_heading">Cast</string>
+  <string name="details_resume_here">Resume here</string>
+  <string name="details_watched">Watched</string>
+  <string name="details_airs_date">Airs %1$s</string>
+  <plurals name="details_minutes_left">
+    <item quantity="one">%d min left</item>
+    <item quantity="other">%d min left</item>
+  </plurals>
+  <string name="details_episode_description">Episode %1$d, %2$s</string>
+  <string name="details_episode_description_with_status">Episode %1$d, %2$s, %3$s</string>
+  <string name="details_cast_member_as">%1$s as %2$s</string>
+  <string name="details_add_title_to_list">Add %1$s to My List</string>
+  <string name="details_remove_title_from_list">Remove %1$s from My List</string>
+
+  <!-- Stream picker. Technical format names and addon-provided labels remain untranslatable. -->
+  <string name="streams_loading_no_addons">Looking for configured addons\u2026</string>
+  <plurals name="streams_loading_addons">
+    <item quantity="one">Asking the addon for streams\u2026</item>
+    <item quantity="other">Asking %d addons for streams\u2026</item>
+  </plurals>
+  <string name="streams_empty_title">No streams for this title</string>
+  <string name="streams_empty_many_addons">None of your addons returned anything playable.</string>
+  <string name="streams_empty_one_addon">The addon returned nothing playable.</string>
+  <plurals name="streams_release_count">
+    <item quantity="one">%d release</item>
+    <item quantity="other">%d releases \u2022 best quality first</item>
+  </plurals>
+  <plurals name="streams_filtered_release_count">
+    <item quantity="one">%1$d of %2$d release</item>
+    <item quantity="other">%1$d of %2$d releases</item>
+  </plurals>
+  <string name="streams_no_filter_matches">No releases match these filters.</string>
+  <string name="streams_show_all_releases">Show all releases</string>
+  <string name="streams_filter_view">View: %1$s</string>
+  <string name="streams_filter_availability">Availability: %1$s</string>
+  <string name="streams_filter_range">Range: %1$s</string>
+  <string name="streams_filter_resolution">Resolution: %1$s</string>
+  <string name="streams_filter_source">Source: %1$s</string>
+  <string name="streams_filter_size">Size: %1$s</string>
+  <string name="streams_filter_show_all">Show all</string>
+  <string name="streams_filter_any">Any</string>
+  <string name="streams_filter_recommended">Recommended</string>
+  <string name="streams_filter_all">All</string>
+  <string name="streams_filter_instant">Instant</string>
+  <string name="streams_filter_unmarked_range">Unmarked</string>
+  <string name="streams_filter_other">Other</string>
+  <plurals name="streams_tier_count">
+    <item quantity="one">%1$s \u2022 %2$d release</item>
+    <item quantity="other">%1$s \u2022 %2$d releases</item>
+  </plurals>
+  <string name="streams_badge_instant">Instant</string>
+  <string name="streams_badge_last_used">Last used</string>
 </resources>
