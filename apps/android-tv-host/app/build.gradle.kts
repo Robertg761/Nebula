@@ -168,7 +168,7 @@ dependencies {
   implementation("dev.jdtech.mpv:libmpv:0.4.1")
 
   // Phone-pairing config entry (QR + tiny on-device web form)
-  implementation("com.google.zxing:core:3.5.3")
+  implementation("com.google.zxing:core:3.5.4")
   implementation("org.nanohttpd:nanohttpd:2.3.1")
 
   // Installs the committed baseline profile (src/main/baseline-prof.txt) at
