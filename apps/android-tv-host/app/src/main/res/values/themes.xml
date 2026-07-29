@@ -9,7 +9,17 @@
        Colors live in tv/ui/theme/Theme.kt. -->
   <style name="Theme.Nebula" parent="@android:style/Theme.Material.NoActionBar">
     <item name="android:windowBackground">@color/nebula_void</item>
+    <item name="android:dialogTheme">@style/Theme.Nebula.Dialog</item>
   </style>
 
   <style name="Theme.Nebula.NoActionBar" parent="Theme.Nebula" />
+
+  <!-- Compose's Dialog resolves android:dialogTheme for its window dim, and the platform default
+       is 0.6 of pure #000. Over a wall of posters that left the artwork clearly legible behind a
+       near-black sheet whose only edge is a 1dp hairline, which is why both dialogs carried a
+       comment saying the hairline was the sole thing separating them from the page. 0.82 makes
+       the sheet the subject. -->
+  <style name="Theme.Nebula.Dialog" parent="@android:style/Theme.Material.Dialog">
+    <item name="android:backgroundDimAmount">0.82</item>
+  </style>
 </resources>

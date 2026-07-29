@@ -1,5 +1,72 @@
 # Changelog
 
+## [Unreleased]
+A detail pass over every surface, driven by an audit that turned up 255 findings. The 0.6.0 overhaul
+put the app onto one design system; this makes that system actually hold, and fixes a set of defects
+that only show up when you sit in front of the thing.
+
+**Titles are branded, not typeset.** Home's billboard and the Details header both lead with the
+title's own logotype where TMDB has one, falling back to type where it does not. (TMDB files SVG
+variants next to the PNGs and Coil cannot decode them, so the pick excludes SVG outright - choosing
+one renders an empty gap where the title should be.) The billboard's logo costs one extra request,
+written through the cache the Details screen reads - so pressing OK on the billboard, which is the
+most likely next press in the app, now opens warm instead of on a spinner.
+
+**The player's key legend teaches, then retires.** The transport panel printed "OK play/pause |
+LEFT/RIGHT 10s | UP for controls | DOWN hides" on every open, forever. Deleting it was not an option
+- this remote has no MENU, CAPTIONS or transport keys, so "UP for controls" is genuinely
+undiscoverable - so it now shows for the first five opens on an install and then stops.
+
+**Contrast, measured rather than judged.**
+- The primary button's label was white on violet at 3.69:1 - failing AA in the state it spends most
+  of its life in, since the focused state was the only one with dark ink. It is dark ink throughout
+  now, so focus reads as one object brightening rather than one inverting.
+- The quietest text tone was 3.18:1 on a chip while carrying the player's key legend, the pairing
+  instructions and the up-next countdown - none of which is decoration. Raised to clear 4.5:1
+  everywhere it appears.
+- The tonal ramp's middle step was 1.14:1, so every control that signalled focus by changing surface
+  was signalling nothing. Widened, and a fourth step added for focused rows.
+- Badge fills are opaque. As translucent tints they took the artwork behind them, so the same chip
+  was a different colour on the billboard than in a list.
+- A caveat badge no longer wears the failure colour: pausing a film used to put a red error chip on
+  the OSD.
+
+**Motion, within the frame budget.** The player's controls fade instead of appearing in one frame -
+the most noticeable tell the app had. Dialogs have an entrance. Nothing animates per-item inside a
+scrolling row and nothing animates layout, which is what this hardware cannot afford.
+
+**Player.**
+- The scrub bar shows how far ahead the stream has actually buffered, so a struggling stream is
+  legible instead of mysterious.
+- The controls' backing wash stops short of opaque black; it was deleting the bottom fifth of the
+  picture whenever the panel was up.
+
+**Fixes.**
+- Settings opened with its own heading scrolled off the top: the opening focus request dragged the
+  page down against a layout that was still settling, and a single scroll reset was overwritten by
+  the animation that caused it. The page is held at its top until you actually move.
+- Every rail was reserving vertical space for a focus ring that was never clipped - a scrollable
+  only clips its scroll axis. Removing it returns about a quarter of a viewport across eight rails.
+- Rail headings sat 16dp right of the posters they label, so Home had two left edges. The accent
+  tick now hangs in the margin and the words line up with the artwork.
+- The accent ticks rendered as a flat mid-blue: a violet-to-cyan gradient was being run across four
+  physical dp. It now runs down their long axis, which is the first time the app's cyan is visible.
+- The type scale's leading trim did the opposite of what its comment claimed, so every tuned gap in
+  the app was off by the half-leading.
+- Unfocused poster captions are dimmed, so a rail reads as one selected thing among many rather than
+  twenty equally-shouting titles.
+- Cards that respond to a held OK now show that they do; it was announced to screen readers and to
+  nobody else.
+- Removal actions are styled as removal - "Remove from My List" was a full violet button identical
+  to Play.
+- Loading a page shows the shape of what is arriving instead of a spinner on black with nothing
+  focusable, and short loads no longer flash a spinner at all.
+- Empty and failure states are measured and centred; their icons were rendering a third smaller than
+  the code asked for, because padding was shrinking the box the glyph was drawn into.
+- Settings states its version - the only place in the app that says what build you are running.
+- A test now enforces that the four colours `colors.xml` shares with the palette actually match;
+  they drive the launcher icon, the TV banner and the first frame before Compose exists.
+
 ## [0.6.1] - 2026-07-27
 Two fixes to the new player controls, both found on a Google TV Streamer.
 

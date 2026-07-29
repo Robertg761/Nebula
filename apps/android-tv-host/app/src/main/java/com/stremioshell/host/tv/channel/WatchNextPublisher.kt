@@ -1,5 +1,6 @@
 package com.stremioshell.host.tv.channel
 
+import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -20,32 +21,57 @@ import com.stremioshell.host.tv.TvAppActivity
  * can answer. Every failure is swallowed - a home-screen row is a nicety, and the
  * provider is missing entirely on a phone or a non-TV emulator image.
  */
+// tvprovider 1.0.0 marks its Watch Next compatibility surface RestrictedApi
+// even though this is the documented public API for third-party TV apps.
+// Keep the suppression at this adapter boundary rather than disabling the lint
+// check project-wide, so any unrelated use still fails CI.
+@SuppressLint("RestrictedApi")
 class WatchNextPublisher(context: Context) {
   private val context = context.applicationContext
 
   fun publish(desired: List<WatchNextProgramData>) {
     if (!providerAvailable()) return
     val resolver = context.contentResolver
-    runCatching {
-      val plan = WatchNextDiff.plan(queryOwnRows(), desired)
-      for (id in plan.deletes) {
-        resolver.delete(TvContractCompat.buildWatchNextProgramUri(id), null, null)
+    val plan = runCatching { WatchNextDiff.plan(queryOwnRows(), desired) }
+      .getOrElse {
+        Log.w(TAG, "Watch Next query failed", it)
+        return
       }
-      for ((id, program) in plan.updates) {
-        resolver.update(
+    for (id in plan.deletes) {
+      runCatching {
+        resolver.delete(TvContractCompat.buildWatchNextProgramUri(id), null, null)
+      }.onFailure { Log.w(TAG, "Watch Next delete failed for row $id", it) }
+    }
+    for ((id, program) in plan.updates) {
+      runCatching {
+        val updated = resolver.update(
           TvContractCompat.buildWatchNextProgramUri(id),
           contentValuesFor(program),
           null,
           null,
         )
+        // The launcher may remove a row after the query. Reinsert only on a clean zero-row update;
+        // an exception could be a transient provider failure, where inserting risks a duplicate.
+        if (updated == 0) {
+          resolver.insert(
+            TvContractCompat.WatchNextPrograms.CONTENT_URI,
+            contentValuesFor(program),
+          )
+        }
+      }.onFailure {
+        Log.w(TAG, "Watch Next update failed for ${program.internalProviderId}", it)
       }
-      for (program in plan.inserts) {
+    }
+    for (program in plan.inserts) {
+      runCatching {
         resolver.insert(
           TvContractCompat.WatchNextPrograms.CONTENT_URI,
           contentValuesFor(program),
         )
+      }.onFailure {
+        Log.w(TAG, "Watch Next insert failed for ${program.internalProviderId}", it)
       }
-    }.onFailure { Log.w(TAG, "Watch Next publish failed", it) }
+    }
   }
 
   /**

@@ -5,6 +5,7 @@ plugins {
   // @Parcelize on the TV back-stack Screen types so navigation survives
   // activity recreation.
   id("org.jetbrains.kotlin.plugin.parcelize")
+  id("androidx.baselineprofile")
 }
 
 // Optional CI signing. If these env vars are present, `assemble...Release` will produce signed APKs.
@@ -115,6 +116,16 @@ kotlin {
   jvmToolchain(17)
 }
 
+baselineProfile {
+  // Profile generation is an explicit, device-evidenced release procedure.
+  // A normal assemble must never silently replace the committed artifact.
+  automaticGenerationDuringBuild = false
+  // The plugin requires either source output or generation during every release build. Source
+  // output keeps ordinary/CI builds device-independent; the regeneration wrapper immediately
+  // moves its generated candidate out of src and refuses to run over an existing candidate.
+  saveInSrc = true
+}
+
 dependencies {
   implementation("androidx.core:core-ktx:1.13.1")
   implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.5")
@@ -147,6 +158,7 @@ dependencies {
   // Installs the committed baseline profile (src/main/baseline-prof.txt) at
   // first run so the Compose UI paths are AOT-compiled. See docs for regen.
   implementation("androidx.profileinstaller:profileinstaller:1.3.1")
+  baselineProfile(project(":baselineprofile"))
 
   testImplementation("junit:junit:4.13.2")
   testImplementation("org.json:json:20240303")

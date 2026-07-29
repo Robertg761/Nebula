@@ -70,6 +70,32 @@ class SettingsStore(private val context: Context) {
     context.tvDataStore.edit { it[KEY_ADDONS] = json.encodeToString(AddonList.sanitized(urls)) }
   }
 
+  /**
+   * Commits the two phone-pairing fields in one DataStore transaction.
+   *
+   * Pairing must not report success after only one half reached disk. Callers pass the already
+   * merged values, including whichever stored half the phone deliberately left blank.
+   */
+  suspend fun setPairedConfiguration(tmdbKey: String, addonUrls: List<String>) {
+    context.tvDataStore.edit { prefs ->
+      prefs[KEY_TMDB] = tmdbKey.trim()
+      prefs[KEY_ADDONS] = json.encodeToString(AddonList.sanitized(addonUrls))
+    }
+  }
+
+  /** Commits every field behind Settings' Save button as one indivisible preference edit. */
+  suspend fun setConfiguration(
+    tmdbKey: String,
+    addonUrls: List<String>,
+    subtitlesBaseUrl: String,
+  ) {
+    context.tvDataStore.edit { prefs ->
+      prefs[KEY_TMDB] = tmdbKey.trim()
+      prefs[KEY_ADDONS] = json.encodeToString(AddonList.sanitized(addonUrls))
+      prefs[KEY_SUBTITLES] = subtitlesBaseUrl.trim()
+    }
+  }
+
   /** Replaces the first addon, leaving any others alone. See [AddonList.replacingFirst]. */
   suspend fun setAddonManifestUrl(value: String) {
     context.tvDataStore.edit { prefs ->

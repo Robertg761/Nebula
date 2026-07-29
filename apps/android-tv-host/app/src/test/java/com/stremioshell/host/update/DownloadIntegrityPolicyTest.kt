@@ -63,9 +63,9 @@ class DownloadIntegrityPolicyTest {
   }
 
   @Test
-  fun `only corrupt downloads are refused`() {
+  fun `only size-verified downloads may proceed to archive verification`() {
     assertTrue(DownloadIntegrityPolicy.isInstallable(DownloadIntegrityPolicy.Verdict.VERIFIED))
-    assertTrue(DownloadIntegrityPolicy.isInstallable(DownloadIntegrityPolicy.Verdict.UNVERIFIABLE))
+    assertFalse(DownloadIntegrityPolicy.isInstallable(DownloadIntegrityPolicy.Verdict.UNVERIFIABLE))
     assertFalse(DownloadIntegrityPolicy.isInstallable(DownloadIntegrityPolicy.Verdict.CORRUPT))
   }
 }

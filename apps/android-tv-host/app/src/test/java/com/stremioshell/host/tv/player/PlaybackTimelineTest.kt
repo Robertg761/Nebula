@@ -16,6 +16,12 @@ class PlaybackTimelineTest {
   fun `an unknown duration has no remaining time`() {
     assertNull(PlaybackTimeline.remainingSec(positionSec = 600.0, durationSec = 0.0))
     assertNull(PlaybackTimeline.remainingSec(positionSec = 600.0, durationSec = -1.0))
+    assertNull(
+      PlaybackTimeline.remainingSec(positionSec = 600.0, durationSec = Double.NaN),
+    )
+    assertNull(
+      PlaybackTimeline.remainingSec(positionSec = Double.NaN, durationSec = 3_600.0),
+    )
   }
 
   @Test
@@ -45,6 +51,11 @@ class PlaybackTimelineTest {
     )
 
     assertEquals(3_600.0, remaining!!, 0.001)
+    assertEquals(
+      3_600.0,
+      PlaybackTimeline.remainingSec(0.0, 3_600.0, Double.NaN)!!,
+      0.001,
+    )
   }
 
   @Test
@@ -59,5 +70,18 @@ class PlaybackTimelineTest {
     val endsAt = PlaybackTimeline.endsAtEpochMs(nowEpochMs = 1_000_000L, remainingSec = -30.0)
 
     assertEquals(1_000_000L, endsAt)
+    assertEquals(1_000_000L, PlaybackTimeline.endsAtEpochMs(1_000_000L, Double.NaN))
+  }
+
+  @Test
+  fun `the end time saturates instead of overflowing`() {
+    assertEquals(
+      Long.MAX_VALUE,
+      PlaybackTimeline.endsAtEpochMs(Long.MAX_VALUE - 10, remainingSec = 1.0),
+    )
+    assertEquals(
+      Long.MAX_VALUE,
+      PlaybackTimeline.endsAtEpochMs(1_000_000L, remainingSec = Double.POSITIVE_INFINITY),
+    )
   }
 }

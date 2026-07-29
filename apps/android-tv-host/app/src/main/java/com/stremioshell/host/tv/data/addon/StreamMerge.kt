@@ -1,5 +1,6 @@
 package com.stremioshell.host.tv.data.addon
 
+import java.util.Locale
 /** What one addon had to say when the whole list was asked for a title's streams. */
 data class AddonFetch(
   /** The addon's short name, as [AddonList.labels] spelled it. */
@@ -33,6 +34,13 @@ data class MergedStreams(
  * is kept in the copy the earlier addon returned.
  */
 object StreamMerge {
+  /**
+   * A remote-friendly ceiling after quality sorting. Keeping thousands of releases composed
+   * consumes memory and makes a D-pad list effectively unnavigable; the highest-quality unique
+   * rows survive regardless of which addon returned them.
+   */
+  const val MAX_MERGED_STREAMS = 500
+
   fun merge(
     fetches: List<AddonFetch>,
     /**
@@ -46,7 +54,7 @@ object StreamMerge {
       fetch.streams.orEmpty().map { if (labelSources) it.copy(source = fetch.label) else it }
     }
     return MergedStreams(
-      streams = StreamOrder.byQuality(dedupe(tagged)),
+      streams = StreamOrder.byQuality(dedupe(tagged)).take(MAX_MERGED_STREAMS),
       notice = failureNotice(fetches.filter { it.streams == null }.map { it.label }),
       // An empty list of addons is "nothing configured", which the caller reports
       // its own way; only an addon that was actually asked can have failed.
@@ -70,7 +78,7 @@ object StreamMerge {
     val seenFiles = mutableSetOf<String>()
     return streams.filter { stream ->
       val url = stream.url?.trim()?.takeIf { it.isNotEmpty() }
-      val file = stream.infoHash?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+      val file = stream.infoHash?.trim()?.lowercase(Locale.ROOT)?.takeIf { it.isNotEmpty() }
         ?.let { "$it/${stream.fileIdx ?: -1}" }
       // A row with neither identity cannot be matched against anything, so it is
       // kept: dropping it would lose a stream rather than a duplicate.

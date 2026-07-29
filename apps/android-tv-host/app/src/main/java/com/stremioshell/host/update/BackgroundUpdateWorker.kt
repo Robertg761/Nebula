@@ -39,12 +39,19 @@ class BackgroundUpdateWorker(
       return if (isRetryable(error)) Result.retry() else Result.success()
     }
 
+    // Query DownloadManager rather than trusting the persisted id. Failed,
+    // cancelled and system-pruned rows are reconciled here so they cannot wedge
+    // every future worker run in DOWNLOAD_IN_PROGRESS.
+    val hasActiveDownload = apkUpdateManager.isDownloadInProgress(applicationContext)
+    val hasDownloadedForVersion = !hasActiveDownload && (
+      info?.let {
+        apkUpdateManager.hasDownloadedApkForVersion(applicationContext, it.latestVersionName)
+      } ?: false
+    )
     val decision = AutoUpdatePolicy.decide(
       updateInfo = info,
-      hasDownloadedForVersion = info?.let {
-        apkUpdateManager.hasDownloadedApkForVersion(applicationContext, it.latestVersionName)
-      } ?: false,
-      hasActiveDownload = apkUpdateManager.getActiveDownloadId(applicationContext) != null
+      hasDownloadedForVersion = hasDownloadedForVersion,
+      hasActiveDownload = hasActiveDownload
     )
 
     return when (decision) {

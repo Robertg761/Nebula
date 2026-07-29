@@ -2,6 +2,7 @@ package com.stremioshell.host.tv.data.tmdb
 
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 import java.util.Locale
 
 /**
@@ -12,9 +13,6 @@ import java.util.Locale
  * offering it as playable only ever produces an empty stream list.
  */
 object AirDate {
-  // Fixed to Locale.US rather than the device locale: the rest of this app requests TMDB with
-  // language=en-US, so a German month name next to an English synopsis would read as a bug.
-  private val DISPLAY = DateTimeFormatter.ofPattern("d MMM yyyy", Locale.US)
 
   /** The date, or null when TMDB sent nothing usable (it sends `null` and `""` interchangeably). */
   fun parse(raw: String?): LocalDate? {
@@ -23,8 +21,10 @@ object AirDate {
     return runCatching { LocalDate.parse(text) }.getOrNull()
   }
 
-  /** Display form, e.g. "12 Mar 2026". Null when there is no date to show. */
-  fun label(raw: String?): String? = parse(raw)?.format(DISPLAY)
+  /** Device-locale display form. Null when there is no date to show. */
+  fun label(raw: String?, locale: Locale = Locale.getDefault()): String? = parse(raw)?.format(
+    DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM).withLocale(locale),
+  )
 
   /**
    * The four-digit year.
@@ -60,7 +60,7 @@ object ContentRating {
   fun pick(byCountry: List<Pair<String, String>>): String? {
     val usable = byCountry.mapNotNull { (country, rating) ->
       val trimmed = rating.trim()
-      if (trimmed.isEmpty()) null else country.trim().uppercase(Locale.US) to trimmed
+      if (trimmed.isEmpty()) null else country.trim().uppercase(Locale.ROOT) to trimmed
     }
     for (country in PREFERRED_COUNTRIES) {
       usable.firstOrNull { it.first == country }?.let { return it.second }
@@ -117,6 +117,54 @@ object TrailerPick {
   }
 }
 
+/** One logo candidate, reduced to the fields that decide whether it is the one to show. */
+data class LogoRef(
+  val filePath: String,
+  /** TMDB's ISO-639-1 code. Null on the textless files it stores under no language at all. */
+  val language: String?,
+  val voteAverage: Double,
+  val width: Int,
+)
+
+/**
+ * Picks the title's logotype out of the pile TMDB returns.
+ *
+ * A typeset title is the clearest tell that a browse UI is generic: every premium service leads
+ * with the title's own logo, and TMDB has one for most things. It ships several per title though -
+ * per language, per revision, and in two formats - so the choice is not "the first one".
+ *
+ * SVG is excluded outright, and that is the load-bearing rule rather than a preference: TMDB files
+ * a good share of logos as `.svg`, and Coil cannot decode SVG without an extra decoder artifact
+ * this app does not ship. Picking one would render an empty box where the title should be, which
+ * is worse than the typeset fallback in every case.
+ */
+object LogoPick {
+  fun best(logos: List<LogoRef>, preferredLanguage: String = "en"): String? {
+    val usable = logos.filter {
+      it.filePath.isNotBlank() && !it.filePath.endsWith(".svg", ignoreCase = true)
+    }
+    if (usable.isEmpty()) return null
+    val preferred = preferredLanguage.lowercase(Locale.ROOT)
+    // Device language first, then English, then a language-neutral emblem, then any foreign
+    // wordmark. Within a language TMDB's vote and width decide, as before.
+    return usable
+      .sortedWith(
+        compareBy<LogoRef> { logo ->
+          when (logo.language?.lowercase(Locale.ROOT)) {
+            preferred -> 0
+            "en" -> 1
+            null -> 2
+            else -> 3
+          }
+        }
+          .thenByDescending { it.voteAverage }
+          .thenByDescending { it.width },
+      )
+      .first()
+      .filePath
+  }
+}
+
 /**
  * The single line of facts under the title: years, length, certification, score, genres.
  *
@@ -168,8 +216,7 @@ object DetailsMetadata {
   fun scoreLabel(voteAverage: Double?): String? {
     // TMDB reports 0.0 for anything nobody has voted on, and "0.0 / 10" reads as a verdict.
     if (voteAverage == null || voteAverage <= 0.0) return null
-    // Locale.US explicitly: a comma decimal separator here would not match the rest of the line.
-    return String.format(Locale.US, "%.1f / 10", voteAverage)
+    return String.format(Locale.getDefault(), "%.1f / 10", voteAverage)
   }
 
   /**

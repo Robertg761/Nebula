@@ -32,9 +32,10 @@ are the same thing through `scripts/run-gradle.mjs` (plain Node, no install
 step - the repo has no JS dependencies). Debug APK lands in
 `apps/android-tv-host/app/build/outputs/apk/debug/`.
 
-Unit tests: `./gradlew :app:testDebugUnitTest`. There is no instrumentation
-suite in the repo right now; device coverage is the manual matrix in
-`docs/tv-qa-matrix.md`.
+Automated gate:
+`./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug`.
+Baseline-profile generation is the only instrumentation procedure in the repo;
+device product QA remains the manual matrix in `docs/tv-qa-matrix.md`.
 
 ## First-run configuration
 
@@ -54,16 +55,17 @@ a QR code for a one-shot LAN web form: the phone submits the TMDB key and addon
 URL from its own keyboard. That form is plain HTTP on your local network,
 guarded by a single-use token shown only in the QR code, write-only (it never
 renders the stored values back), and it dies when you leave the pairing screen.
+Use it only on trusted private Wi-Fi or Ethernet: the token prevents unauthorized
+changes, but it does not encrypt credentials from the access point or anyone
+able to observe that LAN traffic.
 
 ### Addon URLs and cleartext
 
-Use `https://` addon URLs. A bare host you type gets `https://` prefixed
-automatically, but an explicit `http://` URL is sent in cleartext: the manifest
-and stream requests, including anything embedded in the addon path, travel
-unencrypted and are readable by anything on the network path. That matters here
-because a Comet manifest URL typically embeds your Real-Debrid token in the
-path. Release builds set `usesCleartextTraffic=false`, so `http://` addons fail
-outright there; debug builds allow cleartext for local testing.
+Use `https://` addon URLs. A bare host gets `https://` prefixed automatically;
+explicit `http://` addon and subtitle URLs are rejected in every build. This is
+intentional because configured Stremio URLs commonly carry debrid credentials
+in their path or query. The one-shot phone pairing form remains local
+cleartext HTTP as described above; it never returns stored credentials.
 
 ## Releases and in-app updates
 
@@ -71,9 +73,10 @@ outright there; debug builds allow cleartext for local testing.
 
 1. Triggers on `main` pushes touching release files, or `workflow_dispatch`.
 2. Reads the version from `apps/android-tv-host/app/build.gradle.kts`.
-3. Builds and signs `:app:assembleRelease`, verifies the signature with
-   `apksigner`.
-4. Creates GitHub Release `v<version>` with `StremioShell-tv-<version>.apk`.
+3. Runs unit tests and lint, then builds and signs `:app:assembleRelease`.
+4. Verifies the APK signature and compares its SHA-256 signer fingerprint with
+   the configured release identity.
+5. Creates GitHub Release `v<version>` with `StremioShell-tv-<version>.apk`.
 
 The in-app updater polls GitHub Releases on startup and hourly in the
 background (release builds only), matches the `-tv-` named asset, and
@@ -88,10 +91,14 @@ Before pushing a release:
 2. Add the matching `## [x.y.z] - YYYY-MM-DD` section to `CHANGELOG.md`.
 3. Confirm signing secrets exist: `SS_SIGNING_STORE_BASE64`,
    `SS_SIGNING_STORE_PASSWORD`, `SS_SIGNING_KEY_ALIAS`,
-   `SS_SIGNING_KEY_PASSWORD`, optional `SS_SIGNING_STORE_TYPE`.
+   `SS_SIGNING_KEY_PASSWORD`, optional `SS_SIGNING_STORE_TYPE`. Also configure
+   the repository Actions variable `SS_SIGNING_CERT_SHA256` with the expected
+   signing-certificate fingerprint (64 hexadecimal characters; colons are
+   accepted).
 
 ## Further reading
 
 - `apps/android-tv-host/README.md` - module layout, TV-only manifest, ABIs.
 - `docs/quality-gates.md` - what has to pass before a release.
+- `docs/baseline-profile.md` - device-backed profile regeneration procedure.
 - `docs/tv-qa-matrix.md` - manual device/remote QA checklist.

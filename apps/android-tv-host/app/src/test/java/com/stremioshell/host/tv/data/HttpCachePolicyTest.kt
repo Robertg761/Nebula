@@ -2,13 +2,22 @@ package com.stremioshell.host.tv.data
 
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.Connection
 import okhttp3.Interceptor
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.Buffer
+import okio.BufferedSource
+import okio.Timeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
@@ -69,6 +78,8 @@ class HttpCachePolicyTest {
     assertEquals(2, chain.attempts.size)
     assertTrue(chain.attempts[1].cacheControl.onlyIfCached)
     assertEquals(1, logged.size)
+    assertTrue(logged.single().contains("?<redacted>"))
+    assertTrue(!logged.single().contains("secret"))
   }
 
   @Test
@@ -107,6 +118,28 @@ class HttpCachePolicyTest {
     assertNull(CacheableResponseInterceptor().intercept(plain).header("Cache-Control"))
   }
 
+  @Test
+  fun `cancelling a coroutine cancels its in-flight OkHttp call`() = runBlocking {
+    val call = PendingCall(plainRequest)
+    val job = launch { call.awaitResponse() }
+    yield()
+
+    job.cancelAndJoin()
+
+    assertTrue(call.isCanceled())
+  }
+
+  @Test
+  fun `json response reads are bounded even when length is unknown`() {
+    assertEquals("12345", "12345".toResponseBody(null).readUtf8Limited(5))
+    assertThrows(HttpResponseTooLargeException::class.java) {
+      "123456".toResponseBody(null).readUtf8Limited(5)
+    }
+    assertThrows(HttpResponseTooLargeException::class.java) {
+      UnknownLengthBody("123456").readUtf8Limited(5)
+    }
+  }
+
   private fun response(request: Request, code: Int, pragma: String? = null): Response {
     val builder = Response.Builder()
       .request(request)
@@ -140,5 +173,32 @@ class HttpCachePolicyTest {
     override fun withReadTimeout(timeout: Int, unit: TimeUnit): Interceptor.Chain = this
     override fun writeTimeoutMillis(): Int = 0
     override fun withWriteTimeout(timeout: Int, unit: TimeUnit): Interceptor.Chain = this
+  }
+
+  /** A call that stays in flight until the coroutine under test cancels it. */
+  private class PendingCall(private val request: Request) : Call {
+    private var executed = false
+    private var cancelled = false
+
+    override fun request(): Request = request
+    override fun execute(): Response = throw UnsupportedOperationException()
+    override fun enqueue(responseCallback: Callback) {
+      executed = true
+    }
+    override fun cancel() {
+      cancelled = true
+    }
+    override fun isExecuted(): Boolean = executed
+    override fun isCanceled(): Boolean = cancelled
+    override fun timeout(): Timeout = Timeout.NONE
+    override fun clone(): Call = PendingCall(request)
+  }
+
+  private class UnknownLengthBody(text: String) : ResponseBody() {
+    private val body = Buffer().writeUtf8(text)
+
+    override fun contentType() = null
+    override fun contentLength(): Long = -1L
+    override fun source(): BufferedSource = body
   }
 }

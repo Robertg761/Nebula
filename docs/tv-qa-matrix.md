@@ -56,6 +56,103 @@
 11. Logcat capture is clean: no focus-recovery give-ups (`TvFocus` tag), no
    unhandled exceptions during the run.
 
+## Physical-device playback signoff
+
+The emulator is useful for navigation and state transitions, but it cannot
+sign off display cadence, HDR/Dolby Vision, HDMI passthrough, CEC, audio focus,
+or vendor decoder behavior. Run the applicable cases below on both physical
+device classes in the device matrix and attach a short recording plus filtered
+logcat for every failure.
+
+1. Display cadence and surface lifecycle:
+   - Play known 23.976, 24, 25, 50, and 59.94 fps samples on a display that
+     exposes matching modes. Confirm one mode change, even cadence, correct
+     audio sync, and no repeated black flashes.
+   - Pause, change playback speed, Home/return, and force an HDMI mode switch.
+     The frame-rate vote must clear while paused/backgrounded and reapply after
+     playback resumes; video must return instead of leaving audio over black.
+   - Repeat with a display that has no exact match. Playback must stay usable at
+     the current mode rather than loop through fallback modes.
+2. HDR and decoder paths:
+   - Play SDR, HDR10, and Dolby Vision samples the device claims to support.
+     Check correct colors/black level, stable first frame, and audio sync after
+     seek and resume.
+   - Play Dolby Vision on a non-Dolby-Vision device. The warning appears once
+     for that file, controls remain responsive, and a compatible/fallback
+     decode either plays correctly or fails with an actionable error.
+   - Include H.264 and HEVC at 1080p plus the highest-bitrate 4K remux the
+     device is expected to support. Watch memory, dropped frames, and decoder
+     fallback in logcat for at least ten minutes.
+3. Audio routes and passthrough:
+   - On Android 13/API 33 or newer, connect an AVR/soundbar and verify Decode
+     first, then Passthrough with each format the active sink reports: AC-3,
+     E-AC-3/JOC, DTS, DTS-HD, and TrueHD where available. Unsupported formats
+     must decode instead of becoming silent.
+   - With two outputs connected, select TV speakers/Bluetooth while HDMI is
+     idle. Passthrough must not borrow the idle HDMI sink's codecs.
+   - While passthrough is playing, disconnect the AVR or change to a
+     non-digital route. The player must switch to Decode, show the fallback
+     message, and recover sound without reopening the app.
+   - On API 26-32, confirm the capability-safe fallback: Passthrough is
+     unavailable because Android cannot publicly identify the active media
+     route, and Decode remains audible.
+4. Audio focus, noisy routes, and media controls:
+   - Start another media app, then start Nebula. Only the focus owner is
+     audible. Exercise transient loss, permanent loss, and ducking with
+     Assistant/alarm/another player.
+   - A transient loss resumes only playback that Nebula auto-paused. A
+     viewer-paused video must remain paused after focus returns.
+   - Disconnect headphones/Bluetooth during playback. The video pauses before
+     sound can jump to speakers.
+   - Verify play, pause, seek, next, and stop from HDMI-CEC, Bluetooth media
+     keys, and Assistant while the player is foregrounded. Background the app:
+     its MediaSession must become inactive and must not restart playback. Return
+     and confirm the paused session becomes controllable again.
+5. Slow, stalled, and replaced streams:
+   - Throttle a stream so the cache advances slowly. The buffering UI and
+     buffered range must advance and the no-progress watchdog must not report a
+     false failure while bytes are still arriving.
+   - Stop cache progress completely and verify a bounded actionable failure,
+     preserved resume position, and a working Retry. Retry an expired signed
+     link and confirm the replacement resumes at the saved position.
+   - While a track-list read is pending, retry the stream or advance to the next
+     episode. Open Audio/Subtitles immediately after the replacement loads; the
+     list must belong to the new file and must not remain empty because the old
+     read consumed the refresh.
+6. Seek and end-of-file boundaries:
+   - Tap and hold LEFT/RIGHT through several repeats, then issue a second seek
+     before the first restart callback arrives. The newest preview must remain
+     authoritative and clear only when it settles or its own timeout expires.
+   - Seek into a rebuffer, Back during the pending seek, and reopen. Resume must
+     use the requested target, not the pre-seek time.
+   - Check a normal ending, a file truncated well before 90%, and a tiny clip
+     shorter than five seconds. Position 0 of the tiny clip must not be marked
+     watched; 90% must. The truncated file stays resumable.
+7. Up Next and asynchronous races:
+   - Let an untouched episode end and verify the countdown. Press a key near the
+     end and verify the card waits for OK instead. Background during either the
+     countdown or stream resolution: no episode may start until the viewer
+     returns and asks.
+   - Take every configured stream addon offline. The card must show the addon
+     failure with Retry and stay in the player. Restore connectivity and retry.
+   - Fail one addon while another answers: automatic matching still uses the
+     healthy result. Return a healthy list with no matching release: the app
+     opens the next episode's picker.
+   - Use Next halfway through an episode, then cancel the resolving/failure
+     card. The current episode must remain resumable, not become watched.
+   - With TalkBack or Switch Access, invoke Play, Retry, and Cancel from the
+     card's custom actions and confirm they match the remote-key behavior.
+8. Subtitle sources and episode replacement:
+   - Verify embedded, stream-supplied, and fetched external subtitles; change
+     language/size/delay and confirm the next episode reapplies the language
+     preference against its own track IDs.
+   - Fetch a subtitle that same-origin redirects to a different-origin CDN.
+     Capture the requests and confirm stream cookies/auth/custom headers are
+     not forwarded to the CDN.
+   - Exercise a failed response, oversized body, slow cancellation, and a
+     response that arrives after Up Next replaces the file. No stale subtitle
+     may appear in the new episode, and every failure must leave the menu usable.
+
 ## Automated checks
 
 Run before manual device signoff:
@@ -63,12 +160,12 @@ Run before manual device signoff:
 ```bash
 source scripts/android-env.sh
 cd apps/android-tv-host
-./gradlew :app:testDebugUnitTest :app:assembleDebug
+./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 ```
 
-That is the whole automated gate, and it is what CI runs. There is no
-instrumentation suite in the repo: the androidTest sources went with the
-WebView shell, so everything below the JVM tests is manual.
+That is the normal automated gate, and it is what CI runs. Baseline-profile
+generation has its own device-backed instrumentation procedure in
+`docs/baseline-profile.md`; everything below the normal gate remains manual.
 
 Run the manual checklist on a local TV emulator plus hardware. The emulator
 needs `-gpu host` on Linux; headless software renderers crash emulator 36.x.

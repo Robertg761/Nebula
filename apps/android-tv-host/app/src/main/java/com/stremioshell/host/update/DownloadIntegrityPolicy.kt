@@ -28,6 +28,9 @@ object DownloadIntegrityPolicy {
     return if (expectedSizeBytes == actualSizeBytes) Verdict.VERIFIED else Verdict.CORRUPT
   }
 
-  /** True when the APK may still be offered for install; false means delete it and re-download. */
-  fun isInstallable(verdict: Verdict): Boolean = verdict != Verdict.CORRUPT
+  /**
+   * Only a byte-for-byte size match may proceed to package/signer verification. Old downloads
+   * with no recorded release size are re-downloaded rather than treated as trusted.
+   */
+  fun isInstallable(verdict: Verdict): Boolean = verdict == Verdict.VERIFIED
 }

@@ -1,3 +1,4 @@
+# shellcheck shell=bash disable=SC2317
 # Source this to set up JDK 17 and Android SDK paths for local builds:
 #   source scripts/android-env.sh
 # Respects existing JAVA_HOME/ANDROID_HOME; otherwise probes common locations.

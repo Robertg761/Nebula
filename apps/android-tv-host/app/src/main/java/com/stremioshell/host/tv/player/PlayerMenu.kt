@@ -1,5 +1,6 @@
 package com.stremioshell.host.tv.player
 
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -11,8 +12,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -20,9 +23,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -36,14 +42,27 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.stremioshell.host.tv.ui.EmptyState
+import com.stremioshell.host.tv.ui.theme.NebulaDimens
+import com.stremioshell.host.tv.ui.theme.NebulaMotion
 import com.stremioshell.host.tv.ui.theme.NebulaPalette
 import com.stremioshell.host.tv.ui.theme.NebulaShapes
+import com.stremioshell.host.tv.ui.theme.NebulaSpace
 
 /** The menu's three sections. */
 enum class PlayerMenuTab(val label: String) {
@@ -85,6 +104,8 @@ class PlayerMenuActions(
   /** Ask the subtitles addon what it has, or ask again after a failure. */
   val onFetchExternalSubtitles: () -> Unit = {},
   val onSelectExternalSubtitle: (ExternalSubtitleOption) -> Unit = {},
+  /** Any key handled inside Compose still counts as recent viewer interaction. */
+  val onInteraction: () -> Unit = {},
 )
 
 /**
@@ -122,7 +143,11 @@ fun BoxScope.PlayerMenu(state: PlayerMenuState, actions: PlayerMenuActions) {
       .align(Alignment.CenterEnd)
       .fillMaxHeight()
       .fillMaxWidth(PANEL_WIDTH_FRACTION)
-      .background(NebulaPalette.Surface),
+      .background(NebulaPalette.Surface)
+      .onPreviewKeyEvent {
+        if (it.type == KeyEventType.KeyDown) actions.onInteraction()
+        false
+      },
   ) {
     // The panel is opaque and the film behind it is not, so without an edge its
     // left side reads as a dark band in the picture rather than as a boundary.
@@ -136,7 +161,18 @@ fun BoxScope.PlayerMenu(state: PlayerMenuState, actions: PlayerMenuActions) {
       modifier = Modifier
         .weight(1f)
         .fillMaxHeight()
-        .padding(horizontal = 24.dp, vertical = 24.dp),
+        // Asymmetric on purpose. The left side's boundary is the 1dp divider above,
+        // not the screen, so 24dp is right there. The right side *is* the physical
+        // panel edge, and at 24dp a set with overscan on ate the "+" buttons of
+        // every Options row - the first thing off the screen was the only way to
+        // change any of them. Top and bottom get the same protection the rest of
+        // the app's screens do.
+        .padding(
+          start = NebulaSpace.lg,
+          end = NebulaDimens.ScreenEdge,
+          top = NebulaDimens.ScreenEdgeVertical,
+          bottom = NebulaDimens.ScreenEdgeVertical,
+        ),
     ) {
       // One track, so the three sections read as one control with a position in
       // it rather than as three buttons that happen to sit together.
@@ -158,12 +194,13 @@ fun BoxScope.PlayerMenu(state: PlayerMenuState, actions: PlayerMenuActions) {
           )
         }
       }
-      Spacer(modifier = Modifier.height(18.dp))
+      Spacer(modifier = Modifier.height(NebulaSpace.md))
       Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
         when (state.tab) {
           PlayerMenuTab.Audio -> TrackSection(
             rows = state.audioRows,
-            emptyMessage = "This file has no audio tracks.",
+            emptyTitle = "No audio tracks",
+            emptyHint = "This release has no selectable audio.",
             focusRequester = contentFocus,
             onSelect = { row -> row.trackId?.let(actions.onSelectAudio) },
           )
@@ -182,9 +219,18 @@ fun BoxScope.PlayerMenu(state: PlayerMenuState, actions: PlayerMenuActions) {
           )
         }
       }
+      // Only what is not obvious, and only what is true of the section on screen.
+      // This printed "OK selects" under all three tabs, and on Options OK selects
+      // nothing at all - the interaction there is LEFT/RIGHT on the step buttons.
+      // A line of instructions that is wrong on a third of the panel is worse than
+      // no line, and BACK is the one mapping a viewer cannot guess.
       Text(
-        "OK selects   |   UP/DOWN moves   |   BACK closes",
-        modifier = Modifier.padding(top = 14.dp),
+        if (state.tab == PlayerMenuTab.Options) {
+          "LEFT/RIGHT chooses −/+   |   OK adjusts   |   BACK closes"
+        } else {
+          "BACK closes"
+        },
+        modifier = Modifier.padding(top = NebulaSpace.sm),
         color = NebulaPalette.TextFaint,
         style = MaterialTheme.typography.labelMedium,
       )
@@ -205,14 +251,15 @@ fun BoxScope.PlayerMenu(state: PlayerMenuState, actions: PlayerMenuActions) {
   LaunchedEffect(contentFocusable) {
     if (contentFocusable) {
       repeat(FOCUS_ATTEMPTS) {
-        if (runCatching { contentFocus.requestFocus() }.isSuccess) return@LaunchedEffect
+        runCatching { contentFocus.requestFocus() }
         withFrameNanos {}
       }
+      return@LaunchedEffect
     }
     // Nothing focusable in the section (an empty track list): the tabs are still
     // focusable, and are also the way out of the empty section.
     repeat(FOCUS_ATTEMPTS) {
-      if (runCatching { tabFocus.requestFocus() }.isSuccess) return@LaunchedEffect
+      runCatching { tabFocus.requestFocus() }
       withFrameNanos {}
     }
   }
@@ -241,6 +288,10 @@ private fun TabButton(
       // is a press that does nothing they did not already ask for.
       .onFocusChanged { if (it.isFocused) { focused = true; onFocused() } else focused = false }
       .clickable(onClick = onFocused)
+      .semantics {
+        selected = active
+        role = Role.Tab
+      }
       .background(background, shape)
       .border(
         width = if (focused || active) 2.dp else 0.dp,
@@ -257,7 +308,7 @@ private fun TabButton(
     Text(
       tab.label,
       color = when {
-        focused -> OnAccent
+        focused -> NebulaPalette.OnAccent
         active -> NebulaPalette.TextHigh
         else -> NebulaPalette.TextMuted
       },
@@ -270,16 +321,19 @@ private fun TabButton(
 @Composable
 private fun TrackSection(
   rows: List<TrackRow>,
-  emptyMessage: String,
+  emptyTitle: String,
+  emptyHint: String,
   focusRequester: FocusRequester,
   onSelect: (TrackRow) -> Unit,
 ) {
   if (rows.isEmpty()) {
-    Text(
-      emptyMessage,
-      color = NebulaPalette.TextMuted,
-      style = MaterialTheme.typography.bodyMedium,
-    )
+    // Was one line of grey text in the top-left corner of an otherwise empty
+    // 400dp panel. The app already owns the treatment for "nothing here"; focus is
+    // unaffected because the caller's `contentFocusable` is already false for this
+    // case and the panel's focus request falls back to the tabs.
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+      EmptyState(title = emptyTitle, hint = emptyHint, icon = Icons.Filled.Warning)
+    }
     return
   }
   val focusIndex = MpvTracks.initialFocusIndex(rows)
@@ -384,7 +438,7 @@ private fun LabelledRow(
     Column(modifier = Modifier.weight(1f)) {
       Text(
         label,
-        color = if (focused) OnAccent else NebulaPalette.TextHigh,
+        color = if (focused) NebulaPalette.OnAccent else NebulaPalette.TextHigh,
         style = MaterialTheme.typography.titleSmall,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
@@ -392,7 +446,7 @@ private fun LabelledRow(
       if (detail.isNotBlank()) {
         Text(
           detail,
-          color = if (focused) OnAccentMuted else NebulaPalette.TextMuted,
+          color = if (focused) NebulaPalette.OnAccentMuted else NebulaPalette.TextMuted,
           style = MaterialTheme.typography.bodySmall,
           maxLines = 1,
           overflow = TextOverflow.Ellipsis,
@@ -402,51 +456,74 @@ private fun LabelledRow(
   }
 }
 
+/**
+ * The five adjustable settings, and one line of help about whichever one the
+ * highlight is on.
+ *
+ * That line replaced two permanent body paragraphs - a sentence about delay scope
+ * and a three-line explanation of passthrough - which between them held the bottom
+ * third of the panel for information relevant only while you were on one specific
+ * row. (The passthrough one was also already said at the moment it matters, by
+ * [AudioOutputMode.osdMessage], on the switch itself.) Same node count, and the
+ * sentence is now about the thing under the highlight.
+ *
+ * Scrollable because Android TV exposes a system text-size setting: at Large these
+ * rows wrap and the bottom ones used to be clipped with no way for the D-pad to
+ * bring them into view. Compose's focus system scrolls a `verticalScroll`
+ * container to its focused child on its own, so this needs no extra plumbing.
+ */
 @Composable
 private fun OptionsSection(
   state: PlayerMenuState,
   actions: PlayerMenuActions,
   focusRequester: FocusRequester,
 ) {
-  Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+  var help by remember { mutableStateOf(SPEED_HELP) }
+  Column(
+    modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+    verticalArrangement = Arrangement.spacedBy(10.dp),
+  ) {
     AdjusterRow(
       label = "Playback speed",
       value = PlaybackSpeeds.label(state.speed),
+      help = SPEED_HELP,
       onStep = actions.onSpeedStep,
+      onFocusedHelp = { help = it },
       decreaseFocus = focusRequester,
     )
     AdjusterRow(
       label = "Subtitle size",
       value = state.subtitleSize.label,
+      help = "Changes text subtitles. Bitmap PGS/DVD subtitles keep their encoded size.",
       onStep = actions.onSubtitleSizeStep,
+      onFocusedHelp = { help = it },
     )
     AdjusterRow(
       label = "Audio output",
       value = state.audioOutput.label,
+      help = "Passthrough is session-only and appears only when a receiver reports support.",
       onStep = actions.onAudioOutputStep,
+      onFocusedHelp = { help = it },
     )
     AdjusterRow(
       label = "Audio delay",
       value = DelaySteps.label(state.audioDelaySec),
+      help = DELAY_HELP,
       onStep = actions.onAudioDelayStep,
+      onFocusedHelp = { help = it },
     )
     AdjusterRow(
       label = "Subtitle delay",
       value = DelaySteps.label(state.subtitleDelaySec),
+      help = DELAY_HELP,
       onStep = actions.onSubtitleDelayStep,
+      onFocusedHelp = { help = it },
     )
     Text(
-      "Delays are per file; the speed lasts until you leave the player.",
-      modifier = Modifier.padding(top = 6.dp),
-      color = NebulaPalette.TextMuted,
-      style = MaterialTheme.typography.bodySmall,
-    )
-    // Spelled out here rather than left to be discovered: passthrough is the one
-    // option in this list whose failure is silence, and a viewer has to know both
-    // what it is for and that Decode is the way back from it.
-    Text(
-      "Passthrough sends AC3/DTS/TrueHD to an AV receiver untouched. " +
-        "If the sound cuts out, your sink cannot take it - go back to Decode.",
+      help,
+      // The height is reserved so that walking the rows swaps a sentence rather
+      // than reflowing the column under the highlight.
+      modifier = Modifier.padding(top = 6.dp).heightIn(min = 40.dp),
       color = NebulaPalette.TextMuted,
       style = MaterialTheme.typography.bodySmall,
     )
@@ -458,15 +535,25 @@ private fun OptionsSection(
  * UP/DOWN walks between settings — which is what makes every option reachable
  * without the player having to intercept LEFT/RIGHT and route it at whichever
  * row happens to be focused.
+ *
+ * [onFocusedHelp] fires for the whole row rather than per button, so the sentence
+ * under the list does not flicker as the highlight crosses from "-" to "+".
  */
 @Composable
 private fun AdjusterRow(
   label: String,
   value: String,
+  help: String,
   onStep: (Int) -> Unit,
+  onFocusedHelp: (String) -> Unit,
   decreaseFocus: FocusRequester? = null,
 ) {
-  Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+  Row(
+    verticalAlignment = Alignment.CenterVertically,
+    modifier = Modifier
+      .fillMaxWidth()
+      .onFocusChanged { if (it.hasFocus) onFocusedHelp(help) },
+  ) {
     Text(
       label,
       modifier = Modifier.weight(1f),
@@ -476,7 +563,11 @@ private fun AdjusterRow(
       overflow = TextOverflow.Ellipsis,
     )
     StepButton(
-      text = "-",
+      // U+2212 MINUS SIGN, not the hyphen this used to carry: a hyphen sits short
+      // and low on its own axis, so beside a full-height "+" in an identical circle
+      // the pair read as two different weights at two different heights.
+      text = "−",
+      label = "Decrease $label",
       onClick = { onStep(-1) },
       modifier = if (decreaseFocus != null) Modifier.focusRequester(decreaseFocus) else Modifier,
     )
@@ -497,16 +588,36 @@ private fun AdjusterRow(
       maxLines = 1,
       overflow = TextOverflow.Ellipsis,
     )
-    StepButton(text = "+", onClick = { onStep(1) })
+    StepButton(text = "+", label = "Increase $label", onClick = { onStep(1) })
   }
 }
 
+/**
+ * Wears the same focus treatment as every other button in the app - the 3dp bright
+ * ring and the same scale step - rather than the 2dp border and nothing else it
+ * used to roll for itself, which made a focused "+" the dimmest focused thing on
+ * screen. The scale is a `graphicsLayer`, which is draw-only and so cannot reflow
+ * the row it sits in.
+ */
 @Composable
-private fun StepButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun StepButton(
+  text: String,
+  /** What this button steps, spoken. Shadowing `contentDescription` inside the semantics
+   *  lambda is what made the parameter unreachable there, so it is named for its job. */
+  label: String,
+  onClick: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
   var focused by remember { mutableStateOf(false) }
+  val scale by animateFloatAsState(
+    targetValue = if (focused) NebulaDimens.FocusScaleButton else 1f,
+    animationSpec = NebulaMotion.standard(),
+    label = "stepButtonScale",
+  )
   Box(
     modifier = modifier
       .size(42.dp)
+      .graphicsLayer { scaleX = scale; scaleY = scale }
       .onFocusChanged { focused = it.isFocused }
       .clickable(onClick = onClick)
       .background(
@@ -514,15 +625,18 @@ private fun StepButton(text: String, onClick: () -> Unit, modifier: Modifier = M
         CircleShape,
       )
       .border(
-        width = if (focused) 2.dp else 1.dp,
+        width = if (focused) 3.dp else 1.dp,
         color = if (focused) NebulaPalette.VioletBright else NebulaPalette.Outline,
         shape = CircleShape,
-      ),
+      )
+      // The glyph is the whole button, so the name of what it steps has to reach a
+      // screen reader some other way; "plus" alone says nothing.
+      .semantics { this.contentDescription = label },
     contentAlignment = Alignment.Center,
   ) {
     Text(
       text,
-      color = if (focused) OnAccent else NebulaPalette.TextHigh,
+      color = if (focused) NebulaPalette.OnAccent else NebulaPalette.TextHigh,
       style = MaterialTheme.typography.titleMedium,
     )
   }
@@ -583,21 +697,33 @@ private fun SelectionMarker(selected: Boolean, focused: Boolean) {
       Icon(
         Icons.Filled.Check,
         contentDescription = "Selected",
-        tint = if (focused) OnAccent else NebulaPalette.VioletBright,
+        tint = if (focused) NebulaPalette.OnAccent else NebulaPalette.VioletBright,
         modifier = Modifier.size(18.dp),
       )
     }
   }
 }
 
-/** Content on a focused accent fill, matching what the app's buttons flip to. */
-private val OnAccent = Color(0xFF120A2E)
+// The ink on a focused accent fill used to be declared here as a literal, with a
+// comment asserting it matched the app's buttons. It is now NebulaPalette.OnAccent,
+// so the assertion is a definition.
 
-/** The second line of a focused row: readable on the accent without shouting. */
-private val OnAccentMuted = Color(0xCC120A2E)
+/** Two sentences that are true of more than one row; the rest are written inline. */
+private const val SPEED_HELP = "Lasts until you leave the player."
+private const val DELAY_HELP = "Per file; reset when you leave this stream."
 
 private val VALUE_WIDTH = 124.dp
 private val ROW_GAP = 8.dp
-private const val PANEL_WIDTH_FRACTION = 0.44f
+
+/**
+ * How much of the screen the panel takes.
+ *
+ * Not private: the OSD underneath narrows itself by exactly this while the menu is
+ * open, so that the scrub bar, the remaining time and the end-of-film clock the
+ * panel exists to sit *beside* are not behind it. The two cannot be allowed to
+ * drift. Widened from 0.44 to pay for the overscan-safe right padding above, so
+ * the usable content width is unchanged.
+ */
+internal const val PANEL_WIDTH_FRACTION = 0.46f
 private const val OFF_ROW_KEY = Int.MIN_VALUE
 private const val FOCUS_ATTEMPTS = 5

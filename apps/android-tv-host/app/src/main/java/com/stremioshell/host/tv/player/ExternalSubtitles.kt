@@ -1,6 +1,8 @@
 package com.stremioshell.host.tv.player
 
+import com.stremioshell.host.tv.data.addon.AddonStreamSubtitle
 import com.stremioshell.host.tv.data.subtitles.AddonSubtitle
+import java.net.URI
 import java.util.Locale
 
 /**
@@ -22,6 +24,48 @@ data class ExternalSubtitleOption(
    */
   val trackTitle: String,
 )
+
+/**
+ * Bounds subtitle rows supplied inside an untrusted stream response.
+ *
+ * Applied before Intent extras are built as well as when they are read: Binder
+ * payload, parsing work and the D-pad menu all stay bounded even if a caller
+ * bypasses the normal intent factory.
+ */
+object EmbeddedSubtitles {
+  const val MAX_OPTIONS = 60
+  const val MAX_URL_LENGTH = 4_096
+  const val MAX_ID_LENGTH = 120
+  const val MAX_LANGUAGE_LENGTH = 64
+  const val MAX_CANDIDATES = MAX_OPTIONS * 4
+
+  fun sanitize(subtitles: List<AddonStreamSubtitle>): List<AddonStreamSubtitle> {
+    val seenUrls = HashSet<String>()
+    return subtitles.asSequence()
+      .take(MAX_CANDIDATES)
+      .mapNotNull { subtitle ->
+        val url = safeHttpUrl(subtitle.url) ?: return@mapNotNull null
+        if (!seenUrls.add(url)) return@mapNotNull null
+        subtitle.copy(
+          url = url,
+          id = subtitle.id?.trim()?.takeIf { it.isNotEmpty() }?.take(MAX_ID_LENGTH),
+          lang = subtitle.lang?.trim()?.takeIf { it.isNotEmpty() }?.take(MAX_LANGUAGE_LENGTH),
+        )
+      }
+      .take(MAX_OPTIONS)
+      .toList()
+  }
+
+  private fun safeHttpUrl(rawUrl: String): String? {
+    val url = rawUrl.trim()
+    if (url.isEmpty() || url.length > MAX_URL_LENGTH) return null
+    val parsed = runCatching { URI(url) }.getOrNull() ?: return null
+    val scheme = parsed.scheme?.lowercase(Locale.ROOT)
+    if (scheme != "http" && scheme != "https") return null
+    if (parsed.rawAuthority.isNullOrBlank()) return null
+    return url
+  }
+}
 
 /**
  * Whether the Subtitles tab has anything to offer beyond the file's own tracks,
@@ -74,6 +118,9 @@ object ExternalSubtitles {
    */
   const val PER_LANGUAGE = 3
 
+  /** Enough alternatives to cover twenty languages without creating an unwalkable TV menu. */
+  const val MAX_OPTIONS = 60
+
   private const val UNKNOWN_LABEL = "Unknown language"
 
   fun options(
@@ -101,6 +148,7 @@ object ExternalSubtitles {
       .flatMap { (code, urls) ->
         urls.mapIndexed { index, url -> option(code, url, index + 1, urls.size) }
       }
+      .take(MAX_OPTIONS)
   }
 
   /**

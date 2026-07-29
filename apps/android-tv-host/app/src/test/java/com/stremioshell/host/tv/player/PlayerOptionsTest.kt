@@ -37,6 +37,14 @@ class PlayerOptionsTest {
   }
 
   @Test
+  fun `invalid native speed values fall back to normal playback`() {
+    assertEquals(1.0, PlaybackSpeeds.nearest(Double.NaN), 0.0001)
+    assertEquals(1.0, PlaybackSpeeds.nearest(Double.POSITIVE_INFINITY), 0.0001)
+    assertEquals(1.0, PlaybackSpeeds.nearest(-1.0), 0.0001)
+    assertEquals("1x", PlaybackSpeeds.label(Double.NaN))
+  }
+
+  @Test
   fun `medium subtitle size is the size the player used to hardcode`() {
     assertEquals(44, SubtitleSize.Medium.fontSize)
     assertEquals(SubtitleSize.Medium, SubtitleSize.DEFAULT)
@@ -77,6 +85,33 @@ class PlayerOptionsTest {
   }
 
   @Test
+  fun `passthrough remains unavailable when sink support is unknown`() {
+    assertEquals("", AudioOutputMode.Decode.spdifCodecsFor(null))
+    assertEquals(null, AudioOutputMode.Passthrough.spdifCodecsFor(null))
+    assertEquals(null, AudioOutputMode.Passthrough.spdifCodecsFor(emptySet()))
+  }
+
+  @Test
+  fun `passthrough requests only codecs the active sink reports`() {
+    val supported = setOf(" TRUEHD ", "AC3", "aac")
+
+    assertEquals(
+      "ac3,truehd",
+      AudioOutputMode.Passthrough.spdifCodecsFor(supported),
+    )
+  }
+
+  @Test
+  fun `passthrough codec resolution keeps mpv canonical order`() {
+    val supported = setOf("truehd", "dts-hd", "dts", "eac3", "ac3")
+
+    assertEquals(
+      AudioOutputMode.Passthrough.spdifCodecs,
+      AudioOutputMode.Passthrough.spdifCodecsFor(supported),
+    )
+  }
+
+  @Test
   fun `audio output round-trips through storage`() {
     AudioOutputMode.entries.forEach { mode ->
       assertEquals(mode, AudioOutputMode.fromStorage(mode.storageName))
@@ -109,7 +144,8 @@ class PlayerOptionsTest {
   }
 
   @Test
-  fun `the passthrough confirmation names the way back out of silence`() {
+  fun `the passthrough confirmation says support is unverified and names the safe way back`() {
+    assertTrue(AudioOutputMode.Passthrough.osdMessage.contains("not verified"))
     assertTrue(AudioOutputMode.Passthrough.osdMessage.contains("Decode"))
   }
 
@@ -141,5 +177,13 @@ class PlayerOptionsTest {
     assertEquals("0 ms", DelaySteps.label(0.0))
     assertEquals("+150 ms", DelaySteps.label(0.15))
     assertEquals("-25 ms", DelaySteps.label(-0.025))
+  }
+
+  @Test
+  fun `invalid or extreme native delay values stay on the safe grid`() {
+    assertEquals(0.025, DelaySteps.stepped(Double.NaN, 1), 0.0001)
+    assertEquals(DelaySteps.LIMIT_SEC, DelaySteps.stepped(Double.MAX_VALUE, 1), 0.0001)
+    assertEquals("0 ms", DelaySteps.label(Double.NaN))
+    assertEquals("+10000 ms", DelaySteps.label(Double.MAX_VALUE))
   }
 }

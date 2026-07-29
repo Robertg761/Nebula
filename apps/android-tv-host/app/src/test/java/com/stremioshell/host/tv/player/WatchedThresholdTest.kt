@@ -29,6 +29,19 @@ class WatchedThresholdTest {
   }
 
   @Test
+  fun `invalid playback values are never finished`() {
+    assertFalse(WatchedThreshold.isFinished(positionSec = -1.0, durationSec = 100.0))
+    assertFalse(WatchedThreshold.isFinished(positionSec = Double.NaN, durationSec = 100.0))
+    assertFalse(WatchedThreshold.isFinished(positionSec = 100.0, durationSec = Double.NaN))
+    assertFalse(
+      WatchedThreshold.isFinished(
+        positionSec = Double.POSITIVE_INFINITY,
+        durationSec = 100.0,
+      ),
+    )
+  }
+
+  @Test
   fun `a truncated stream that ran out early stays resumable`() {
     assertFalse(WatchedThreshold.isFinished(positionSec = 3_000.0, durationSec = 6_000.0))
   }
@@ -43,5 +56,24 @@ class WatchedThresholdTest {
   fun `a short video is carried by the absolute guard, not the fraction`() {
     // 90% of two minutes is twelve seconds short of the end; five is not.
     assertTrue(WatchedThreshold.isFinished(positionSec = 116.0, durationSec = 120.0))
+  }
+
+  @Test
+  fun `tiny clips are not finished before playback starts`() {
+    assertFalse(WatchedThreshold.isFinished(positionSec = 0.0, durationSec = 1.0))
+    assertFalse(
+      WatchedThreshold.isFinished(
+        positionSec = 0.0,
+        durationSec = WatchedThreshold.END_GUARD_SEC,
+      ),
+    )
+  }
+
+  @Test
+  fun `tiny clips still finish by watched fraction`() {
+    assertFalse(WatchedThreshold.isFinished(positionSec = 3.59, durationSec = 4.0))
+    assertTrue(WatchedThreshold.isFinished(positionSec = 3.6, durationSec = 4.0))
+    assertFalse(WatchedThreshold.isFinished(positionSec = 1.0, durationSec = 6.0))
+    assertTrue(WatchedThreshold.isFinished(positionSec = 5.4, durationSec = 6.0))
   }
 }

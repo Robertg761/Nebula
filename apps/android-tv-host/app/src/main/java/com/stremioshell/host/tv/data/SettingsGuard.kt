@@ -63,9 +63,7 @@ object SettingsSaveGuard {
   fun normalizeSubtitlesBase(raw: String): String {
     val trimmed = raw.trim()
     if (trimmed.isEmpty()) return SubtitlesClient.OPENSUBTITLES_V3_BASE
-    val normalized = AddonList.normalize(trimmed)
-    if (normalized.isEmpty()) return SubtitlesClient.OPENSUBTITLES_V3_BASE
-    return normalized.removeSuffix("/manifest.json").trimEnd('/')
+    return AddonList.baseUrl(trimmed).ifEmpty { SubtitlesClient.OPENSUBTITLES_V3_BASE }
   }
 
   /** What to tell the viewer when the guard held a value back; null when it did not. */
@@ -97,7 +95,7 @@ object SettingsStatus {
       // A single addon keeps the wording it had before the list existed, manifest
       // name and all: that name is the only confirmation the URL points where the
       // viewer thinks it does.
-      probes.size == 1 && ok.size == 1 -> "Addon: connected (${ok[0].name?.ifBlank { "addon" }})"
+      probes.size == 1 && ok.size == 1 -> "Addon: connected (${safeManifestName(ok[0].name)})"
       probes.size == 1 -> "Addon: failed (check the URL)"
       ok.isEmpty() -> "Addons: none connected (check the URLs)"
       failed.isEmpty() -> "Addons: ${ok.size} connected"
@@ -105,4 +103,22 @@ object SettingsStatus {
         failed.joinToString(", ") { it.label } + " failed)"
     }
   }
+
+  /**
+   * Manifest names are remote input. Keep their useful text while preventing control/bidi
+   * characters or a megabyte-long name from taking over Settings' live status region.
+   */
+  private fun safeManifestName(raw: String?): String {
+    val safe = raw.orEmpty()
+      .filter { char ->
+        char.code >= 0x20 &&
+          char.code != 0x7f &&
+          Character.getType(char) != Character.FORMAT.toInt()
+      }
+      .trim()
+      .take(MAX_MANIFEST_NAME_CHARS)
+    return safe.ifBlank { "addon" }
+  }
+
+  private const val MAX_MANIFEST_NAME_CHARS = 80
 }

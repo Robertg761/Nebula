@@ -62,6 +62,25 @@ class SubtitlesClientTest {
   }
 
   @Test
+  fun `configured query survives route construction and a fragment does not`() {
+    assertEquals(
+      "https://subs.example/cfg/subtitles/movie/tt1.json?token=secret",
+      SubtitlesClient.subtitlesUrl(
+        "https://subs.example/cfg/MANIFEST.JSON?token=secret#install",
+        "movie",
+        "tt1",
+      ),
+    )
+  }
+
+  @Test
+  fun `cleartext subtitle addon is rejected`() {
+    assertThrows(IllegalArgumentException::class.java) {
+      SubtitlesClient.subtitlesUrl("http://subs.example", "movie", "tt1")
+    }
+  }
+
+  @Test
   fun `extra arguments are percent-encoded into their own path segment`() {
     val url = SubtitlesClient.subtitlesUrl(
       "https://opensubtitles-v3.strem.io",

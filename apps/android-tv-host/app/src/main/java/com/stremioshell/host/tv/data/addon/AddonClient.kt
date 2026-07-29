@@ -45,11 +45,8 @@ class AddonClient(
 
   companion object {
     /** `<...>/manifest.json` -> `<...>/stream/{type}/{id}.json` */
-    fun streamUrl(manifestUrl: String, type: String, id: String): String {
-      val base = manifestUrl.trim().removeSuffix("/manifest.json").removeSuffix("/")
-      require(base != manifestUrl.trim()) { "Addon URL must end in /manifest.json: $manifestUrl" }
-      return "$base/stream/$type/$id.json"
-    }
+    fun streamUrl(manifestUrl: String, type: String, id: String): String =
+      AddonList.resourceUrl(manifestUrl, "stream", type, "$id.json")
   }
 }
 
@@ -81,6 +78,12 @@ data class AddonStream(
   @SerialName("infoHash") val infoHash: String? = null,
   /** Which file inside a pack [infoHash] refers to. */
   @SerialName("fileIdx") val fileIdx: Int? = null,
+  /**
+   * Subtitle tracks supplied with this exact stream. These are distinct from a
+   * later search against the public subtitle addon: signed or release-specific
+   * tracks can only be preserved here.
+   */
+  @SerialName("subtitles") val subtitles: List<AddonStreamSubtitle> = emptyList(),
   @SerialName("behaviorHints") val behaviorHints: AddonBehaviorHints? = null,
   /**
    * Which configured addon produced this row, filled in by [StreamMerge] once
@@ -103,4 +106,26 @@ data class AddonBehaviorHints(
   @SerialName("bingeGroup") val bingeGroup: String? = null,
   @SerialName("filename") val filename: String? = null,
   @SerialName("videoSize") val videoSize: Long? = null,
+  @SerialName("videoHash") val videoHash: String? = null,
+  @SerialName("proxyHeaders") val proxyHeaders: AddonProxyHeaders? = null,
+  @SerialName("notWebReady") val notWebReady: Boolean? = null,
+  @SerialName("countryWhitelist") val countryWhitelist: List<String> = emptyList(),
+)
+
+/** One subtitle attached directly to a Stremio stream response. */
+@Serializable
+data class AddonStreamSubtitle(
+  @SerialName("id") val id: String? = null,
+  @SerialName("url") val url: String = "",
+  @SerialName("lang") val lang: String? = null,
+)
+
+/**
+ * Headers the addon requires around playback. Request and response maps are
+ * both retained even though the player currently consumes only [request].
+ */
+@Serializable
+data class AddonProxyHeaders(
+  @SerialName("request") val request: Map<String, String> = emptyMap(),
+  @SerialName("response") val response: Map<String, String> = emptyMap(),
 )

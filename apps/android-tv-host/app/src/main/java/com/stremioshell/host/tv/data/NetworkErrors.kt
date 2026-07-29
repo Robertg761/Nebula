@@ -4,8 +4,10 @@ import java.io.IOException
 import java.io.InterruptedIOException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.util.Locale
 import javax.net.ssl.SSLException
 import kotlinx.serialization.SerializationException
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 /**
  * A non-2xx HTTP response.
@@ -15,6 +17,10 @@ import kotlinx.serialization.SerializationException
  * rendered on screen. The full (redacted) URL goes to Logcat instead.
  */
 class HttpStatusException(val code: Int, val host: String) : IOException("HTTP $code from $host")
+
+/** A successful endpoint returned more JSON than a TV should ever hold in memory. */
+class HttpResponseTooLargeException(val maxBytes: Long) :
+  IOException("Response exceeded $maxBytes bytes")
 
 /** Which service a failure came from, so the message can point at the right setting. */
 enum class NetworkSource(
@@ -60,6 +66,8 @@ object NetworkErrorMessage {
 
   private fun recognize(source: NetworkSource, error: Throwable): String? = when (error) {
     is HttpStatusException -> forStatus(source, error.code)
+    is HttpResponseTooLargeException ->
+      "The response from ${source.label} was too large to use safely."
     is UnknownHostException -> "No internet connection. Check your network and try again."
     // OkHttp's callTimeout surfaces as a plain InterruptedIOException, not a SocketTimeoutException.
     is SocketTimeoutException, is InterruptedIOException ->
@@ -71,14 +79,47 @@ object NetworkErrorMessage {
   }
 }
 
-private val SECRET_QUERY_PARAM = Regex(
-  "([?&](?:api_key|apikey|api-key|token|access_token|key)=)[^&\\s]*",
-  RegexOption.IGNORE_CASE,
-)
-
 /**
- * Masks secrets carried in query strings so a URL can be logged. Logcat on a TV is readable by
- * `adb logcat` and pasted into bug reports, so even the technical channel gets the key removed.
+ * Produces the structurally safe form of a URL for Logcat.
+ *
+ * Addon credentials are not limited to parameters named `token`: configured
+ * Stremio URLs routinely put opaque debrid credentials in userinfo, arbitrary
+ * query keys, or a path segment before `manifest.json`. Parsing the URL lets us
+ * discard all three without trying to guess secret names. Known public resource
+ * suffixes remain so a report can still say which operation failed.
  */
-fun redactSecrets(text: String): String =
-  SECRET_QUERY_PARAM.replace(text) { match -> match.groupValues[1] + "<redacted>" }
+fun redactSecrets(text: String): String {
+  val url = text.toHttpUrlOrNull() ?: return "<redacted-url>"
+  val origin = url.newBuilder()
+    .username("")
+    .password("")
+    .encodedPath("/")
+    .query(null)
+    .fragment(null)
+    .build()
+    .toString()
+    .removeSuffix("/")
+
+  val segments = url.encodedPathSegments.filter { it.isNotEmpty() }
+  val safePath = if (url.host.equals(TMDB_HOST, ignoreCase = true)) {
+    url.encodedPath
+  } else {
+    val resourceIndex = segments.indexOfFirst {
+      it.lowercase(Locale.ROOT) in PUBLIC_ADDON_RESOURCES
+    }
+    when {
+      resourceIndex >= 0 -> {
+        val suffix = segments.drop(resourceIndex).joinToString("/")
+        if (resourceIndex == 0) "/$suffix" else "/<redacted>/$suffix"
+      }
+      segments.lastOrNull()?.equals("manifest.json", ignoreCase = true) == true ->
+        if (segments.size == 1) "/manifest.json" else "/<redacted>/manifest.json"
+      else -> "/<redacted>"
+    }
+  }
+  val queryMarker = if (url.query != null) "?<redacted>" else ""
+  return origin + safePath + queryMarker
+}
+
+private const val TMDB_HOST = "api.themoviedb.org"
+private val PUBLIC_ADDON_RESOURCES = setOf("stream", "subtitles", "catalog", "meta")

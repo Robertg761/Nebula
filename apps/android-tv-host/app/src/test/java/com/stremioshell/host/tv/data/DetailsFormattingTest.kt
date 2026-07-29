@@ -12,6 +12,7 @@ import com.stremioshell.host.tv.data.tmdb.SeasonSummary
 import com.stremioshell.host.tv.data.tmdb.TrailerPick
 import com.stremioshell.host.tv.data.tmdb.VideoRef
 import java.time.LocalDate
+import java.util.Locale
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -36,8 +37,9 @@ class AirDateTest {
   }
 
   @Test
-  fun `labels a date without the device locale`() {
-    assertEquals("12 Mar 2026", AirDate.label("2026-03-12"))
+  fun `labels a date in the requested locale`() {
+    assertEquals("Mar 12, 2026", AirDate.label("2026-03-12", Locale.US))
+    assertEquals("12 Mar 2026", AirDate.label("2026-03-12", Locale.UK))
     assertNull(AirDate.label(null))
   }
 

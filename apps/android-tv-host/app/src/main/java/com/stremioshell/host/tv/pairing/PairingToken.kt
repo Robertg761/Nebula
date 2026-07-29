@@ -1,6 +1,7 @@
 package com.stremioshell.host.tv.pairing
 
 import java.security.SecureRandom
+import java.util.Locale
 import java.util.Random
 
 /**
@@ -34,7 +35,7 @@ object PairingTokenGenerator {
  * missing token: there is no "no token means local request" escape hatch.
  */
 class PairingTokenGuard(token: String) {
-  private val expected: String = token.trim().lowercase()
+  private val expected: String = token.trim().lowercase(Locale.ROOT)
 
   /**
    * True only for [provided] equal to the session token. Comparison is
@@ -44,7 +45,7 @@ class PairingTokenGuard(token: String) {
    */
   fun isAuthorized(provided: String?): Boolean {
     if (expected.isEmpty()) return false
-    val candidate = provided?.trim()?.lowercase() ?: return false
+    val candidate = provided?.trim()?.lowercase(Locale.ROOT) ?: return false
     if (candidate.length != expected.length) return false
     var diff = 0
     for (i in expected.indices) {

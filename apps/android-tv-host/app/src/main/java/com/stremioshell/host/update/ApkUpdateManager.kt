@@ -3,12 +3,16 @@ package com.stremioshell.host.update
 import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
+import android.content.pm.Signature
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import java.io.File
+import java.security.MessageDigest
 
 class ApkUpdateManager(
   private val prefsName: String = "stremio_shell_updater"
@@ -24,8 +28,7 @@ class ApkUpdateManager(
     context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
 
   fun needsUnknownSourcesPermission(context: Context): Boolean {
-    return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-      !context.packageManager.canRequestPackageInstalls()
+    return !context.packageManager.canRequestPackageInstalls()
   }
 
   fun buildUnknownSourcesSettingsIntent(context: Context): Intent {
@@ -94,44 +97,48 @@ class ApkUpdateManager(
   }
 
   fun isDownloadInProgress(context: Context): Boolean {
-    val downloadId = getActiveDownloadId(context) ?: return false
+    getActiveDownloadId(context) ?: return false
     val query = queryDownload(context)
-    if (query == null) {
-      clearDownloadedState(context, deleteApk = false)
-      return false
-    }
-
-    return when (query.status) {
-      DownloadManager.STATUS_PENDING,
-      DownloadManager.STATUS_RUNNING,
-      DownloadManager.STATUS_PAUSED -> true
-      DownloadManager.STATUS_FAILED -> {
+    return when (downloadRecordState(query?.status)) {
+      DownloadRecordState.IN_PROGRESS -> true
+      DownloadRecordState.DOWNLOADED -> false
+      DownloadRecordState.STALE -> {
+        // A missing DownloadManager row, failure, cancellation, or unknown
+        // terminal status is not an active download. Leaving its preference in
+        // place wedges every future background check in "in progress".
         clearDownloadedState(context, deleteApk = true)
-        false
-      }
-      DownloadManager.STATUS_SUCCESSFUL -> false
-      else -> {
-        runCatching {
-          val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-          dm.remove(downloadId)
-        }
-        clearDownloadedState(context, deleteApk = false)
         false
       }
     }
   }
 
   fun hasDownloadedApk(context: Context): Boolean {
-    val apkFile = getDownloadedApkFile(context) ?: return false
-    val query = queryDownload(context) ?: return false
-    if (query.status != DownloadManager.STATUS_SUCCESSFUL || !apkFile.exists()) {
+    if (getActiveDownloadId(context) == null) {
+      // A path without its DownloadManager record is incomplete state, not an
+      // installable update.
+      if (getDownloadedApkFile(context) != null) {
+        clearDownloadedState(context, deleteApk = true)
+      }
+      return false
+    }
+    val query = queryDownload(context)
+    when (downloadRecordState(query?.status)) {
+      DownloadRecordState.IN_PROGRESS -> return false
+      DownloadRecordState.STALE -> {
+        clearDownloadedState(context, deleteApk = true)
+        return false
+      }
+      DownloadRecordState.DOWNLOADED -> Unit
+    }
+    val apkFile = getDownloadedApkFile(context)
+    if (apkFile == null || !apkFile.exists()) {
+      clearDownloadedState(context, deleteApk = true)
       return false
     }
 
-    val verdict = verifyDownloadedApk(context)
-    if (!DownloadIntegrityPolicy.isInstallable(verdict)) {
-      // A truncated APK would only fail at the installer, after the user has
-      // committed to the update; drop it so the next check re-downloads.
+    if (!isDownloadedApkInstallable(context)) {
+      // Refuse truncated files and archives whose package, version, version
+      // code, or signing lineage does not match the expected update.
       clearDownloadedState(context, deleteApk = true)
       return false
     }
@@ -151,6 +158,32 @@ class ApkUpdateManager(
     )
   }
 
+  internal fun verifyDownloadedArchive(context: Context): ApkArchivePolicy.Verdict {
+    val apkFile = getDownloadedApkFile(context)
+      ?: return ApkArchivePolicy.Verdict.UNREADABLE
+    val expectedVersion = getDownloadedVersionName(context)
+    val packageManager = context.packageManager
+    val flags = packageInfoFlags()
+
+    val installed = try {
+      packageManager.getInstalledPackageInfo(context.packageName, flags).toIdentity()
+    } catch (_: Exception) {
+      null
+    }
+    val archive = try {
+      packageManager.getArchivePackageInfo(apkFile.absolutePath, flags)?.toIdentity()
+    } catch (_: Exception) {
+      null
+    }
+
+    return ApkArchivePolicy.verify(
+      expectedPackageName = context.packageName,
+      expectedVersionName = expectedVersion,
+      installed = installed,
+      archive = archive,
+    )
+  }
+
   fun hasDownloadedApkForVersion(context: Context, versionName: String): Boolean {
     if (!hasDownloadedApk(context)) {
       return false
@@ -166,7 +199,8 @@ class ApkUpdateManager(
 
     val downloadedVersion = getDownloadedVersionName(context)
     if (downloadedVersion == null) {
-      return true
+      clearDownloadedState(context, deleteApk = true)
+      return false
     }
 
     val isPending = isNewerVersion(downloadedVersion, currentVersionName)
@@ -226,9 +260,9 @@ class ApkUpdateManager(
     if (needsUnknownSourcesPermission(context)) {
       return null
     }
-    if (!DownloadIntegrityPolicy.isInstallable(verifyDownloadedApk(context))) {
-      // Last gate before the installer: a short file here is a guaranteed
-      // "app not installed" dialog, so bin it and let the next check retry.
+    if (!isDownloadedApkInstallable(context)) {
+      // Last gate before the installer. Re-parse the exact archive in case it
+      // was removed or replaced after the prompt was first evaluated.
       clearDownloadedState(context, deleteApk = true)
       return null
     }
@@ -242,11 +276,106 @@ class ApkUpdateManager(
     }
   }
 
+  private fun isDownloadedApkInstallable(context: Context): Boolean {
+    return DownloadIntegrityPolicy.isInstallable(verifyDownloadedApk(context)) &&
+      verifyDownloadedArchive(context) == ApkArchivePolicy.Verdict.VERIFIED
+  }
+
+  @Suppress("DEPRECATION")
+  private fun PackageManager.getInstalledPackageInfo(
+    packageName: String,
+    flags: Int,
+  ): PackageInfo {
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(flags.toLong()))
+    } else {
+      getPackageInfo(packageName, flags)
+    }
+  }
+
+  @Suppress("DEPRECATION")
+  private fun PackageManager.getArchivePackageInfo(
+    archivePath: String,
+    flags: Int,
+  ): PackageInfo? {
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      getPackageArchiveInfo(archivePath, PackageManager.PackageInfoFlags.of(flags.toLong()))
+    } else {
+      getPackageArchiveInfo(archivePath, flags)
+    }
+  }
+
+  @Suppress("DEPRECATION")
+  private fun PackageInfo.toIdentity(): ApkPackageIdentity {
+    val currentSignatures: Array<out Signature>
+    val historySignatures: Array<out Signature>
+    val hasMultipleSigners: Boolean
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+      val details = signingInfo
+      if (details == null) {
+        currentSignatures = emptyArray<Signature>()
+        historySignatures = emptyArray<Signature>()
+        hasMultipleSigners = false
+      } else {
+        hasMultipleSigners = details.hasMultipleSigners()
+        currentSignatures = details.apkContentsSigners.orEmpty()
+        historySignatures = if (hasMultipleSigners) {
+          currentSignatures
+        } else {
+          details.signingCertificateHistory.orEmpty()
+        }
+      }
+    } else {
+      currentSignatures = signatures.orEmpty()
+      historySignatures = currentSignatures
+      hasMultipleSigners = currentSignatures.size > 1
+    }
+
+    val currentSignerSha256 = currentSignatures.mapTo(linkedSetOf()) { it.sha256() }
+    val historySignerSha256 = historySignatures.mapTo(linkedSetOf()) { it.sha256() }
+    return ApkPackageIdentity(
+      packageName = packageName,
+      versionName = versionName,
+      versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        longVersionCode
+      } else {
+        versionCode.toLong()
+      },
+      signingIdentity = ApkSigningIdentity(
+        currentSignerSha256 = currentSignerSha256,
+        signerHistorySha256 = historySignerSha256,
+        hasMultipleSigners = hasMultipleSigners,
+      ),
+    )
+  }
+
+  private fun Signature.sha256(): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(toByteArray())
+    val hex = CharArray(digest.size * 2)
+    digest.forEachIndexed { index, byte ->
+      val value = byte.toInt() and 0xff
+      hex[index * 2] = HEX_DIGITS[value ushr 4]
+      hex[index * 2 + 1] = HEX_DIGITS[value and 0x0f]
+    }
+    return String(hex)
+  }
+
   companion object {
     private const val KEY_DOWNLOAD_ID = "download_id"
     private const val KEY_APK_PATH = "apk_path"
     private const val KEY_DOWNLOADED_VERSION_NAME = "downloaded_version_name"
     private const val KEY_EXPECTED_SIZE_BYTES = "expected_size_bytes"
+    private const val HEX_DIGITS = "0123456789ABCDEF"
+
+    private fun packageInfoFlags(): Int {
+      return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        PackageManager.GET_SIGNING_CERTIFICATES
+      } else {
+        @Suppress("DEPRECATION")
+        PackageManager.GET_SIGNATURES
+      }
+    }
 
     internal fun isNewerVersion(downloadedVersionName: String, currentVersionName: String): Boolean {
       val downloaded = normalizeVersionName(downloadedVersionName)
@@ -278,5 +407,24 @@ class ApkUpdateManager(
       val rawVersion = fileName.substring(prefix.length, fileName.length - suffix.length)
       return rawVersion.takeIf { it.isNotBlank() }?.let { normalizeVersionName(it) }
     }
+
+    /**
+     * Interprets DownloadManager state without treating a stored id as proof of
+     * active work. Null is the common stale-id case after the system prunes a
+     * record or the user cancels it outside the app.
+     */
+    internal fun downloadRecordState(status: Int?): DownloadRecordState = when (status) {
+      DownloadManager.STATUS_PENDING,
+      DownloadManager.STATUS_RUNNING,
+      DownloadManager.STATUS_PAUSED -> DownloadRecordState.IN_PROGRESS
+      DownloadManager.STATUS_SUCCESSFUL -> DownloadRecordState.DOWNLOADED
+      else -> DownloadRecordState.STALE
+    }
   }
+}
+
+internal enum class DownloadRecordState {
+  IN_PROGRESS,
+  DOWNLOADED,
+  STALE,
 }

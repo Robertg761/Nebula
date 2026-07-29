@@ -152,6 +152,19 @@ class StreamMergeTest {
   }
 
   @Test
+  fun `an oversized addon answer is capped after quality ordering`() {
+    val rows = (1..600).map { index ->
+      val quality = if (index == 600) "2160p" else "480p"
+      stream("Release $index $quality", "https://rd.example/$index")
+    }
+
+    val merged = StreamMerge.merge(listOf(AddonFetch("Huge", rows)))
+
+    assertEquals(StreamMerge.MAX_MERGED_STREAMS, merged.streams.size)
+    assertEquals("Release 600 2160p", merged.streams.first().label)
+  }
+
+  @Test
   fun `the failure notice is one sentence whatever the count`() {
     assertNull(StreamMerge.failureNotice(emptyList()))
     assertEquals("Couldn't reach Comet.", StreamMerge.failureNotice(listOf("Comet")))

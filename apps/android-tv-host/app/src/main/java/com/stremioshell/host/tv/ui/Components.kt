@@ -2,25 +2,39 @@ package com.stremioshell.host.tv.ui
 
 import android.util.Log
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
@@ -37,12 +51,22 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.painter.ColorPainter
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -50,6 +74,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.tv.material3.Border
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
+import androidx.tv.material3.Glow
 import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Surface
@@ -58,11 +83,17 @@ import androidx.tv.material3.Text
 import coil.compose.AsyncImage
 import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.tv.data.tmdb.MediaItem
+import com.stremioshell.host.tv.ui.theme.NebulaAccentBrushVertical
+import com.stremioshell.host.tv.ui.theme.NebulaBottomScrim
 import com.stremioshell.host.tv.ui.theme.NebulaDimens
+import com.stremioshell.host.tv.ui.theme.NebulaIcon
+import com.stremioshell.host.tv.ui.theme.NebulaMotion
 import com.stremioshell.host.tv.ui.theme.NebulaPalette
 import com.stremioshell.host.tv.ui.theme.NebulaShapes
+import com.stremioshell.host.tv.ui.theme.NebulaSpace
 import com.stremioshell.host.tv.ui.theme.nebulaCardBorder
 import com.stremioshell.host.tv.ui.theme.nebulaCardGlow
+import kotlinx.coroutines.delay
 
 /** Tag for the focus-recovery logs the QA matrix expects in a diagnostics capture. */
 private const val FOCUS_TAG = "TvFocus"
@@ -212,28 +243,77 @@ fun rememberBackAction(): () -> Unit {
  *
  * Failure arrives through Coil's `onError` callback rather than SubcomposeAsyncImage: a row holds
  * a dozen of these at once and per-image subcomposition is too expensive on low-RAM TVs.
+ *
+ * The default [fallback] is a broken-image glyph rather than nothing. Every caller except the
+ * poster rows passed no fallback at all, so a dead URL left a bare grey slab - a cast row with two
+ * missing headshots was two grey holes, indistinguishable from two that were still decoding.
  */
 @Composable
 fun ArtworkImage(
   url: String?,
   contentDescription: String?,
   modifier: Modifier = Modifier,
-  fallback: @Composable BoxScope.() -> Unit = {},
+  fallback: @Composable BoxScope.() -> Unit = { MissingArtworkGlyph() },
 ) {
-  val tone = MaterialTheme.colorScheme.surfaceVariant
   var failed by remember(url) { mutableStateOf(false) }
   if (url == null || failed) {
-    Box(modifier = modifier.background(tone), contentAlignment = Alignment.Center, content = fallback)
+    Box(
+      modifier = modifier.background(NebulaPalette.SurfaceVariant),
+      contentAlignment = Alignment.Center,
+      content = fallback,
+    )
   } else {
     AsyncImage(
       model = url,
       contentDescription = contentDescription,
       contentScale = ContentScale.Crop,
       // Solid tonal fill instead of the bare theme background, so a card does not pop from an
-      // empty rectangle to a full poster mid-scroll.
-      placeholder = remember(tone) { ColorPainter(tone) },
+      // empty rectangle to a full poster mid-scroll. Quieter than the failed fill above, so
+      // "still decoding" and "gave up" are not the same rectangle.
+      placeholder = remember { ColorPainter(NebulaPalette.Surface) },
       onError = { failed = true },
       modifier = modifier,
+    )
+  }
+}
+
+/** What a slot with no artwork shows, when the caller has nothing better to put there. */
+@Composable
+private fun MissingArtworkGlyph() {
+  Icon(
+    Icons.Filled.Warning,
+    contentDescription = null,
+    tint = NebulaPalette.TextDisabled,
+    modifier = Modifier.size(NebulaIcon.md),
+  )
+}
+
+/**
+ * A poster-shaped slot for a title with no artwork.
+ *
+ * TMDB is missing art for a real share of obscure titles, so this is not a rare state - and it
+ * existed twice with different values and no text alignment, so a wrapped title was ragged inside
+ * a centred block on a 144dp card. A gradient rather than a flat fill so an artless card still
+ * reads as a card rather than as a hole in the row.
+ */
+@Composable
+fun PosterFallback(title: String, modifier: Modifier = Modifier) {
+  Box(
+    modifier = modifier
+      .fillMaxSize()
+      .background(
+        Brush.verticalGradient(listOf(NebulaPalette.SurfaceVariant, NebulaPalette.Surface)),
+      ),
+    contentAlignment = Alignment.Center,
+  ) {
+    Text(
+      text = title,
+      maxLines = 4,
+      overflow = TextOverflow.Ellipsis,
+      textAlign = TextAlign.Center,
+      style = MaterialTheme.typography.titleSmall,
+      color = NebulaPalette.TextHigh,
+      modifier = Modifier.padding(horizontal = 10.dp),
     )
   }
 }
@@ -253,7 +333,16 @@ fun MediaCard(
   modifier: Modifier = Modifier,
   subtitle: String? = null,
   onLongClick: (() -> Unit)? = null,
+  /** 0f..1f watch position, drawn across the foot of the poster. Null when there is none. */
+  progress: Float? = null,
 ) {
+  // Hoisted so the caption can answer to it. Twenty cards in a rail all captioned at full
+  // brightness is what makes a poster wall fight the UI; dimming the unfocused ones is the
+  // cheapest thing that makes a row read as "one selected thing among many". A colour-only
+  // change recomposes two Text nodes on the card that gained focus and the one that lost it -
+  // no measure, no layout, no effect on the lazy list. Deliberately not animated: every other
+  // focus treatment in the app is instant.
+  var focused by remember { mutableStateOf(false) }
   Column(modifier = modifier.width(NebulaDimens.PosterWidth)) {
     Card(
       onClick = onClick,
@@ -268,27 +357,63 @@ fun MediaCard(
       // Built in the lambda rather than in composition: it only runs when something is actually
       // reading the screen.
       modifier = Modifier.width(NebulaDimens.PosterWidth).height(NebulaDimens.PosterHeight)
+        .onFocusChanged { focused = it.isFocused }
         .semantics(mergeDescendants = true) {
           contentDescription = A11yLabels.card(item.title, subtitle, manageable = onLongClick != null)
         },
     ) {
-      ArtworkImage(
-        url = item.posterUrl,
-        // Decorative: the card above already says the title, and a second description here would
-        // make every poster announce its title twice.
-        contentDescription = null,
-        modifier = Modifier.fillMaxSize(),
-      ) {
-        // Artless titles get the title set as a poster rather than as a caption on a grey slab,
-        // so a rail with a few missing images still reads as a rail.
-        Text(
-          text = item.title,
-          maxLines = 4,
-          overflow = TextOverflow.Ellipsis,
-          style = MaterialTheme.typography.titleSmall,
-          color = NebulaPalette.TextMuted,
-          modifier = Modifier.padding(horizontal = 10.dp),
-        )
+      Box(modifier = Modifier.fillMaxSize()) {
+        ArtworkImage(
+          url = item.posterUrl,
+          // Decorative: the card above already says the title, and a second description here would
+          // make every poster announce its title twice.
+          contentDescription = null,
+          modifier = Modifier.fillMaxSize(),
+        ) {
+          // Artless titles get the title set as a poster rather than as a caption on a grey slab,
+          // so a rail with a few missing images still reads as a rail.
+          PosterFallback(item.title)
+        }
+        if (progress != null && progress > 0f) {
+          // The bar needs something to sit on: over a pale poster foot a thin violet line simply
+          // disappears.
+          Box(
+            modifier = Modifier
+              .align(Alignment.BottomStart)
+              .fillMaxWidth()
+              .height(40.dp)
+              .background(NebulaBottomScrim),
+          )
+          NebulaProgressBar(
+            progress = progress,
+            height = 4.dp,
+            modifier = Modifier
+              .align(Alignment.BottomStart)
+              .fillMaxWidth()
+              .padding(horizontal = NebulaSpace.xs)
+              .padding(bottom = NebulaSpace.xs),
+          )
+        }
+        // Long press manages the row this card is in, and nothing about a poster says so - it was
+        // announced to TalkBack and to nobody else, so a viewer had no way to discover that a My
+        // List card could be removed at all. Composed only while this one card holds focus.
+        if (focused && onLongClick != null) {
+          Box(
+            modifier = Modifier
+              .align(Alignment.TopEnd)
+              .padding(6.dp)
+              .size(22.dp)
+              .background(NebulaPalette.Void.copy(alpha = 0.72f), CircleShape),
+            contentAlignment = Alignment.Center,
+          ) {
+            Icon(
+              Icons.Filled.MoreVert,
+              contentDescription = null,
+              tint = NebulaPalette.TextHigh,
+              modifier = Modifier.size(14.dp),
+            )
+          }
+        }
       }
     }
     Text(
@@ -296,9 +421,11 @@ fun MediaCard(
       maxLines = 1,
       overflow = TextOverflow.Ellipsis,
       style = MaterialTheme.typography.bodySmall,
-      color = NebulaPalette.TextHigh,
-      // Clears the focused card's scaled-up bottom edge.
-      modifier = Modifier.padding(top = 12.dp).width(NebulaDimens.PosterWidth)
+      fontWeight = FontWeight.Medium,
+      color = if (focused) NebulaPalette.TextHigh else NebulaPalette.TextMuted,
+      // Clears the focused card's scaled-up bottom edge: 7.56dp of overhang plus 3.75dp of scaled
+      // focus ring is 11.3dp, which the old 12dp cleared by 0.7dp.
+      modifier = Modifier.padding(top = NebulaDimens.CardCaptionGap).width(NebulaDimens.PosterWidth)
         // Visual echo of the card's own description; left in the tree it is read a second time.
         .clearAndSetSemantics {},
     )
@@ -308,38 +435,150 @@ fun MediaCard(
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
         style = MaterialTheme.typography.labelSmall,
-        color = NebulaPalette.TextMuted,
-        modifier = Modifier.padding(top = 3.dp).width(NebulaDimens.PosterWidth)
+        color = if (focused) NebulaPalette.TextMuted else NebulaPalette.TextFaint,
+        modifier = Modifier.padding(top = NebulaSpace.xxs).width(NebulaDimens.PosterWidth)
           .clearAndSetSemantics {},
       )
     }
   }
 }
 
+/**
+ * How a rail scrolls when focus moves along it.
+ *
+ * Rails used to inherit whatever [LocalBringIntoViewSpec] was ambient, which meant the same widget
+ * behaved two ways: on Home it picked up the vertical focus-line spec the LazyColumn provides -
+ * applied to the horizontal axis too, pinning the focused card 18% in from the left and leaving a
+ * sliced poster in the margin - while on Details and Search it used the default, which scrolls
+ * only until the card's trailing edge is flush with the container, i.e. flush with the physical
+ * screen edge, putting the focus ring inside the overscan margin.
+ *
+ * This scrolls the minimum needed to keep the focused card, its ring and its glow clear of both
+ * edges by the screen margin, and does nothing at all when the card is already comfortably in
+ * view. Consulted only on a focus move, so it costs nothing per frame.
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun MediaRow(title: String, items: List<MediaItem>, onItemClick: (MediaItem) -> Unit) {
-  if (items.isEmpty()) return
-  Column(modifier = Modifier.fillMaxWidth()) {
-    RailHeading(title)
-    LazyRow(
-      modifier = Modifier.restoreRowFocus(),
-      // Vertical slack in the padding, not the arrangement: a focused card scales up and its glow
-      // spills past its bounds, and a LazyRow clips to its own edges.
-      contentPadding = PaddingValues(horizontal = NebulaDimens.ScreenEdge, vertical = 8.dp),
-      horizontalArrangement = Arrangement.spacedBy(NebulaDimens.CardGap),
-    ) {
-      items(items, key = { it.key }) { item ->
-        MediaCard(item = item, onClick = { onItemClick(item) })
+private fun rememberRailBringIntoViewSpec(): BringIntoViewSpec {
+  val margin = with(LocalDensity.current) { (NebulaDimens.ScreenEdge + 10.dp).toPx() }
+  return remember(margin) {
+    object : BringIntoViewSpec {
+      override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
+        val leadingGap = offset - margin
+        val trailingGap = offset + size - (containerSize - margin)
+        return when {
+          leadingGap < 0f -> leadingGap
+          trailingGap > 0f -> trailingGap
+          else -> 0f
+        }
       }
     }
   }
 }
 
-/** @param hint the smaller second line: what to do about [text], when there is something to do. */
+/**
+ * The rail every browse surface is built from.
+ *
+ * No vertical `contentPadding`. Every rail used to carry 8dp of it under a comment saying a
+ * LazyRow clips its children - it does not: foundation clips the scroll axis only and inflates the
+ * cross axis by 30dp of elevation headroom, which is why a focused poster's ring and its 16dp glow
+ * both render complete. Confirmed on a device. Removing it gives each rail 16dp of height back.
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun CenteredMessage(text: String, hint: String? = null) {
+fun MediaRow(title: String, items: List<MediaItem>, onItemClick: (MediaItem) -> Unit) {
+  if (items.isEmpty()) return
+  Column(modifier = Modifier.fillMaxWidth()) {
+    RailHeading(title)
+    CompositionLocalProvider(LocalBringIntoViewSpec provides rememberRailBringIntoViewSpec()) {
+      LazyRow(
+        modifier = Modifier.restoreRowFocus(),
+        contentPadding = PaddingValues(horizontal = NebulaDimens.ScreenEdge),
+        horizontalArrangement = Arrangement.spacedBy(NebulaDimens.CardGap),
+      ) {
+        items(items, key = { it.key }) { item ->
+          MediaCard(item = item, onClick = { onItemClick(item) })
+        }
+      }
+    }
+  }
+}
+
+/**
+ * A rail as it looks before its data arrives.
+ *
+ * Static: no shimmer, no animation, nothing invalidating a frame. That is deliberate on this
+ * hardware - the indeterminate spinner this replaces re-drew every 16ms for the whole load, while
+ * this composes once and never again. It is also strictly more informative, because it says how
+ * much is coming and where it will be, so the page does not jump when it lands.
+ */
+@Composable
+fun RailSkeleton(modifier: Modifier = Modifier, cards: Int = 6) {
+  Column(modifier = modifier.fillMaxWidth()) {
+    Row(
+      verticalAlignment = Alignment.CenterVertically,
+      modifier = Modifier.padding(
+        start = NebulaDimens.ScreenEdge - NebulaDimens.TickInset,
+        bottom = NebulaDimens.RailHeadingGap,
+      ),
+    ) {
+      Box(
+        modifier = Modifier
+          .size(width = 4.dp, height = 18.dp)
+          .background(NebulaAccentBrushVertical, RoundedCornerShape(2.dp)),
+      )
+      Box(
+        modifier = Modifier
+          .padding(start = NebulaSpace.sm)
+          .size(width = 180.dp, height = 20.dp)
+          .background(NebulaPalette.SurfaceVariant, NebulaShapes.extraSmall),
+      )
+    }
+    Row(
+      horizontalArrangement = Arrangement.spacedBy(NebulaDimens.CardGap),
+      modifier = Modifier.padding(horizontal = NebulaDimens.ScreenEdge),
+    ) {
+      repeat(cards) {
+        Box(
+          modifier = Modifier
+            .width(NebulaDimens.PosterWidth)
+            .height(NebulaDimens.PosterHeight)
+            .background(NebulaPalette.Surface, NebulaDimens.PosterShape)
+            .border(1.dp, NebulaPalette.Outline, NebulaDimens.PosterShape),
+        )
+      }
+    }
+  }
+}
+
+/** Home's whole loading state: the shape of the page that is about to arrive. */
+@Composable
+fun HomeSkeleton() {
+  Column(
+    verticalArrangement = Arrangement.spacedBy(NebulaDimens.RailGap),
+    modifier = Modifier
+      .fillMaxSize()
+      .padding(top = NebulaDimens.ScreenEdgeVertical)
+      .clearAndSetSemantics {},
+  ) {
+    Box(
+      modifier = Modifier
+        .padding(horizontal = NebulaDimens.ScreenEdge)
+        .fillMaxWidth()
+        .height(NebulaDimens.HeroHeight)
+        .background(NebulaPalette.Surface, NebulaShapes.large)
+        .border(1.dp, NebulaPalette.Outline, NebulaShapes.large),
+    )
+    RailSkeleton()
+    RailSkeleton()
+  }
+}
+
+/** An [EmptyState] centred in whatever space it is given. */
+@Composable
+fun CenteredEmptyState(title: String, hint: String? = null, icon: ImageVector? = null) {
   Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-    EmptyState(title = text, hint = hint)
+    EmptyState(title = title, hint = hint, icon = icon)
   }
 }
 
@@ -350,28 +589,67 @@ fun CenteredMessage(text: String, hint: String? = null) {
  * D-pad from being dead there - which is why it is shared rather than re-styled per screen.
  */
 @Composable
-fun FailureMessage(message: String, onRetry: (() -> Unit)?) {
-  Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+fun FailureMessage(
+  message: String,
+  onRetry: (() -> Unit)?,
+  actionLabel: String? = null,
+  onAction: (() -> Unit)? = null,
+) {
+  val firstActionFocus = rememberInitialFocusTarget()
+  val hasAction = actionLabel != null && onAction != null
+  RequestInitialFocus(
+    target = firstActionFocus,
+    key = message to actionLabel,
+    label = "Failure recovery action",
+    enabled = hasAction || onRetry != null,
+  )
+  Box(
+    modifier = Modifier.fillMaxSize().padding(horizontal = NebulaDimens.ScreenEdge),
+    contentAlignment = Alignment.Center,
+  ) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
       Icon(
         Icons.Filled.Warning,
         // Decorative: the message under it is the actual content.
         contentDescription = null,
         tint = MaterialTheme.colorScheme.error,
-        modifier = Modifier.size(44.dp).padding(bottom = 14.dp),
+        // Padding outside size. The other way round - which is how this shipped - draws the glyph
+        // into a box the padding has already shortened, so a "44dp" icon rendered at 30dp: a
+        // smudge, on the one screen where the icon is the only non-text element.
+        modifier = Modifier.padding(bottom = NebulaSpace.md).size(NebulaIcon.lg),
       )
       Text(
         text = message,
         style = MaterialTheme.typography.titleMedium,
         color = NebulaPalette.TextHigh,
+        // These strings come straight off an HTTP or addon failure and are of unbounded length;
+        // without a measure one runs past the overscan margin and is physically clipped.
+        textAlign = TextAlign.Center,
+        modifier = Modifier.widthIn(max = 640.dp),
       )
-      if (onRetry != null) {
-        NebulaButton(
-          text = "Retry",
-          onClick = onRetry,
-          style = NebulaButtonStyle.Primary,
-          modifier = Modifier.padding(top = 20.dp),
-        )
+      if (hasAction || onRetry != null) {
+        Row(
+          horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
+          modifier = Modifier.padding(top = NebulaSpace.lg),
+        ) {
+          if (hasAction) {
+            NebulaButton(
+              text = actionLabel!!,
+              onClick = onAction!!,
+              style = NebulaButtonStyle.Primary,
+              modifier = Modifier.initialFocusTarget(firstActionFocus),
+            )
+          }
+          if (onRetry != null) {
+            NebulaButton(
+              text = "Retry",
+              onClick = onRetry,
+              style = if (hasAction) NebulaButtonStyle.Secondary else NebulaButtonStyle.Primary,
+              icon = Icons.Filled.Refresh,
+              modifier = Modifier.initialFocusTarget(firstActionFocus.takeIf { !hasAction }),
+            )
+          }
+        }
       }
     }
   }
@@ -383,8 +661,10 @@ fun CenteredLoading(text: String) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
       CircularProgressIndicator(
         color = MaterialTheme.colorScheme.primary,
-        trackColor = NebulaPalette.Outline,
+        trackColor = NebulaPalette.TrackInactive,
         strokeWidth = 3.dp,
+        // Round, so the arc's ends match a shape language that is fully rounded everywhere else.
+        strokeCap = StrokeCap.Round,
         modifier = Modifier.size(40.dp),
       )
       Text(
@@ -397,8 +677,83 @@ fun CenteredLoading(text: String) {
   }
 }
 
-/** One button in a [CardOptionsDialog]. */
-class CardAction(val label: String, val onClick: () -> Unit)
+/**
+ * Holds [content] back until a load has been running long enough to be worth admitting to.
+ *
+ * Details, episodes and search results are frequently served from the in-memory cache in well
+ * under a frame, and a spinner that appears and vanishes inside three of them reads as a flicker -
+ * the screen looks broken rather than fast.
+ *
+ * Deliberately only a delay, with no minimum display time on the other side. A floor would have to
+ * outlive this composable - the caller stops rendering it the instant the value is Ready - so it
+ * would mean holding a finished screen back behind a skeleton, which trades a rare flash for a
+ * guaranteed stall on every fast load. The delay alone removes the case that actually happens.
+ */
+@Composable
+fun DelayedBusy(content: @Composable () -> Unit) {
+  var visible by remember { mutableStateOf(false) }
+  LaunchedEffect(Unit) {
+    delay(NebulaMotion.BusyDelayMs.toLong())
+    visible = true
+  }
+  if (visible) content()
+}
+
+/**
+ * One button in a [CardOptionsDialog].
+ *
+ * @param destructive it removes something. Styled as [NebulaButtonStyle.Danger] rather than as the
+ *   dialog's Primary - "Remove from My List" used to be a full violet button identical to Play.
+ */
+class CardAction(val label: String, val destructive: Boolean = false, val onClick: () -> Unit)
+
+/**
+ * The sheet both of the app's dialogs are built from.
+ *
+ * Was copy-pasted between them, down to a byte-identical comment, and 20dp apart in width for no
+ * reason. The glow is a real drop shadow rather than decoration: a 1dp hairline is not enough to
+ * separate a near-black sheet from a near-black page at three metres, which is exactly what both
+ * copies of that comment were complaining about.
+ */
+@Composable
+fun NebulaDialogSurface(
+  paneLabel: String = "Dialog",
+  content: @Composable ColumnScope.() -> Unit,
+) {
+  // One layer on one surface for eight frames, draw-phase only, with nothing else on screen
+  // animating - the one place in the app where an entrance is affordable.
+  var shown by remember { mutableStateOf(false) }
+  LaunchedEffect(Unit) { shown = true }
+  val appear by animateFloatAsState(
+    targetValue = if (shown) 1f else 0f,
+    animationSpec = NebulaMotion.enter(),
+    label = "dialogAppear",
+  )
+
+  Surface(
+    shape = NebulaShapes.extraLarge,
+    colors = SurfaceDefaults.colors(containerColor = NebulaPalette.Surface),
+    border = Border(
+      border = BorderStroke(2.dp, NebulaPalette.OutlineStrong),
+      shape = NebulaShapes.extraLarge,
+    ),
+    glow = Glow(elevationColor = Color.Black, elevation = 24.dp),
+    modifier = Modifier
+      .width(NebulaDimens.DialogWidth)
+      .semantics { paneTitle = paneLabel }
+      .graphicsLayer {
+        alpha = appear
+        scaleX = 0.96f + 0.04f * appear
+        scaleY = scaleX
+      },
+  ) {
+    Column(
+      modifier = Modifier.padding(NebulaDimens.DialogPadding),
+      verticalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
+      content = content,
+    )
+  }
+}
 
 /**
  * What a long press on a managed card offers.
@@ -423,6 +778,10 @@ fun CardOptionsDialog(
   onDismiss: () -> Unit,
 ) {
   val firstOption = rememberInitialFocusTarget()
+  // An opening OK press must never also arm the only destructive action in the sheet. Prefer the
+  // first action that cannot delete data; when every action is destructive, Cancel is the safe
+  // landing place. The visual order stays unchanged, so the primary choice remains easy to scan.
+  val initialActionIndex = actions.indexOfFirst { !it.destructive }
 
   Dialog(
     onDismissRequest = onDismiss,
@@ -430,64 +789,163 @@ fun CardOptionsDialog(
   ) {
     RequestInitialFocus(target = firstOption, key = focusKey, label = focusLabel)
 
-    Surface(
-      shape = NebulaShapes.extraLarge,
-      colors = SurfaceDefaults.colors(containerColor = NebulaPalette.Surface),
-      // A hairline is the only thing separating a dialog from the page behind it once both are
-      // near-black; without it the sheet has no edge at all on a dark scene.
-      border = Border(
-        border = BorderStroke(1.dp, NebulaPalette.Outline),
-        shape = NebulaShapes.extraLarge,
-      ),
-      modifier = Modifier.width(540.dp),
-    ) {
-      Column(
-        modifier = Modifier.padding(34.dp),
-        verticalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
-      ) {
-        Text(
-          text = title,
-          style = MaterialTheme.typography.headlineSmall,
-          maxLines = 2,
-          overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-          text = message,
-          style = MaterialTheme.typography.bodyMedium,
-          color = NebulaPalette.TextMuted,
-          modifier = Modifier.padding(bottom = 6.dp),
-        )
-        actions.forEachIndexed { index, action ->
-          NebulaButton(
-            text = action.label,
-            onClick = action.onClick,
-            // The first option is the one the dialog exists for, so it carries the weight.
-            style = if (index == 0) NebulaButtonStyle.Primary else NebulaButtonStyle.Secondary,
-            modifier = Modifier.fillMaxWidth()
-              .initialFocusTarget(if (index == 0) firstOption else null),
-          )
-        }
+    NebulaDialogSurface(paneLabel = title) {
+      Text(
+        text = title,
+        style = MaterialTheme.typography.headlineSmall,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+      )
+      Text(
+        text = message,
+        style = MaterialTheme.typography.bodyMedium,
+        color = NebulaPalette.TextMuted,
+        modifier = Modifier.padding(bottom = 6.dp),
+      )
+      actions.forEachIndexed { index, action ->
         NebulaButton(
-          text = "Cancel",
-          onClick = onDismiss,
-          style = NebulaButtonStyle.Ghost,
-          modifier = Modifier.fillMaxWidth(),
+          text = action.label,
+          onClick = action.onClick,
+          style = when {
+            // Removal never wears the Primary fill, whatever its position: on My List and
+            // Continue Watching the first option deletes something, and it used to be styled
+            // identically to Play.
+            action.destructive -> NebulaButtonStyle.Danger
+            // Otherwise the first option is the one the dialog exists for, so it carries the
+            // weight.
+            index == 0 -> NebulaButtonStyle.Primary
+            else -> NebulaButtonStyle.Secondary
+          },
+          modifier = Modifier.fillMaxWidth()
+            .initialFocusTarget(if (index == initialActionIndex) firstOption else null),
         )
       }
+      NebulaButton(
+        text = "Cancel",
+        onClick = onDismiss,
+        style = NebulaButtonStyle.Ghost,
+        modifier = Modifier.fillMaxWidth()
+          .initialFocusTarget(firstOption.takeIf { initialActionIndex < 0 }),
+      )
     }
   }
 }
 
+/**
+ * @param loading what to show while the value is in flight. Defaults to the spinner, which is
+ *   right for a small in-place wait; screens whose whole page is loading pass a skeleton instead,
+ *   so the viewer sees the shape of what is arriving rather than a black rectangle with a ring in
+ *   the middle of it.
+ */
 @Composable
 fun <T> LoadStateContent(
   state: LoadState<T>,
-  loadingText: String = "Loading...",
+  loadingText: String = "Loading…",
   onRetry: (() -> Unit)? = null,
+  failureActionLabel: String? = null,
+  onFailureAction: (() -> Unit)? = null,
+  loading: @Composable () -> Unit = { CenteredLoading(loadingText) },
   content: @Composable (T) -> Unit,
 ) {
   when (state) {
-    is LoadState.Loading -> CenteredLoading(loadingText)
-    is LoadState.Failed -> FailureMessage(state.message, onRetry)
+    is LoadState.Loading -> {
+      val loadingFocus = rememberInitialFocusTarget()
+      RequestInitialFocus(
+        target = loadingFocus,
+        key = loadingText,
+        label = loadingText,
+      )
+      Box(
+        modifier = Modifier
+          .fillMaxSize()
+          .initialFocusTarget(loadingFocus)
+          .focusable()
+          .semantics { contentDescription = loadingText },
+      ) {
+        DelayedBusy { loading() }
+      }
+    }
+    is LoadState.Failed -> FailureMessage(
+      message = state.message,
+      onRetry = onRetry,
+      actionLabel = failureActionLabel,
+      onAction = onFailureAction,
+    )
     is LoadState.Ready -> content(state.value)
+  }
+}
+
+/**
+ * A title, set as its own logotype where TMDB has one.
+ *
+ * A typeset title is the clearest tell that a browse UI is generic: every premium service leads
+ * with the artwork the title was actually branded with, and TMDB holds one for the large majority
+ * of things. The type is not a placeholder to be tolerated - it is the correct answer for
+ * everything with no logo - so both forms occupy the same band and neither shifts what is under it.
+ *
+ * Height rather than width is what is constrained. Logos come in wildly different aspect ratios: a
+ * long horizontal wordmark and a stacked emblem are both common, and pinning the width would render
+ * one of them enormous. ContentScale.Fit inside a fixed-height box, aligned bottom-start, puts every
+ * logotype on the same baseline the typeset title would have used.
+ *
+ * Falls back on a decode failure and not merely on a missing URL: these are transparent PNGs from a
+ * CDN, and a title that renders as an empty gap is far worse than one merely set in Outfit.
+ *
+ * @param logoHeight the band the title occupies either way. Callers match it to the height their
+ *   typeset fallback would take, so switching between the two never moves what is below.
+ */
+@Composable
+fun TitleTreatment(
+  title: String,
+  logoUrl: String?,
+  style: androidx.compose.ui.text.TextStyle,
+  logoHeight: androidx.compose.ui.unit.Dp,
+  modifier: Modifier = Modifier,
+  maxLines: Int = 2,
+  isHeading: Boolean = false,
+) {
+  var failed by remember(logoUrl) { mutableStateOf(false) }
+  var loaded by remember(logoUrl) { mutableStateOf(false) }
+  val titleModifier = if (isHeading) {
+    modifier.semantics { heading() }
+  } else {
+    modifier
+  }
+  if (logoUrl == null || failed) {
+    Text(
+      title,
+      style = style,
+      color = NebulaPalette.TextHigh,
+      // Uncapped, a three-line title silently pushes everything under it down the page.
+      maxLines = maxLines,
+      overflow = TextOverflow.Ellipsis,
+      modifier = titleModifier,
+    )
+    return
+  }
+  Box(modifier = titleModifier.height(logoHeight), contentAlignment = Alignment.BottomStart) {
+    // Keep a real title on screen while the transparent logo is still decoding. A cold cache used
+    // to render this whole band empty for several frames, which looked like missing metadata
+    // rather than loading artwork.
+    if (!loaded) {
+      Text(
+        title,
+        style = style,
+        color = NebulaPalette.TextHigh,
+        maxLines = maxLines,
+        overflow = TextOverflow.Ellipsis,
+      )
+    }
+    AsyncImage(
+      model = logoUrl,
+      // The logo *is* the title, so it carries it rather than being decorative - the one piece of
+      // artwork in the app whose contentDescription is not null.
+      contentDescription = title,
+      contentScale = ContentScale.Fit,
+      alignment = Alignment.BottomStart,
+      onSuccess = { loaded = true },
+      onError = { failed = true },
+      modifier = Modifier.fillMaxSize(),
+    )
   }
 }

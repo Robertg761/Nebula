@@ -20,11 +20,11 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: gradle
-      - name: Android JVM tests and debug assemble
+      - name: Android JVM tests, lint, and debug assemble
         run: |
           cd apps/android-tv-host
           chmod +x ./gradlew
-          ./gradlew :app:testDebugUnitTest :app:assembleDebug
+          ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :baselineprofile:assembleBenchmarkRelease
       - name: Upload Android host artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -33,4 +33,5 @@ jobs:
           path: |
             apps/android-tv-host/app/build/outputs/apk/debug/*.apk
             apps/android-tv-host/app/build/reports/tests/testDebugUnitTest/
+            apps/android-tv-host/app/build/reports/lint-results-debug.*
           if-no-files-found: ignore

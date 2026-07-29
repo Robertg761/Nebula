@@ -2,6 +2,7 @@ package com.stremioshell.host.tv.data
 
 import com.stremioshell.host.tv.data.addon.AddonList
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AddonListTest {
@@ -34,12 +35,26 @@ class AddonListTest {
   }
 
   @Test
-  fun `a url carrying a query keeps the path its author chose`() {
-    // Appending to a configured route would produce one that matches nothing.
+  fun `a base url carrying a query gains the manifest before the query`() {
     assertEquals(
       "https://addon.example/manifest.json?key=abc",
-      AddonList.normalize("https://addon.example/manifest.json?key=abc"),
+      AddonList.normalize("https://addon.example?key=abc"),
     )
+  }
+
+  @Test
+  fun `manifest matching ignores case and fragments are discarded`() {
+    assertEquals(
+      "https://addon.example/cfg/manifest.json?key=abc",
+      AddonList.normalize("https://addon.example/cfg/MANIFEST.JSON?key=abc#install"),
+    )
+  }
+
+  @Test
+  fun `cleartext and malformed explicit schemes are rejected`() {
+    assertEquals("", AddonList.normalize("http://addon.example/manifest.json"))
+    assertEquals("", AddonList.normalize("https:addon.example/manifest.json"))
+    assertEquals("", AddonList.normalize("ftp://addon.example/manifest.json"))
   }
 
   @Test
@@ -117,6 +132,40 @@ class AddonListTest {
   }
 
   @Test
+  fun `moving changes priority and clamps the destination`() {
+    val list = listOf(
+      "https://a.example/manifest.json",
+      "https://b.example/manifest.json",
+      "https://c.example/manifest.json",
+    )
+
+    assertEquals(
+      listOf(
+        "https://b.example/manifest.json",
+        "https://c.example/manifest.json",
+        "https://a.example/manifest.json",
+      ),
+      AddonList.moved(list, fromIndex = 0, toIndex = 99),
+    )
+    assertEquals(list, AddonList.moved(list, fromIndex = -1, toIndex = 0))
+  }
+
+  @Test
+  fun `queued moves follow addon identity instead of a stale index`() {
+    val a = "https://a.example/manifest.json"
+    val b = "https://b.example/manifest.json"
+    val c = "https://c.example/manifest.json"
+    val d = "https://d.example/manifest.json"
+
+    val afterFirstPress = AddonList.moved(listOf(a, b, c, d), b, direction = 1)
+    val afterSecondPress = AddonList.moved(afterFirstPress, b, direction = 1)
+
+    assertEquals(listOf(a, c, d, b), afterSecondPress)
+    assertEquals(afterSecondPress, AddonList.moved(afterSecondPress, b, direction = 0))
+    assertEquals(afterSecondPress, AddonList.moved(afterSecondPress, "missing.example", direction = -1))
+  }
+
+  @Test
   fun `the single-url callers replace the first entry and leave the rest`() {
     val list = listOf("https://a.example/manifest.json", "https://b.example/manifest.json")
     assertEquals(
@@ -164,6 +213,18 @@ class AddonListTest {
         ),
       ),
     )
+  }
+
+  @Test
+  fun `safe display never exposes userinfo path or query credentials`() {
+    val secret = "https://user:password@comet.example:8443/private-debrid-token/" +
+      "manifest.json?api_key=also-secret"
+    val displayed = AddonList.safeDisplay(secret)
+
+    assertEquals("comet.example:8443 (configured)", displayed)
+    assertTrue("userinfo leaked", !displayed.contains("password"))
+    assertTrue("path token leaked", !displayed.contains("private-debrid-token"))
+    assertTrue("query token leaked", !displayed.contains("also-secret"))
   }
 
   @Test

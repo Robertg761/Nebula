@@ -36,8 +36,46 @@ data class PairingSubmission(val tmdbKey: String?, val addonUrls: List<String>?)
      */
     fun addonUrlsIn(raw: String?): List<String> =
       AddonList.sanitized(raw.orEmpty().split(LINE_BREAK))
+
+    /**
+     * Validates the phone form before [of] normalises it.
+     *
+     * [AddonList.sanitized] deliberately drops malformed entries and caps the stored list, which
+     * is convenient for migrating old preferences but unsafe for an interactive form: reporting
+     * success after silently discarding one line makes the viewer debug the wrong device. Pairing
+     * therefore accepts every non-blank line or rejects the entire submission.
+     */
+    fun addonInputError(raw: String?): String? {
+      if (raw.isNullOrBlank()) return null
+      val lines = raw.split(LINE_BREAK).map(String::trim).filter(String::isNotEmpty)
+      if (lines.size > AddonList.MAX_ADDONS) {
+        return "Enter no more than ${AddonList.MAX_ADDONS} addon links."
+      }
+      val usableCount = lines.count { AddonList.sanitized(listOf(it)).isNotEmpty() }
+      if (usableCount == 0) {
+        return "No usable addon link in that box. Paste the manifest URL."
+      }
+      if (usableCount != lines.size) {
+        return "Every addon line must be a usable manifest link."
+      }
+      return null
+    }
   }
 }
+
+/** What the server may truthfully report after handing a validated submission to storage. */
+sealed interface PairingApplyResult {
+  data class Saved(val receipt: PairingReceipt) : PairingApplyResult
+  data class Failed(val message: String) : PairingApplyResult
+}
+
+/** Non-sensitive facts the cleartext confirmation page is allowed to show. */
+data class PairingReceipt(
+  val tmdbKeyChanged: Boolean,
+  val addonUrlsChanged: Boolean,
+  val hasTmdbKey: Boolean,
+  val addonCount: Int,
+)
 
 /** The configuration to persist, plus which halves actually moved. */
 data class MergedConfig(

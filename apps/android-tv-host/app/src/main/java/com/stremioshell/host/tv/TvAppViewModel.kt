@@ -3,6 +3,7 @@ package com.stremioshell.host.tv
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.stremioshell.host.tv.channel.WatchNextSync
 import com.stremioshell.host.tv.data.AddonProbe
 import com.stremioshell.host.tv.data.MetadataCache
 import com.stremioshell.host.tv.data.NetworkErrorMessage
@@ -37,6 +38,8 @@ import com.stremioshell.host.tv.data.tmdb.RailPaging
 import com.stremioshell.host.tv.data.tmdb.TmdbClient
 import com.stremioshell.host.tv.pairing.ConfigMerge
 import com.stremioshell.host.tv.pairing.ConfigPairingServer
+import com.stremioshell.host.tv.pairing.PairingApplyResult
+import com.stremioshell.host.tv.pairing.PairingReceipt
 import com.stremioshell.host.tv.pairing.PairingSubmission
 import com.stremioshell.host.tv.pairing.PairingTokenGenerator
 import com.stremioshell.host.tv.pairing.findLanIpv4
@@ -55,9 +58,14 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 
 data class HomeRail(val title: String, val items: List<MediaItem>)
+enum class SettingsMutationResult { Changed, Unchanged, Failed }
 
 /**
  * Assembles Home's rails from a load that may still be in progress and whose individual endpoints
@@ -202,6 +210,12 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   private val _details = MutableStateFlow<LoadState<MediaDetails>>(LoadState.Loading)
   val details: StateFlow<LoadState<MediaDetails>> = _details
 
+  /** See [loadHeroArt]. Null whenever the featured title has no logo, which Home renders as type. */
+  private val _heroLogoUrl = MutableStateFlow<String?>(null)
+  val heroLogoUrl: StateFlow<String?> = _heroLogoUrl
+  private var heroArtKey: Pair<MediaType, Int>? = null
+  private var heroArtJob: Job? = null
+
   private val _episodes = MutableStateFlow<LoadState<List<EpisodeItem>>>(LoadState.Ready(emptyList()))
   val episodes: StateFlow<LoadState<List<EpisodeItem>>> = _episodes
 
@@ -236,6 +250,13 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   private var streamsJob: Job? = null
   private var streamsKey: String? = null
 
+  /**
+   * Serialises every configuration read-modify-write. Rapid D-pad presses used to launch
+   * overlapping DataStore reads and let the last coroutine overwrite reorders/removals that had
+   * already succeeded.
+   */
+  private val settingsMutationMutex = Mutex()
+
   // What Details and its episode lists have already shown, so BACK into a title the viewer just
   // left paints it rather than spinning at them. Sized for a browsing session, not for a library:
   // ten titles covers going back up a row of similar-to and down another, and twenty seasons
@@ -250,7 +271,12 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   sealed interface PairingState {
     data object Idle : PairingState
     data class Ready(val url: String) : PairingState
-    data object Received : PairingState
+    data class Received(
+      val tmdbKeyChanged: Boolean,
+      val addonUrlsChanged: Boolean,
+      val hasTmdbKey: Boolean,
+      val addonCount: Int,
+    ) : PairingState
     data class Failed(val message: String) : PairingState
   }
 
@@ -312,7 +338,9 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     val ip = findLanIpv4() ?: return PairingStartOutcome.Failed(
       "Connect your TV to Wi-Fi or Ethernet first.",
     )
-    val server = ConfigPairingServer(session.token, ::applyPairedConfig)
+    val server = ConfigPairingServer(session.token) { submission ->
+      applyPairedConfig(session, submission)
+    }
     session.server = server
     if (session.stopped) return PairingStartOutcome.Aborted
     val started = runCatching { server.start() }
@@ -332,23 +360,58 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     )
   }
 
-  /** Called on a NanoHTTPD worker thread when the phone submits the form. */
-  private fun applyPairedConfig(submission: PairingSubmission) {
-    viewModelScope.launch {
-      val merged = ConfigMerge.merge(
-        submission,
-        currentTmdbKey = settings.tmdbApiKey.first(),
-        currentAddonUrls = settings.addonManifestUrls.first(),
-      )
-      // A field the phone left blank keeps its stored value instead of being erased.
-      if (merged.tmdbKeyChanged) settings.setTmdbApiKey(merged.tmdbKey)
-      if (merged.addonUrlsChanged) settings.setAddonManifestUrls(merged.addonUrls)
-      _pairing.value = PairingState.Received
-      // Use the just-received key: the exposed tmdbApiKey flow may not have
-      // caught up yet, and loadHomeRails would resolve the stale value.
-      if (merged.tmdbKey.isNotBlank()) loadRails(merged.tmdbKey, force = true)
+  /**
+   * Called on a NanoHTTPD worker thread. It deliberately blocks that one request until the atomic
+   * DataStore edit completes: the phone must never receive a success page for a queued or partial
+   * write. The bounded wait also prevents a broken storage backend from pinning the server worker.
+   */
+  private fun applyPairedConfig(
+    session: PairingSession,
+    submission: PairingSubmission,
+  ): PairingApplyResult =
+    runCatching {
+      runBlocking {
+        withTimeout(PAIRING_SAVE_TIMEOUT_MS) {
+          val merged = settingsMutationMutex.withLock {
+            ConfigMerge.merge(
+              submission,
+              currentTmdbKey = settings.tmdbApiKey.first(),
+              currentAddonUrls = settings.addonManifestUrls.first(),
+            ).also { result ->
+              if (result.changed) {
+                settings.setPairedConfiguration(result.tmdbKey, result.addonUrls)
+              }
+            }
+          }
+          // An old server may finish its already-accepted storage request after the viewer left
+          // and opened a new pairing session. The write is still valid, but it must never replace
+          // the new session's QR/receipt state.
+          if (pairingSession === session) {
+            _pairing.value = PairingState.Received(
+              tmdbKeyChanged = merged.tmdbKeyChanged,
+              addonUrlsChanged = merged.addonUrlsChanged,
+              hasTmdbKey = merged.tmdbKey.isNotBlank(),
+              addonCount = merged.addonUrls.size,
+            )
+            // Use the just-received key: the exposed tmdbApiKey flow may not have caught up yet.
+            // loadRails mutates ViewModel-owned jobs, so hop back to the main-scoped coroutine.
+            if (merged.tmdbKey.isNotBlank()) {
+              viewModelScope.launch { loadRails(merged.tmdbKey, force = true) }
+            }
+          }
+          PairingApplyResult.Saved(
+            PairingReceipt(
+              tmdbKeyChanged = merged.tmdbKeyChanged,
+              addonUrlsChanged = merged.addonUrlsChanged,
+              hasTmdbKey = merged.tmdbKey.isNotBlank(),
+              addonCount = merged.addonUrls.size,
+            ),
+          )
+        }
+      }
+    }.getOrElse {
+      PairingApplyResult.Failed("The TV could not save those settings. Please try again.")
     }
-  }
 
   fun stopPairing() {
     shutdownPairing()
@@ -370,6 +433,10 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     // stop() joins the listener thread; never on the caller's (main) thread. Uses the
     // app-scoped IO scope because onCleared has already cancelled viewModelScope.
     persistenceScope.launch { runCatching { server.stop() } }
+  }
+
+  private companion object {
+    const val PAIRING_SAVE_TIMEOUT_MS = 10_000L
   }
 
   private fun tmdb(): TmdbClient? = tmdbApiKey.value?.takeIf { it.isNotBlank() }?.let { TmdbClient(it) }
@@ -593,8 +660,8 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     }
     _searchResults.value = LoadState.Loading
     searchJob = viewModelScope.launch {
-      val result = catchingFailure {
-        LoadState.Ready(client.search(query)) as LoadState<List<MediaItem>>
+      val result: LoadState<List<MediaItem>> = catchingFailure {
+        LoadState.Ready(client.search(query))
       }.getOrElse { LoadState.Failed(NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, it)) }
       if (isActive && _searchQuery.value == query) _searchResults.value = result
     }
@@ -627,6 +694,41 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    * underneath, exactly as the rails do. A refresh that fails leaves the cached copy on screen,
    * because a revisit must never be worse than not caching at all.
    */
+  /**
+   * The billboard title's logotype, when TMDB has one for it.
+   *
+   * Home's hero is built from a catalog entry, and a catalog entry carries no logo - only the
+   * details response does. Rather than typeset the one title on screen at the size where
+   * typesetting shows most, this fetches that title's details once.
+   *
+   * It is deliberately *not* [loadDetails]: that publishes into `_details` and moves `detailsKey`,
+   * which is the Details screen's state, and a background prefetch that quietly repointed it would
+   * be a genuinely nasty bug to find. It shares only the cache - which is the point. Pressing OK on
+   * the billboard is the single most likely next action in the app, and it now opens on a warm
+   * cache instead of a spinner, so the request is not really an extra one at all.
+   */
+  fun loadHeroArt(type: MediaType, tmdbId: Int) {
+    val key = type to tmdbId
+    if (heroArtKey == key) return
+    heroArtKey = key
+    _heroLogoUrl.value = null
+    val cached = detailsCache.get(key, System.currentTimeMillis())
+    if (cached != null) {
+      _heroLogoUrl.value = cached.value.logoUrl
+      if (!cached.stale) return
+    }
+    val client = metadataClient() ?: return
+    heroArtJob?.cancel()
+    heroArtJob = viewModelScope.launch {
+      val loaded = catchingFailure { client.details(type, tmdbId) }.getOrNull() ?: return@launch
+      // The billboard rotates and the rails reload; a result for a title that is no longer featured
+      // must not paint over the one that is.
+      if (heroArtKey != key) return@launch
+      detailsCache.put(key, loaded, System.currentTimeMillis())
+      _heroLogoUrl.value = loaded.logoUrl
+    }
+  }
+
   fun loadDetails(type: MediaType, tmdbId: Int) {
     val client = metadataClient() ?: return
     val key = type to tmdbId
@@ -735,6 +837,8 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       seriesId = seriesId,
       bingeGroup = stream.bingeGroup,
       resolutionHeight = quality.resolutionHeight,
+      hdr = quality.hdr,
+      dolbyVision = quality.dolbyVision,
       label = stream.name ?: stream.title,
       updatedAtMs = System.currentTimeMillis(),
     )
@@ -746,7 +850,10 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   /** "Mark watched" from the Continue Watching row: keeps the record, drops the resume point. */
   fun markWatched(entry: WatchEntry) {
     persistenceScope.launch {
-      runCatching { watchState.markWatched(entry.key, System.currentTimeMillis()) }
+      runCatching {
+        watchState.markWatched(entry.key, System.currentTimeMillis())
+        WatchNextSync.publish(getApplication(), force = true)
+      }
     }
   }
 
@@ -755,7 +862,12 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    * which is what a viewer who started the wrong thing is asking for.
    */
   fun forgetWatchEntry(entry: WatchEntry) {
-    persistenceScope.launch { runCatching { watchState.remove(entry.key) } }
+    persistenceScope.launch {
+      runCatching {
+        watchState.remove(entry.key)
+        WatchNextSync.publish(getApplication(), force = true)
+      }
+    }
   }
 
   /**
@@ -774,12 +886,31 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   /** Appends an addon and persists immediately; see [AddonList.added] for what is rejected. */
-  fun addAddon(rawUrl: String) {
-    viewModelScope.launch {
-      val current = settings.addonManifestUrls.first()
-      val next = AddonList.added(current, rawUrl)
-      if (next != current) settings.setAddonManifestUrls(next)
-    }
+  fun addAddon(
+    rawUrl: String,
+    onResult: (SettingsMutationResult) -> Unit = {},
+  ) = mutateSettings(onResult) {
+    val current = settings.addonManifestUrls.first()
+    val next = AddonList.added(current, rawUrl)
+    if (next == current) return@mutateSettings false
+    settings.setAddonManifestUrls(next)
+    true
+  }
+
+  /** Reorders addon priority and persists immediately, just like add and remove. */
+  fun moveAddon(
+    url: String,
+    direction: Int,
+    onResult: (SettingsMutationResult) -> Unit = {},
+  ) = mutateSettings(onResult) {
+    val current = settings.addonManifestUrls.first()
+    // Resolve the row's current position only after taking settingsMutationMutex. Compose can
+    // enqueue several D-pad presses before its collected list recomposes; captured indices would
+    // then reorder whichever addon happened to move into that old slot.
+    val next = AddonList.moved(current, url, direction)
+    if (next == current) return@mutateSettings false
+    settings.setAddonManifestUrls(next)
+    true
   }
 
   /**
@@ -790,53 +921,96 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    * addon that way would collide with [SettingsSaveGuard], which refuses to write
    * an empty list over a stored one. Pressing Remove is the explicit clear.
    */
-  fun removeAddon(url: String) {
-    viewModelScope.launch {
-      settings.setAddonManifestUrls(AddonList.removed(settings.addonManifestUrls.first(), url))
-    }
+  fun removeAddon(
+    url: String,
+    onResult: (SettingsMutationResult) -> Unit = {},
+  ) = mutateSettings(onResult) {
+    val current = settings.addonManifestUrls.first()
+    val next = AddonList.removed(current, url)
+    if (next == current) return@mutateSettings false
+    settings.setAddonManifestUrls(next)
+    true
   }
 
   /** The explicit clear the blank-save guard points at. */
-  fun clearTmdbKey() {
-    viewModelScope.launch { settings.setTmdbApiKey("") }
+  fun clearTmdbKey(onResult: (SettingsMutationResult) -> Unit = {}) =
+    mutateSettings(onResult) {
+      if (settings.tmdbApiKey.first().isBlank()) return@mutateSettings false
+      settings.setTmdbApiKey("")
+      true
+    }
+
+  private fun mutateSettings(
+    onResult: (SettingsMutationResult) -> Unit,
+    mutation: suspend () -> Boolean,
+  ) {
+    viewModelScope.launch {
+      val result = runCatching {
+        settingsMutationMutex.withLock {
+          if (mutation()) SettingsMutationResult.Changed else SettingsMutationResult.Unchanged
+        }
+      }.getOrElse { SettingsMutationResult.Failed }
+      onResult(result)
+    }
   }
 
   fun saveSettings(
     tmdbKey: String,
-    addonUrls: List<String>,
     subtitlesBaseUrl: String,
     onStatus: (String) -> Unit,
   ) {
     viewModelScope.launch {
-      val resolved = SettingsSaveGuard.resolve(
-        SettingsDraft(tmdbKey, addonUrls, subtitlesBaseUrl),
-        StoredSettings(settings.tmdbApiKey.first(), settings.addonManifestUrls.first()),
-      )
-      settings.setTmdbApiKey(resolved.tmdbKey)
-      settings.setAddonManifestUrls(resolved.addonUrls)
-      settings.setSubtitlesBaseUrl(resolved.subtitlesBaseUrl)
-      // Persisting the key is what makes Home load its rails, so start that load here, with the key
-      // we just wrote (the exposed flow has not caught up yet). loadRails de-dupes it against the
-      // load Home asks for when it next composes, so the save produces exactly one. The connection
-      // checks below can block for ~30s each, and a load kicked off after them would land long
-      // after Home had rendered and blank it back to "Loading catalogs..." mid-scroll.
-      if (resolved.tmdbKey.isNotBlank()) loadRails(resolved.tmdbKey, force = true)
-      val kept = SettingsSaveGuard.keptNotice(resolved)
-      onStatus(listOfNotNull(kept, "Saved. Checking connections...").joinToString("  "))
+      try {
+        val resolved = settingsMutationMutex.withLock {
+          // Add/remove/reorder persist immediately. Read that list inside the same lock instead of
+          // accepting a compositional snapshot: a rapid Save after a list edit must not overwrite
+          // the edit with the previous frame's value.
+          val currentAddons = settings.addonManifestUrls.first()
+          SettingsSaveGuard.resolve(
+            SettingsDraft(tmdbKey, currentAddons, subtitlesBaseUrl),
+            StoredSettings(settings.tmdbApiKey.first(), currentAddons),
+          ).also { result ->
+            settings.setConfiguration(
+              result.tmdbKey,
+              result.addonUrls,
+              result.subtitlesBaseUrl,
+            )
+          }
+        }
+        // Persisting the key is what makes Home load its rails, so start that load here, with the
+        // key we just wrote (the exposed flow has not caught up yet). loadRails de-dupes it against
+        // the load Home asks for when it next composes, so the save produces exactly one. The
+        // connection checks below can block for ~30s each, and a load kicked off after them would
+        // land long after Home had rendered and blank it back to "Loading catalogs..." mid-scroll.
+        if (resolved.tmdbKey.isNotBlank()) loadRails(resolved.tmdbKey, force = true)
+        val kept = SettingsSaveGuard.keptNotice(resolved)
+        onStatus(listOfNotNull(kept, "Saved. Checking connections...").joinToString("  "))
 
-      // Every addon at once, for the reason the stream loader does it: a viewer with
-      // four addons should not wait four timeouts to find out which one is broken.
-      val labels = AddonList.labels(resolved.addonUrls)
-      val probes = resolved.addonUrls.mapIndexed { index, url ->
-        async { AddonProbe(labels[index], runCatching { addonClient.manifest(url) }.getOrNull()?.name) }
-      }.awaitAll()
+        // Every addon at once, for the reason the stream loader does it: a viewer with
+        // four addons should not wait four timeouts to find out which one is broken.
+        val labels = AddonList.labels(resolved.addonUrls)
+        val probes = resolved.addonUrls.mapIndexed { index, url ->
+          async {
+            AddonProbe(
+              labels[index],
+              runCatching { addonClient.manifest(url) }.getOrNull()?.name,
+            )
+          }
+        }.awaitAll()
 
-      val tmdbConnected = resolved.tmdbKey.takeIf { it.isNotBlank() }?.let {
-        runCatching { TmdbClient(it).trending(MediaType.Movie) }.isSuccess
+        val tmdbConnected = resolved.tmdbKey.takeIf { it.isNotBlank() }?.let {
+          runCatching { TmdbClient(it).trending(MediaType.Movie) }.isSuccess
+        }
+        val status = SettingsStatus.tmdbStatus(resolved.tmdbKey, tmdbConnected) +
+          "   |   " + SettingsStatus.addonStatus(probes)
+        onStatus(listOfNotNull(kept, status).joinToString("  "))
+      } catch (cancelled: CancellationException) {
+        throw cancelled
+      } catch (_: Throwable) {
+        onStatus(
+          "Couldn't save settings. Check the TV's available storage and try again.",
+        )
       }
-      val status = SettingsStatus.tmdbStatus(resolved.tmdbKey, tmdbConnected) +
-        "   |   " + SettingsStatus.addonStatus(probes)
-      onStatus(listOfNotNull(kept, status).joinToString("  "))
     }
   }
 }

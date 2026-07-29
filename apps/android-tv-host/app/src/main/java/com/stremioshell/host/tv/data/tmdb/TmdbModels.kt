@@ -60,6 +60,8 @@ data class CastMember(
  *   [ContentRating.pick]; null when TMDB has none worth showing.
  * @param trailerYoutubeKey the title's trailer on YouTube. Carried here because it arrives free
  *   with the details request; no screen plays it yet.
+ * @param logoUrl the title's own logotype, transparent PNG. Null when TMDB has none worth using,
+ *   which is common enough that every surface showing it must still read correctly without one.
  */
 data class MediaDetails(
   val item: MediaItem,
@@ -73,6 +75,7 @@ data class MediaDetails(
   val cast: List<CastMember> = emptyList(),
   val similar: List<MediaItem> = emptyList(),
   val trailerYoutubeKey: String? = null,
+  val logoUrl: String? = null,
 )
 
 data class EpisodeItem(
@@ -145,6 +148,24 @@ internal data class TmdbVideo(
 @Serializable
 internal data class TmdbVideos(val results: List<TmdbVideo> = emptyList())
 
+/**
+ * One artwork file TMDB holds for a title.
+ *
+ * Only the fields the logo pick reads. `iso_639_1` is nullable and genuinely absent on the
+ * textless artwork TMDB files under a null language, which is the one case where "no language" is
+ * a useful answer rather than missing data.
+ */
+@Serializable
+internal data class TmdbImage(
+  @SerialName("file_path") val filePath: String = "",
+  @SerialName("iso_639_1") val language: String? = null,
+  @SerialName("vote_average") val voteAverage: Double = 0.0,
+  val width: Int = 0,
+)
+
+@Serializable
+internal data class TmdbImages(val logos: List<TmdbImage> = emptyList())
+
 @Serializable
 internal data class TmdbContentRating(
   @SerialName("iso_3166_1") val country: String = "",
@@ -189,6 +210,7 @@ internal data class TmdbDetailsResponse(
   val similar: TmdbPagedResults? = null,
   @SerialName("content_ratings") val contentRatings: TmdbContentRatings? = null,
   @SerialName("release_dates") val releaseDates: TmdbReleaseDates? = null,
+  val images: TmdbImages? = null,
 )
 
 @Serializable

@@ -87,6 +87,24 @@ class SettingsSaveGuardTest {
   }
 
   @Test
+  fun `subtitle base keeps configuration query but drops manifest case and fragment`() {
+    assertEquals(
+      "https://subs.example/cfg?token=secret",
+      SettingsSaveGuard.normalizeSubtitlesBase(
+        "https://subs.example/cfg/MANIFEST.JSON?token=secret#install",
+      ),
+    )
+  }
+
+  @Test
+  fun `cleartext subtitle base falls back to the secure built-in addon`() {
+    assertEquals(
+      SubtitlesClient.OPENSUBTITLES_V3_BASE,
+      SettingsSaveGuard.normalizeSubtitlesBase("http://subs.example/manifest.json"),
+    )
+  }
+
+  @Test
   fun `the guard says what it held back`() {
     assertNull(SettingsSaveGuard.keptNotice(SettingsSaveGuard.resolve(draft("k"), stored())))
 
@@ -164,5 +182,13 @@ class SettingsStatusTest {
       "Addon: connected (addon)",
       SettingsStatus.addonStatus(listOf(AddonProbe("Comet", ""))),
     )
+  }
+
+  @Test
+  fun `remote manifest names cannot inject controls or unbounded status text`() {
+    val unsafe = "Comet\nConnected\u202E" + "x".repeat(100)
+    val status = SettingsStatus.addonStatus(listOf(AddonProbe("Comet", unsafe)))
+
+    assertEquals("Addon: connected (CometConnected${"x".repeat(66)})", status)
   }
 }

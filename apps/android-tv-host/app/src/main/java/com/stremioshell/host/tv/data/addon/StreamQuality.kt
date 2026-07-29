@@ -1,5 +1,6 @@
 package com.stremioshell.host.tv.data.addon
 
+import java.util.Locale
 /**
  * What a stream row's own text says about the release.
  *
@@ -47,7 +48,7 @@ data class StreamQuality(
     )
 
     fun of(text: String, sizeHintBytes: Long? = null): StreamQuality {
-      val lower = text.lowercase()
+      val lower = text.lowercase(Locale.ROOT)
       return StreamQuality(
         resolutionHeight = resolution(lower),
         // "hdr10", "hdr10+" and "hdr" all mean the same thing to a badge; PQ and
@@ -60,17 +61,17 @@ data class StreamQuality(
     }
 
     /**
-     * The highest `<n>p` in the text, because a file name carries the release
-     * resolution while the addon's own label sometimes carries the transcode
-     * ("1080p (from 2160p source)"), and the higher of the two is the one the
-     * viewer is being offered. Falls back to the words used when a row has no
-     * numeric label at all.
+     * The first valid `<n>p` in the row. Text is assembled in display-priority
+     * order (name, title, description, filename), so this is the delivered tier
+     * the addon puts in its label. Taking the highest number silently promoted
+     * "1080p transcode from a 2160p source" into a 4K stream, distorting both the
+     * picker order and next-episode compatibility.
      */
     private fun resolution(lower: String): Int? {
       val numeric = PIXEL_HEIGHT.findAll(lower)
         .mapNotNull { it.groupValues[1].toIntOrNull() }
         .filter { it in MIN_HEIGHT..MAX_HEIGHT }
-        .maxOrNull()
+        .firstOrNull()
       if (numeric != null) return numeric
       return when {
         lower.containsAny("2160", "uhd") || lower.containsToken("4k") -> 2160

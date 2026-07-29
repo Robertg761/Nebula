@@ -38,6 +38,18 @@ data class MpvTrack(
   val title: String = "",
   val codec: String = "",
   /**
+   * Container-reported audio shape. Both are hints: mpv can decode to a
+   * different layout, but they are still what lets a viewer distinguish the
+   * stereo, 5.1 and 7.1 choices before selecting one.
+   */
+  val channelCount: Int? = null,
+  val channelLayout: String = "",
+  /** Container-reported average bitrate (or HLS variant bitrate), in bits per second. */
+  val bitrateBps: Long? = null,
+  /** Accessibility dispositions carried by the container. */
+  val hearingImpaired: Boolean = false,
+  val visualImpaired: Boolean = false,
+  /**
    * mpv's `codec-profile`, which is where a Dolby Vision stream names itself on
    * builds whose track list carries no dedicated field ("dvhe.05.06").
    */
@@ -70,10 +82,16 @@ data class MpvTrack(
       return parts.joinToString(" - ").ifBlank { "Track $id" }
     }
 
-  /** The technical second line: codec plus the container's own flags. */
+  /**
+   * The technical second line: codec, audio shape/bitrate, accessibility
+   * dispositions, then the container's selection flags.
+   */
   val detail: String
     get() = listOfNotNull(
       codec.trim().ifBlank { null }?.uppercase(Locale.ROOT),
+      channelDetail,
+      bitrateBps?.takeIf { it > 0L }?.let(::formatBitrate),
+      accessibilityDetail,
       "Default".takeIf { isDefault },
       "Forced".takeIf { forced },
       "External".takeIf { external },
@@ -106,9 +124,40 @@ data class MpvTrack(
       return DV_TOKEN.containsMatchIn(text)
     }
 
+  private val channelDetail: String?
+    get() = channelLayout.trim().ifBlank {
+      channelCount?.takeIf { it > 0 }?.let { "$it ch" }.orEmpty()
+    }.ifBlank { null }
+
+  private val accessibilityDetail: String?
+    get() {
+      val notes = listOfNotNull(
+        when {
+          !visualImpaired -> null
+          kind == TrackKind.Audio -> "Audio description"
+          else -> "Visual impaired"
+        },
+        when {
+          !hearingImpaired -> null
+          kind == TrackKind.Subtitle -> "SDH"
+          else -> "Hearing impaired"
+        },
+      )
+      return notes.joinToString(" + ").ifBlank { null }
+    }
+
   private companion object {
     val DV_TAGS = listOf("dvhe", "dvh1", "dav1", "dolby vision", "dolbyvision", "dovi")
     val DV_TOKEN = Regex("(?<![a-z0-9])dv(?![a-z0-9])")
+
+    fun formatBitrate(bitsPerSecond: Long): String {
+      val divisor = if (bitsPerSecond >= 1_000_000L) 1_000_000.0 else 1_000.0
+      val unit = if (bitsPerSecond >= 1_000_000L) "Mbps" else "kbps"
+      val value = String.format(Locale.ROOT, "%.1f", bitsPerSecond / divisor)
+        .trimEnd('0')
+        .trimEnd('.')
+      return "$value $unit"
+    }
   }
 }
 
@@ -146,6 +195,12 @@ object MpvTracks {
         lang = entry.optString("lang"),
         title = entry.optString("title"),
         codec = entry.optString("codec"),
+        channelCount = entry.optInt("demux-channel-count").takeIf { it > 0 },
+        channelLayout = entry.optString("demux-channels"),
+        bitrateBps = entry.optLong("demux-bitrate").takeIf { it > 0L }
+          ?: entry.optLong("hls-bitrate").takeIf { it > 0L },
+        hearingImpaired = entry.optBoolean("hearing-impaired"),
+        visualImpaired = entry.optBoolean("visual-impaired"),
         codecProfile = entry.optString("codec-profile"),
         // Zero is mpv's "no Dolby Vision", and an absent field reads as zero too,
         // so both come back as null rather than as a profile number.

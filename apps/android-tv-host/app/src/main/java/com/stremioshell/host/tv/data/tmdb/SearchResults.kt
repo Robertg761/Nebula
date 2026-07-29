@@ -95,5 +95,5 @@ object SearchResults {
   // Case and spacing only. Anything cleverer (dropping punctuation, articles) would start calling
   // near-misses exact, and the reordering below is only defensible while "exact" means exact.
   private fun normalized(text: String): String =
-    text.trim().lowercase(Locale.US).replace(WHITESPACE, " ")
+    text.trim().lowercase(Locale.ROOT).replace(WHITESPACE, " ")
 }

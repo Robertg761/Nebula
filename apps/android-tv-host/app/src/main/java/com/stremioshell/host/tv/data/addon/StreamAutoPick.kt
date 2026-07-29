@@ -1,5 +1,6 @@
 package com.stremioshell.host.tv.data.addon
 
+import java.util.Locale
 import kotlinx.serialization.Serializable
 
 /**
@@ -16,6 +17,12 @@ data class StreamSelection(
   val seriesId: String,
   val bingeGroup: String? = null,
   val resolutionHeight: Int? = null,
+  /**
+   * Nullable for selections persisted before playback-format compatibility was
+   * recorded. A known false is different from legacy "not recorded".
+   */
+  val hdr: Boolean? = null,
+  val dolbyVision: Boolean? = null,
   /** The row's own label, for showing the viewer what was remembered. */
   val label: String? = null,
   val updatedAtMs: Long,
@@ -31,8 +38,10 @@ data class StreamSelection(
  */
 object BingeGroupMatcher {
   fun match(bingeGroup: String?, streams: List<AddonStream>): AddonStream? {
-    val wanted = bingeGroup?.trim()?.lowercase()?.ifBlank { null } ?: return null
-    return streams.firstOrNull { it.bingeGroup?.trim()?.lowercase() == wanted }
+    val wanted = bingeGroup?.trim()?.lowercase(Locale.ROOT)?.ifBlank { null } ?: return null
+    return streams.firstOrNull {
+      it.bingeGroup?.trim()?.lowercase(Locale.ROOT) == wanted
+    }
   }
 }
 
@@ -51,11 +60,31 @@ object StreamAutoPick {
     bingeGroup: String? = null,
     remembered: StreamSelection? = null,
   ): AddonStream? {
-    BingeGroupMatcher.match(bingeGroup, streams)?.let { return it }
+    BingeGroupMatcher.match(bingeGroup, streams)
+      ?.takeIf { formatCompatible(it, remembered) }
+      ?.let { return it }
     val memory = remembered ?: return null
-    BingeGroupMatcher.match(memory.bingeGroup, streams)?.let { return it }
+    BingeGroupMatcher.match(memory.bingeGroup, streams)
+      ?.takeIf { formatCompatible(it, memory) }
+      ?.let { return it }
     val height = memory.resolutionHeight ?: return null
     return StreamOrder.byQuality(streams)
-      .firstOrNull { StreamQuality.parse(it).resolutionHeight == height }
+      .firstOrNull { stream ->
+        val quality = StreamQuality.parse(stream)
+        quality.resolutionHeight == height &&
+          formatCompatible(stream, memory)
+      }
+  }
+
+  /**
+   * A binge-group is addon-provided rather than a cryptographic release identity. Preserve the
+   * exact-match preference, but never let a reused/mistagged group cross the format boundary the
+   * viewer already chose; that can turn working SDR playback into an unsupported DV stream.
+   */
+  private fun formatCompatible(stream: AddonStream, memory: StreamSelection?): Boolean {
+    if (memory == null) return true
+    val quality = StreamQuality.parse(stream)
+    return (memory.hdr == null || quality.hdr == memory.hdr) &&
+      (memory.dolbyVision == null || quality.dolbyVision == memory.dolbyVision)
   }
 }

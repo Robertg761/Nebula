@@ -2,6 +2,7 @@ package com.stremioshell.host.tv.data
 
 import android.content.Context
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -38,6 +39,11 @@ data class PlayerPrefs(
    * film: a viewer who has an AVR has it for every film they watch.
    */
   val audioOutput: String = "",
+  /**
+   * How many times the transport panel has been opened, saturating once the key legend has been
+   * shown enough times. See [com.stremioshell.host.tv.player.OsdHintPolicy].
+   */
+  val osdOpens: Int = 0,
 )
 
 /** Reads and writes the player's cross-file preferences. */
@@ -67,11 +73,16 @@ class PlayerPrefsStore(private val context: Context) {
     context.playerPrefsDataStore.edit { it[KEY_AUDIO_OUTPUT] = storageName.trim() }
   }
 
+  suspend fun setOsdOpens(value: Int) {
+    context.playerPrefsDataStore.edit { it[KEY_OSD_OPENS] = value }
+  }
+
   private fun read(prefs: Preferences) = PlayerPrefs(
     audioLanguage = prefs[KEY_AUDIO_LANG].orEmpty(),
     subtitleLanguage = prefs[KEY_SUB_LANG].orEmpty(),
     subtitleSize = prefs[KEY_SUB_SIZE].orEmpty(),
     audioOutput = prefs[KEY_AUDIO_OUTPUT].orEmpty(),
+    osdOpens = prefs[KEY_OSD_OPENS] ?: 0,
   )
 
   private companion object {
@@ -79,5 +90,6 @@ class PlayerPrefsStore(private val context: Context) {
     val KEY_SUB_LANG = stringPreferencesKey("player_subtitle_language")
     val KEY_SUB_SIZE = stringPreferencesKey("player_subtitle_size")
     val KEY_AUDIO_OUTPUT = stringPreferencesKey("player_audio_output")
+    val KEY_OSD_OPENS = intPreferencesKey("player_osd_opens")
   }
 }

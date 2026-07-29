@@ -86,6 +86,17 @@ class NetworkErrorMessageTest {
   }
 
   @Test
+  fun `an oversized response is distinguished from an offline service`() {
+    assertEquals(
+      "The response from the addon was too large to use safely.",
+      NetworkErrorMessage.forThrowable(
+        NetworkSource.Addon,
+        HttpResponseTooLargeException(MAX_JSON_RESPONSE_BYTES),
+      ),
+    )
+  }
+
+  @Test
   fun `a wrapped cause is still recognized`() {
     val wrapped = IllegalStateException("wrapper", HttpStatusException(429, "api.themoviedb.org"))
     assertTrue(NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, wrapped).contains("rate limit"))
@@ -115,20 +126,29 @@ class NetworkErrorMessageTest {
   }
 
   @Test
-  fun `redaction masks api keys but keeps the rest of the url`() {
+  fun `redaction keeps a public TMDB route but drops every query value`() {
     assertEquals(
-      "https://api.themoviedb.org/3/trending/movie/week?api_key=<redacted>&language=en-US",
+      "https://api.themoviedb.org/3/trending/movie/week?<redacted>",
       redactSecrets("https://api.themoviedb.org/3/trending/movie/week?api_key=abc123def&language=en-US"),
     )
   }
 
   @Test
-  fun `redaction covers token style parameters and leaves clean urls alone`() {
+  fun `redaction removes addon userinfo opaque config paths and arbitrary query keys`() {
     assertEquals(
-      "https://comet.example/x?token=<redacted>",
-      redactSecrets("https://comet.example/x?token=s3cret"),
+      "https://comet.example/<redacted>/stream/movie/tt1.json?<redacted>",
+      redactSecrets(
+        "https://user:password@comet.example/private-key/stream/movie/tt1.json?session=s3cret",
+      ),
     )
-    val clean = "https://comet.example/cfg/stream/movie/tt1.json"
-    assertEquals(clean, redactSecrets(clean))
+  }
+
+  @Test
+  fun `redaction identifies a root addon route without inventing a secret path`() {
+    assertEquals(
+      "https://comet.example/stream/movie/tt1.json",
+      redactSecrets("https://comet.example/stream/movie/tt1.json"),
+    )
+    assertEquals("<redacted-url>", redactSecrets("not a URL token=secret"))
   }
 }

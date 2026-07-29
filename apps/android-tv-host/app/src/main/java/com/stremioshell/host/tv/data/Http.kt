@@ -5,16 +5,21 @@ import android.util.Log
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlin.coroutines.resumeWithException
 import okhttp3.Cache
 import okhttp3.CacheControl
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.ResponseBody
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.suspendCancellableCoroutine
 
 internal const val HTTP_TAG = "TvHttp"
+internal const val MAX_JSON_RESPONSE_BYTES: Long = 5L * 1024 * 1024
 
 /** Seam for HTTP GETs so clients stay unit-testable without a server. */
 fun interface HttpFetcher {
@@ -113,7 +118,7 @@ internal class StaleOnNetworkFailureInterceptor(
       cached?.close()
       throw failure
     }
-    log("network failed; serving cached ${request.url.host}${request.url.encodedPath}")
+    log("network failed; serving cached ${redactSecrets(request.url.toString())}")
     return cached
   }
 }
@@ -174,19 +179,52 @@ object OkHttpFetcher : HttpFetcher {
 
   override suspend fun getAllowingStale(url: String): String = execute(url, cacheable = true)
 
-  private suspend fun execute(url: String, cacheable: Boolean): String = withContext(Dispatchers.IO) {
+  private suspend fun execute(url: String, cacheable: Boolean): String {
     val builder = Request.Builder().url(url).header("Accept", "application/json")
     if (cacheable) builder.header(HttpCachePolicy.CACHEABLE_HEADER, "1")
     val request = builder.build()
-    SharedHttpClient.client.newCall(request).execute().use { response ->
-      val body = response.body?.string().orEmpty()
+    return SharedHttpClient.client.newCall(request).awaitResponse().use { response ->
       if (!response.isSuccessful) {
         // The URL carries the TMDB api_key, so the detail stays here (redacted) and the thrown
         // message - which the UI may end up rendering - carries only status and host.
         Log.w(HTTP_TAG, "GET ${redactSecrets(url)} failed: HTTP ${response.code}")
         throw HttpStatusException(response.code, request.url.host)
       }
-      body
+      response.body?.readUtf8Limited(MAX_JSON_RESPONSE_BYTES).orEmpty()
     }
   }
 }
+
+/**
+ * Reads a response without trusting Content-Length. Chunked/misreported bodies are capped by
+ * asking Okio for one byte beyond the limit before turning the buffer into a String.
+ */
+internal fun ResponseBody.readUtf8Limited(maxBytes: Long): String {
+  require(maxBytes >= 0L && maxBytes < Long.MAX_VALUE)
+  val declaredBytes = contentLength()
+  if (declaredBytes > maxBytes) throw HttpResponseTooLargeException(maxBytes)
+  val source = source()
+  if (source.request(maxBytes + 1L)) throw HttpResponseTooLargeException(maxBytes)
+  return source.readUtf8()
+}
+
+/**
+ * Coroutine bridge for OkHttp that cancels the socket when its caller times out
+ * or leaves the screen. Wrapping blocking `execute()` in an IO dispatcher only
+ * cancelled the coroutine; the underlying request kept consuming a connection
+ * until OkHttp's own 40-second ceiling.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+internal suspend fun Call.awaitResponse(): Response =
+  suspendCancellableCoroutine { continuation ->
+    continuation.invokeOnCancellation { cancel() }
+    enqueue(object : Callback {
+      override fun onFailure(call: Call, e: IOException) {
+        if (!continuation.isCancelled) continuation.resumeWithException(e)
+      }
+
+      override fun onResponse(call: Call, response: Response) {
+        continuation.resume(response) { response.close() }
+      }
+    })
+  }

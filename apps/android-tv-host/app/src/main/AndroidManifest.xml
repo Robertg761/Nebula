@@ -17,8 +17,10 @@
 
   <application
     android:name=".tv.StremioTvApplication"
-    android:allowBackup="true"
+    android:allowBackup="false"
     android:banner="@drawable/ic_tv_banner"
+    android:dataExtractionRules="@xml/data_extraction_rules"
+    android:fullBackupContent="false"
     android:icon="@mipmap/ic_launcher"
     android:label="@string/app_name"
     android:roundIcon="@mipmap/ic_launcher_round"
@@ -27,8 +29,8 @@
     android:usesCleartextTraffic="${usesCleartextTraffic}">
     <!-- Handles its own config changes for the same reason MpvPlayerActivity
          does: the player's refresh-rate matching can switch display mode
-         mid-playback, and HDR10 content flips the panel into HDR/wide-gamut
-         mode (colorMode), either of which otherwise recreates this activity
+         mid-playback, and a compatible HDR pipeline may switch the panel's
+         HDR/wide-gamut mode (colorMode), either of which otherwise recreates this activity
          behind it. The Compose back stack is saveable regardless, this just
          avoids the needless teardown of the whole UI (and its network
          state). -->
@@ -70,9 +72,10 @@
     </activity>
 
     <!-- Handles its own config changes: matching the display refresh rate to the
-         content frame rate can switch display mode mid-playback, and mpv's
-         target-colorspace-hint puts the panel into HDR/wide-gamut mode a few
-         seconds into HDR10 content (colorMode). Letting either recreate the
+         content frame rate can switch display mode mid-playback, and an HDR-capable
+         device/pipeline may react to mpv's target-colorspace-hint by changing
+         HDR/wide-gamut mode (colorMode). The hint is not a guarantee that a given
+         TV, codec path, or Dolby Vision profile will activate HDR. Letting either recreate the
          activity would tear down mpv and restart the stream, and the color-mode
          flip can oscillate as the mode reverts on teardown.
          singleTop because MPVLib is a process-global native singleton: a second

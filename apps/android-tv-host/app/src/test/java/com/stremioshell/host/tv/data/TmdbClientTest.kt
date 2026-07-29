@@ -2,6 +2,7 @@ package com.stremioshell.host.tv.data
 
 import com.stremioshell.host.tv.data.tmdb.MediaType
 import com.stremioshell.host.tv.data.tmdb.TmdbClient
+import java.util.Locale
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -18,6 +19,7 @@ class TmdbClientTest {
         requested += url
         response
       },
+      locale = Locale.US,
     )
   }
 
@@ -135,6 +137,36 @@ class TmdbClientTest {
     val movieUrl = requested.single()
     // Certifications live under a different key for movies.
     assertTrue(movieUrl.contains("append_to_response=external_ids,credits,videos,similar,release_dates"))
+  }
+
+  @Test
+  fun `metadata and artwork requests follow the device locale with safe fallbacks`() = runBlocking {
+    TmdbClient(
+      apiKey = "test-key",
+      fetcher = { url ->
+        requested += url
+        """{"id":9,"title":"Titre"}"""
+      },
+      locale = Locale.CANADA_FRENCH,
+    ).details(MediaType.Movie, 9)
+
+    val url = requested.single()
+    assertTrue(url.contains("language=fr-CA"))
+    assertTrue(url.contains("include_image_language=fr,en,null"))
+  }
+
+  @Test
+  fun `the api key cannot inject another query parameter`() = runBlocking {
+    TmdbClient(
+      apiKey = "key&include_adult=true",
+      fetcher = { url ->
+        requested += url
+        """{"results":[]}"""
+      },
+      locale = Locale.US,
+    ).trending(MediaType.Movie)
+
+    assertTrue(requested.single().contains("api_key=key%26include_adult%3Dtrue"))
   }
 
   @Test

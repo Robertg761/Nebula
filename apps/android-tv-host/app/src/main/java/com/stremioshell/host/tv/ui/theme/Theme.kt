@@ -26,8 +26,9 @@ val NebulaShapes = Shapes(
 
 private val NebulaColors = darkColorScheme(
   primary = NebulaPalette.Violet,
-  onPrimary = Color.White,
-  primaryContainer = NebulaPalette.SurfaceVariant,
+  // Dark ink, not white: white on Violet is 3.69:1 and fails AA at the label sizes buttons use.
+  onPrimary = NebulaPalette.OnAccent,
+  primaryContainer = NebulaPalette.AccentPlate,
   onPrimaryContainer = NebulaPalette.VioletBright,
   secondary = NebulaPalette.Cyan,
   onSecondary = Color(0xFF06202A),

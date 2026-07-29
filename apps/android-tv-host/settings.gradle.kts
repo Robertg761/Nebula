@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "stremio-shell-tv-android-host"
 include(":app")
+include(":baselineprofile")

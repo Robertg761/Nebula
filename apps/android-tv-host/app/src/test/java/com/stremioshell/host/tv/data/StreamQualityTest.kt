@@ -20,9 +20,8 @@ class StreamQualityTest {
   }
 
   @Test
-  fun `the highest resolution in the row wins`() {
-    // Addons label a transcode with both the source and the delivered height.
-    assertEquals(2160, StreamQuality.of("1080p transcode of 2160p source").resolutionHeight)
+  fun `a source resolution does not promote the delivered transcode`() {
+    assertEquals(1080, StreamQuality.of("1080p transcode of 2160p source").resolutionHeight)
   }
 
   @Test

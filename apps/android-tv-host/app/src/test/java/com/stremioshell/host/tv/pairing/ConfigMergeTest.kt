@@ -16,6 +16,35 @@ class ConfigMergeTest {
     ConfigMerge.merge(submission, currentTmdbKey = storedKey, currentAddonUrls = storedUrls)
 
   @Test
+  fun `interactive addon validation rejects any malformed line`() {
+    assertEquals(
+      "Every addon line must be a usable manifest link.",
+      PairingSubmission.addonInputError(
+        "https://valid.example/manifest.json\nstremio://",
+      ),
+    )
+  }
+
+  @Test
+  fun `interactive addon validation explains when every line is unusable`() {
+    assertEquals(
+      "No usable addon link in that box. Paste the manifest URL.",
+      PairingSubmission.addonInputError("stremio://"),
+    )
+  }
+
+  @Test
+  fun `interactive addon validation rejects overflow instead of truncating`() {
+    val raw = (1..AddonList.MAX_ADDONS + 1)
+      .joinToString("\n") { "https://a$it.example/manifest.json" }
+
+    assertEquals(
+      "Enter no more than ${AddonList.MAX_ADDONS} addon links.",
+      PairingSubmission.addonInputError(raw),
+    )
+  }
+
+  @Test
   fun `blank fields are read as absent, not as an empty value`() {
     val submission = PairingSubmission.of(rawTmdbKey = "  ", rawAddonUrls = null)
 

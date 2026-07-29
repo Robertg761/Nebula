@@ -145,6 +145,33 @@ class SeekCoalescerTest {
   }
 
   @Test
+  fun `invalid native timeline values cannot poison the seek target`() {
+    val seeker = coalescer()
+
+    assertEquals(
+      10.0,
+      seeker.press(
+        10.0,
+        positionSec = Double.NaN,
+        durationSec = Double.NaN,
+        isRepeat = false,
+        nowMs = 0L,
+      )!!,
+      0.001,
+    )
+    assertNull(
+      seeker.press(
+        Double.POSITIVE_INFINITY,
+        positionSec = 10.0,
+        durationSec = 100.0,
+        isRepeat = false,
+        nowMs = 200L,
+      ),
+    )
+    assertEquals(10.0, seeker.consumePending()!!, 0.001)
+  }
+
+  @Test
   fun `nothing is pending until a press arrives`() {
     assertNull(coalescer().consumePending())
     assertNull(coalescer().previewSec)
@@ -214,6 +241,86 @@ class SeekCoalescerTest {
 
     assertTrue(seeker.settle())
     assertNull(seeker.previewSec)
+  }
+
+  @Test
+  fun `a delayed first restart cannot retire a newer seek that was already consumed`() {
+    val seeker = coalescer()
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 0L)
+    assertEquals(110.0, seeker.consumePending()!!, 0.001)
+
+    // B is both pressed and issued before mpv reports that A restarted. The old
+    // one-bit implementation forgot A here and treated its callback as B's.
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 500L)
+    assertEquals(120.0, seeker.consumePending()!!, 0.001)
+
+    assertFalse("A settled, but B still owns the preview", seeker.settle())
+    assertEquals(120.0, seeker.previewSec!!, 0.001)
+
+    assertTrue("B's own restart can now retire the preview", seeker.settle())
+    assertNull(seeker.previewSec)
+  }
+
+  @Test
+  fun `identity-aware settle ignores an old callback after a newer request completed`() {
+    val seeker = coalescer()
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 0L)
+    val first = seeker.consumePendingRequest()!!
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 500L)
+    val second = seeker.consumePendingRequest()!!
+
+    // Native callbacks need not be delivered in command order. Resuming at B
+    // makes A obsolete, and its eventual callback must be harmless.
+    assertEquals(SeekSettleResult.Complete, seeker.settle(second))
+    assertNull(seeker.previewSec)
+    assertEquals(SeekSettleResult.Ignored, seeker.settle(first))
+    assertNull(seeker.previewSec)
+  }
+
+  @Test
+  fun `identity-aware settle keeps a newer pending target`() {
+    val seeker = coalescer()
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 0L)
+    val first = seeker.consumePendingRequest()!!
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 500L)
+
+    assertEquals(SeekSettleResult.Superseded, seeker.settle(first))
+    assertEquals(120.0, seeker.previewSec!!, 0.001)
+    assertTrue(seeker.hasPendingPress)
+  }
+
+  @Test
+  fun `reset invalidates identities from the previous file generation`() {
+    val seeker = coalescer()
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 0L)
+    val oldFile = seeker.consumePendingRequest()!!
+    seeker.reset()
+
+    seeker.press(10.0, positionSec = 30.0, durationSec = 3600.0, isRepeat = false, nowMs = 500L)
+    val newFile = seeker.consumePendingRequest()!!
+
+    assertTrue(newFile.generation > oldFile.generation)
+    assertEquals(SeekSettleResult.Ignored, seeker.settle(oldFile))
+    assertEquals(40.0, seeker.previewSec!!, 0.001)
+    assertEquals(SeekSettleResult.Complete, seeker.settle(newFile))
+    assertNull(seeker.previewSec)
+  }
+
+  @Test
+  fun `the final coalesced request is exact unless a scrub preview opts into keyframes`() {
+    val seeker = coalescer()
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 0L)
+
+    val finalRequest = seeker.consumePendingRequest()!!
+
+    assertEquals(SeekPrecision.Exact, finalRequest.precision)
+    assertEquals("absolute+exact", finalRequest.precision.mpvMode)
+    seeker.settle(finalRequest)
+
+    seeker.press(10.0, positionSec = 110.0, durationSec = 3600.0, isRepeat = false, nowMs = 500L)
+    val previewRequest = seeker.consumePendingRequest(SeekPrecision.Keyframe)!!
+    assertEquals(SeekPrecision.Keyframe, previewRequest.precision)
+    assertEquals("absolute+keyframes", previewRequest.precision.mpvMode)
   }
 
   @Test

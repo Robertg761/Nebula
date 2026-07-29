@@ -3,6 +3,7 @@ package com.stremioshell.host.tv.data.tmdb
 import com.stremioshell.host.tv.data.HttpFetcher
 import com.stremioshell.host.tv.data.OkHttpFetcher
 import java.net.URLEncoder
+import java.util.Locale
 import kotlinx.serialization.json.Json
 
 /**
@@ -16,6 +17,7 @@ class TmdbClient(
   private val apiKey: String,
   private val fetcher: HttpFetcher = OkHttpFetcher,
   private val baseUrl: String = "https://api.themoviedb.org/3",
+  private val locale: Locale = Locale.getDefault(),
 ) {
   private val json = Json { ignoreUnknownKeys = true }
 
@@ -71,7 +73,16 @@ class TmdbClient(
     val isMovie = type == MediaType.Movie
     val path = if (isMovie) "movie/$tmdbId" else "tv/$tmdbId"
     val appends = if (isMovie) MOVIE_APPENDS else SHOW_APPENDS
-    val body = fetcher.getAllowingStale(url(path, "append_to_response=$appends"))
+    // `include_image_language` is what makes the appended images block useful: without it TMDB
+    // filters artwork to `language`, i.e. en-US only, and drops the textless files it stores under
+    // no language at all - which for logos is a large share of them.
+    val body = fetcher.getAllowingStale(
+      url(
+        path,
+        "append_to_response=$appends&include_image_language=" +
+          TmdbLocale.imageLanguages(locale).joinToString(",") { it ?: "null" },
+      ),
+    )
     val details = json.decodeFromString<TmdbDetailsResponse>(body)
     // Certifications live under a different key per media type, and in a different shape: shows
     // carry one rating per country, movies carry a list of releases per country.
@@ -125,6 +136,17 @@ class TmdbClient(
           VideoRef(key = it.key, site = it.site, type = it.type, official = it.official)
         },
       ),
+      logoUrl = LogoPick.best(
+        details.images?.logos.orEmpty().map {
+          LogoRef(
+            filePath = it.filePath,
+            language = it.language,
+            voteAverage = it.voteAverage,
+            width = it.width,
+          )
+        },
+        preferredLanguage = TmdbLocale.language(locale),
+      )?.let { IMAGE_BASE_LOGO + it },
     )
   }
 
@@ -161,7 +183,8 @@ class TmdbClient(
 
   private fun url(path: String, query: String? = null): String {
     val extra = if (query.isNullOrBlank()) "" else "&$query"
-    return "$baseUrl/$path?api_key=$apiKey&language=en-US$extra"
+    val encodedKey = URLEncoder.encode(apiKey, Charsets.UTF_8.name())
+    return "$baseUrl/$path?api_key=$encodedKey&language=${TmdbLocale.languageTag(locale)}$extra"
   }
 
   private fun TmdbEntry.toItem(type: MediaType): MediaItem {
@@ -184,8 +207,15 @@ class TmdbClient(
     /** Headshots are card-sized; w342 would be four times the bytes for no visible gain. */
     private const val IMAGE_BASE_PROFILE = "https://image.tmdb.org/t/p/w185"
 
-    private const val MOVIE_APPENDS = "external_ids,credits,videos,similar,release_dates"
-    private const val SHOW_APPENDS = "external_ids,credits,videos,similar,content_ratings"
+    /**
+     * Logos render at roughly 300dp wide on the two surfaces that use them, i.e. ~600px on this
+     * panel. w500 is the nearest step that does not upscale a transparent PNG, where softness
+     * shows far more than it does on a photographic poster.
+     */
+    private const val IMAGE_BASE_LOGO = "https://image.tmdb.org/t/p/w500"
+
+    private const val MOVIE_APPENDS = "external_ids,credits,videos,similar,release_dates,images"
+    private const val SHOW_APPENDS = "external_ids,credits,videos,similar,content_ratings,images"
 
     /** Full TMDB casts run to hundreds of one-line parts; nobody scrolls a row that far. */
     private const val MAX_CAST = 20
@@ -194,4 +224,30 @@ class TmdbClient(
     /** Low enough to keep genre rails deep, high enough to keep unreleased noise out of them. */
     private const val MIN_DISCOVER_VOTES = 100
   }
+}
+
+/** Locale values in the shapes TMDB's API and image filters accept. */
+object TmdbLocale {
+  fun language(locale: Locale): String =
+    locale.language.lowercase(Locale.ROOT)
+      .takeIf { it.length in 2..3 && it.all(Char::isLetter) && it != "und" }
+      ?: "en"
+
+  fun languageTag(locale: Locale): String {
+    val language = language(locale)
+    val country = locale.country.uppercase(Locale.ROOT)
+      .takeIf { it.length == 2 && it.all(Char::isLetter) }
+    return when {
+      country != null -> "$language-$country"
+      language == "en" -> "en-US"
+      else -> language
+    }
+  }
+
+  /**
+   * Prefer artwork matching the TV, then English, then TMDB's language-neutral assets. Distinct
+   * keeps an English TV from asking for `en` twice.
+   */
+  fun imageLanguages(locale: Locale): List<String?> =
+    listOf(language(locale), "en", null).distinct()
 }

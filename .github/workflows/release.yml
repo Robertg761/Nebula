@@ -31,6 +31,7 @@ concurrency:
 
 jobs:
   build-and-release:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -59,16 +60,33 @@ jobs:
       - name: Compute Release Metadata
         id: meta
         shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.version_name }}
+          TAG_SUFFIX_INPUT: ${{ inputs.tag_suffix }}
+          PRERELEASE_INPUT: ${{ inputs.prerelease }}
         run: |
           set -euo pipefail
-          VERSION="${{ steps.ver.outputs.version_name }}"
 
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            SUFFIX="${{ inputs.tag_suffix }}"
-            PRERELEASE="${{ inputs.prerelease }}"
+            SUFFIX="$TAG_SUFFIX_INPUT"
+            PRERELEASE="$PRERELEASE_INPUT"
           else
             SUFFIX=""
             PRERELEASE="false"
+          fi
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "version_name must use the numeric major.minor.patch format." >&2
+            exit 1
+          fi
+          if [ "${#SUFFIX}" -gt 64 ] ||
+            { [ -n "$SUFFIX" ] && [[ ! "$SUFFIX" =~ ^[0-9A-Za-z]+([.-][0-9A-Za-z]+)*$ ]]; }; then
+            echo "tag_suffix must be 1-64 alphanumeric characters separated only by single dots or hyphens." >&2
+            exit 1
+          fi
+          if [ "$PRERELEASE" != "true" ] && [ "$PRERELEASE" != "false" ]; then
+            echo "prerelease must be true or false." >&2
+            exit 1
           fi
 
           if [ -n "$SUFFIX" ]; then
@@ -87,37 +105,37 @@ jobs:
         id: exists
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.meta.outputs.tag_name }}
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${{ steps.meta.outputs.tag_name }}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release already exists for $TAG; skipping."
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Release already exists for $TAG_NAME; skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Run Release Quality Gates
+        if: steps.exists.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd apps/android-tv-host
+          chmod +x ./gradlew
+          ./gradlew :app:testDebugUnitTest :app:lintDebug :baselineprofile:assembleBenchmarkRelease
+
       - name: Prepare Release Signing
         if: steps.exists.outputs.skip != 'true'
+        id: signing
         shell: bash
         env:
           SS_SIGNING_STORE_BASE64: ${{ secrets.SS_SIGNING_STORE_BASE64 }}
-          SS_SIGNING_STORE_PASSWORD: ${{ secrets.SS_SIGNING_STORE_PASSWORD }}
-          SS_SIGNING_KEY_ALIAS: ${{ secrets.SS_SIGNING_KEY_ALIAS }}
-          SS_SIGNING_KEY_PASSWORD: ${{ secrets.SS_SIGNING_KEY_PASSWORD }}
-          SS_SIGNING_STORE_TYPE: ${{ secrets.SS_SIGNING_STORE_TYPE }}
         run: |
           set -euo pipefail
 
-          missing=()
-          for name in SS_SIGNING_STORE_BASE64 SS_SIGNING_STORE_PASSWORD SS_SIGNING_KEY_ALIAS SS_SIGNING_KEY_PASSWORD; do
-            if [ -z "${!name:-}" ]; then
-              missing+=("$name")
-            fi
-          done
-          if [ "${#missing[@]}" -gt 0 ]; then
-            printf 'Missing required release signing secret(s): %s\n' "${missing[*]}" >&2
+          if [ -z "${SS_SIGNING_STORE_BASE64:-}" ]; then
+            echo "Missing required release signing secret: SS_SIGNING_STORE_BASE64" >&2
             exit 1
           fi
 
@@ -125,22 +143,34 @@ jobs:
           mkdir -p "$SIGNING_DIR"
           SIGNING_STORE_FILE="$SIGNING_DIR/release.keystore"
           printf '%s' "$SS_SIGNING_STORE_BASE64" | base64 --decode > "$SIGNING_STORE_FILE"
-
-          {
-            echo "SS_SIGNING_STORE_FILE=$SIGNING_STORE_FILE"
-            echo "SS_SIGNING_STORE_PASSWORD=$SS_SIGNING_STORE_PASSWORD"
-            echo "SS_SIGNING_KEY_ALIAS=$SS_SIGNING_KEY_ALIAS"
-            echo "SS_SIGNING_KEY_PASSWORD=$SS_SIGNING_KEY_PASSWORD"
-            if [ -n "${SS_SIGNING_STORE_TYPE:-}" ]; then
-              echo "SS_SIGNING_STORE_TYPE=$SS_SIGNING_STORE_TYPE"
-            fi
-          } >> "$GITHUB_ENV"
+          chmod 600 "$SIGNING_STORE_FILE"
+          if [ ! -s "$SIGNING_STORE_FILE" ]; then
+            echo "Decoded release keystore is empty." >&2
+            exit 1
+          fi
+          echo "store_file=$SIGNING_STORE_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Build Release APKs
         if: steps.exists.outputs.skip != 'true'
         shell: bash
+        env:
+          SS_SIGNING_STORE_FILE: ${{ steps.signing.outputs.store_file }}
+          SS_SIGNING_STORE_PASSWORD: ${{ secrets.SS_SIGNING_STORE_PASSWORD }}
+          SS_SIGNING_KEY_ALIAS: ${{ secrets.SS_SIGNING_KEY_ALIAS }}
+          SS_SIGNING_KEY_PASSWORD: ${{ secrets.SS_SIGNING_KEY_PASSWORD }}
+          SS_SIGNING_STORE_TYPE: ${{ secrets.SS_SIGNING_STORE_TYPE }}
         run: |
           set -euo pipefail
+          missing=()
+          for name in SS_SIGNING_STORE_FILE SS_SIGNING_STORE_PASSWORD SS_SIGNING_KEY_ALIAS SS_SIGNING_KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Missing required release signing value(s): %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
           cd apps/android-tv-host
           chmod +x ./gradlew
           ./gradlew :app:assembleRelease
@@ -148,13 +178,19 @@ jobs:
       - name: Verify Release APK Signature
         if: steps.exists.outputs.skip != 'true'
         shell: bash
+        env:
+          SS_SIGNING_CERT_SHA256: ${{ vars.SS_SIGNING_CERT_SHA256 }}
         run: |
           set -euo pipefail
-          TV_APK="$(ls -1 apps/android-tv-host/app/build/outputs/apk/release/*.apk | head -n 1)"
-          if [ -z "$TV_APK" ]; then
-            echo "Could not locate tv release APK output."
+          mapfile -t TV_APKS < <(
+            find apps/android-tv-host/app/build/outputs/apk/release \
+              -maxdepth 1 -type f -name '*.apk' -print
+          )
+          if [ "${#TV_APKS[@]}" -ne 1 ]; then
+            echo "Expected exactly one tv release APK; found ${#TV_APKS[@]}." >&2
             exit 1
           fi
+          TV_APK="${TV_APKS[0]}"
 
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -n 1)"
           if [ -z "$APKSIGNER" ]; then
@@ -162,46 +198,101 @@ jobs:
             exit 1
           fi
 
-          "$APKSIGNER" verify --print-certs "$TV_APK"
+          VERIFY_OUTPUT="$("$APKSIGNER" verify --print-certs "$TV_APK")"
+          printf '%s\n' "$VERIFY_OUTPUT"
+
+          ACTUAL_FINGERPRINT="$(
+            printf '%s\n' "$VERIFY_OUTPUT" |
+              sed -n 's/^Signer #1 certificate SHA-256 digest: //p' |
+              head -n 1
+          )"
+          EXPECTED_NORMALIZED="$(
+            printf '%s' "$SS_SIGNING_CERT_SHA256" |
+              tr -d '[:space:]:' |
+              tr '[:lower:]' '[:upper:]'
+          )"
+          ACTUAL_NORMALIZED="$(
+            printf '%s' "$ACTUAL_FINGERPRINT" |
+              tr -d '[:space:]:' |
+              tr '[:lower:]' '[:upper:]'
+          )"
+
+          if [[ ! "$EXPECTED_NORMALIZED" =~ ^[0-9A-F]{64}$ ]]; then
+            echo "SS_SIGNING_CERT_SHA256 must be exactly one SHA-256 certificate fingerprint." >&2
+            exit 1
+          fi
+          if [ "$ACTUAL_NORMALIZED" != "$EXPECTED_NORMALIZED" ]; then
+            echo "Release APK signer fingerprint does not match SS_SIGNING_CERT_SHA256." >&2
+            echo "Expected: $EXPECTED_NORMALIZED" >&2
+            echo "Actual:   ${ACTUAL_NORMALIZED:-<missing>}" >&2
+            exit 1
+          fi
+
+      - name: Remove Release Signing Material
+        if: always() && steps.exists.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          SIGNING_DIR="$RUNNER_TEMP/stremio-shell-signing"
+          SIGNING_STORE_FILE="$SIGNING_DIR/release.keystore"
+          if [ -f "$SIGNING_STORE_FILE" ]; then
+            chmod u+w "$SIGNING_STORE_FILE"
+            shred --remove --zero "$SIGNING_STORE_FILE" ||
+              rm -f -- "$SIGNING_STORE_FILE"
+          fi
+          rmdir "$SIGNING_DIR" 2>/dev/null || true
 
       - name: Prepare Dist
         if: steps.exists.outputs.skip != 'true'
         id: dist
         shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.version_name }}
         run: |
           set -euo pipefail
-          VERSION="${{ steps.ver.outputs.version_name }}"
           mkdir -p dist
 
-          TV_APK="$(ls -1 apps/android-tv-host/app/build/outputs/apk/release/*.apk | head -n 1)"
-          if [ -z "$TV_APK" ]; then
-            echo "Could not locate tv release APK output."
+          mapfile -t TV_APKS < <(
+            find apps/android-tv-host/app/build/outputs/apk/release \
+              -maxdepth 1 -type f -name '*.apk' -print
+          )
+          if [ "${#TV_APKS[@]}" -ne 1 ]; then
+            echo "Expected exactly one tv release APK; found ${#TV_APKS[@]}." >&2
             exit 1
           fi
+          TV_APK="${TV_APKS[0]}"
 
           OUT_TV="dist/StremioShell-tv-${VERSION}.apk"
           cp "$TV_APK" "$OUT_TV"
-
-          {
-            echo "apk_files<<EOF"
-            echo "$OUT_TV"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          echo "apk_file=$OUT_TV" >> "$GITHUB_OUTPUT"
 
       - name: Extract Release Notes
         if: steps.exists.outputs.skip != 'true'
         shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.version_name }}
         run: |
           set -euo pipefail
-          node scripts/extract_changelog_section.js "${{ steps.ver.outputs.version_name }}" > dist/release-notes.md
+          node scripts/extract_changelog_section.js "$VERSION" > dist/release-notes.md
 
       - name: Create GitHub Release
         if: steps.exists.outputs.skip != 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.meta.outputs.tag_name }}
-          name: ${{ steps.meta.outputs.release_name }}
-          body_path: dist/release-notes.md
-          files: ${{ steps.dist.outputs.apk_files }}
-          draft: false
-          prerelease: ${{ steps.meta.outputs.prerelease }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.meta.outputs.tag_name }}
+          RELEASE_NAME: ${{ steps.meta.outputs.release_name }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+          APK_FILE: ${{ steps.dist.outputs.apk_file }}
+        run: |
+          set -euo pipefail
+          RELEASE_ARGS=(
+            release create "$TAG_NAME" "$APK_FILE"
+            --target "$GITHUB_SHA"
+            --title "$RELEASE_NAME"
+            --notes-file dist/release-notes.md
+          )
+          if [ "$PRERELEASE" = "true" ]; then
+            RELEASE_ARGS+=(--prerelease)
+          fi
+          gh "${RELEASE_ARGS[@]}"

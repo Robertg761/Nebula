@@ -2,6 +2,7 @@ package com.stremioshell.host.tv.data.subtitles
 
 import com.stremioshell.host.tv.data.HttpFetcher
 import com.stremioshell.host.tv.data.OkHttpFetcher
+import com.stremioshell.host.tv.data.addon.AddonList
 import java.net.URLEncoder
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -79,13 +80,19 @@ class SubtitlesClient(
       id: String,
       extra: Map<String, String> = emptyMap(),
     ): String {
-      val root = base.trim().removeSuffix("/manifest.json").removeSuffix("/")
-      val resource = "$root/subtitles/$type/$id"
-      if (extra.isEmpty()) return "$resource.json"
+      if (extra.isEmpty()) {
+        return AddonList.resourceUrl(base, "subtitles", type, "$id.json")
+      }
       val args = extra.entries.joinToString("&") { (key, value) ->
         "${encode(key)}=${encode(value)}"
       }
-      return "$resource/$args.json"
+      return AddonList.resourceUrl(
+        manifestUrl = base,
+        resource = "subtitles",
+        type = type,
+        id = id,
+        encodedExtraPathSegment = "$args.json",
+      )
     }
 
     /**

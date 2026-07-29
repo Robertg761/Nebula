@@ -1,6 +1,47 @@
 package com.stremioshell.host.tv.player
 
 /**
+ * How mpv should land a coalesced seek.
+ *
+ * [Keyframe] is useful for a transient scrub preview. [Exact] is the right
+ * default for the one command emitted after a D-pad burst: the target shown in
+ * the OSD is then the position playback actually resumes from, even in a file
+ * with a long GOP.
+ */
+enum class SeekPrecision(val mpvMode: String) {
+  Keyframe("absolute+keyframes"),
+  Exact("absolute+exact"),
+}
+
+/**
+ * One seek handed to mpv.
+ *
+ * Playback-restart events carry no user data, so callers that can associate a
+ * completion with the command should retain this identity and pass it to
+ * [SeekCoalescer.settle]. [generation] makes a completion from a file replaced
+ * by retry/next unable to retire a seek in the new file; [sequence] separates
+ * overlapping seeks within one file.
+ */
+data class SeekRequest(
+  val generation: Long,
+  val sequence: Long,
+  val targetSec: Double,
+  val precision: SeekPrecision,
+)
+
+/** What an identity-aware settle did to the current preview. */
+enum class SeekSettleResult {
+  /** The request was already retired, belonged to an old generation, or was never issued. */
+  Ignored,
+
+  /** The request settled, but a newer target still owns the preview. */
+  Superseded,
+
+  /** The newest target settled and mpv's reported position can replace the preview. */
+  Complete,
+}
+
+/**
  * Collapses a burst of D-pad presses into one seek target.
  *
  * Issuing a seek per key event makes mpv flush the demuxer and re-request the
@@ -22,14 +63,9 @@ class SeekCoalescer(
   private var target = NO_TARGET
   private var pending = false
   private var lastAcceptedMs = Long.MIN_VALUE
-
-  /**
-   * Whether the current [target] has been handed to mpv and not yet settled.
-   * Together with [pending] this identifies which seek a settle event can
-   * possibly belong to: only a target that is in flight and has had no press
-   * folded into it since can be retired by an incoming restart.
-   */
-  private var inFlight = false
+  private var generation = 0L
+  private var nextSequence = 1L
+  private val inFlight = mutableListOf<SeekRequest>()
 
   /**
    * Where an outstanding seek is heading, or null when the position should come
@@ -65,17 +101,23 @@ class SeekCoalescer(
     isRepeat: Boolean,
     nowMs: Long,
   ): Double? {
+    if (!deltaSec.isFinite() || deltaSec == 0.0) return null
     if (isRepeat && nowMs - lastAcceptedMs < repeatMinIntervalMs) return null
     lastAcceptedMs = nowMs
 
-    val base = previewSec ?: positionSec
-    val ceiling = if (durationSec > 0) {
-      (durationSec - endGuardSec).coerceAtLeast(0.0)
+    val reportedPosition = positionSec.takeIf(Double::isFinite)?.coerceAtLeast(0.0)
+      ?: previewSec
+      ?: 0.0
+    val knownDuration = durationSec.takeIf { it.isFinite() && it > 0.0 }
+    val guard = endGuardSec.takeIf { it.isFinite() && it > 0.0 } ?: 0.0
+    val base = previewSec ?: reportedPosition
+    val ceiling = if (knownDuration != null) {
+      (knownDuration - guard).coerceAtLeast(0.0)
     } else {
       // One step past mpv's last known position, and never behind an
       // outstanding target: the guard is there to stop a forward seek falling
       // off the end, not to drag a rewind back to where playback happens to be.
-      maxOf(positionSec + deltaSec, base).coerceAtLeast(0.0)
+      maxOf(reportedPosition + deltaSec, base).coerceAtLeast(0.0)
     }
     target = (base + deltaSec).coerceIn(0.0, ceiling)
     pending = true
@@ -83,30 +125,81 @@ class SeekCoalescer(
   }
 
   /**
-   * The target to hand to mpv, or null if nothing is waiting. The preview stays
-   * live until [settle]: the seek is in flight, not finished.
+   * Builds the command to hand to mpv, or null if nothing is waiting. The
+   * preview stays live until [settle]: the seek is in flight, not finished.
+   *
+   * The final command after a coalesced burst defaults to [SeekPrecision.Exact].
+   * A caller intentionally rendering intermediate scrub previews can opt into
+   * [SeekPrecision.Keyframe].
    */
-  fun consumePending(): Double? {
+  fun consumePendingRequest(
+    precision: SeekPrecision = SeekPrecision.Exact,
+  ): SeekRequest? {
     if (!pending) return null
     pending = false
-    inFlight = true
-    return target.takeIf { it >= 0 }
+    val targetSec = target.takeIf { it >= 0 } ?: return null
+    val request = SeekRequest(
+      generation = generation,
+      sequence = nextSequence++,
+      targetSec = targetSec,
+      precision = precision,
+    )
+    inFlight += request
+    return request
   }
 
   /**
-   * Playback has restarted, so mpv's position is trustworthy again — but only for
-   * the seek this restart belongs to. Returns true when the target was retired.
+   * Compatibility form for the activity's current command path.
    *
-   * A restart cannot be attributed to a target that has had a press folded into
-   * it since it was issued, nor to one that was never issued at all: initial load
-   * and cache-stall recovery raise restarts too. Clearing in those cases threw
-   * the press away and snapped the OSD back to the pre-seek position.
+   * It preserves the old keyframe behaviour until the activity switches to
+   * [consumePendingRequest] and uses each request's [SeekRequest.precision].
+   */
+  fun consumePending(): Double? =
+    consumePendingRequest(SeekPrecision.Keyframe)?.targetSec
+
+  /**
+   * Settles an explicitly identified request.
+   *
+   * If a newer request has already resumed, it also makes every older request
+   * obsolete. This matters when native callbacks arrive out of order: an old
+   * completion must not later clear or resurrect state after the newest target
+   * has become authoritative.
+   */
+  fun settle(request: SeekRequest): SeekSettleResult {
+    if (request.generation != generation) return SeekSettleResult.Ignored
+    val requestIndex = inFlight.indexOfFirst {
+      it.generation == request.generation && it.sequence == request.sequence
+    }
+    if (requestIndex < 0) return SeekSettleResult.Ignored
+
+    // Reaching request N proves every older command in this generation has
+    // either completed or been superseded by N.
+    inFlight.removeAll {
+      it.generation == request.generation && it.sequence <= request.sequence
+    }
+
+    val newerIssued = inFlight.any {
+      it.generation == generation && it.sequence > request.sequence
+    }
+    if (pending || newerIssued) return SeekSettleResult.Superseded
+
+    target = NO_TARGET
+    return SeekSettleResult.Complete
+  }
+
+  /**
+   * Compatibility form for an untagged playback-restart callback.
+   *
+   * Requests are retired in issue order. Crucially, a restart for A no longer
+   * clears B merely because B was consumed before A's callback arrived. New
+   * integrations should prefer [settle] with the exact [SeekRequest].
+   *
+   * Returns true only when the newest target was retired and the preview was
+   * handed back to mpv, preserving the method's original contract.
    */
   fun settle(): Boolean {
-    if (pending || !inFlight) return false
-    target = NO_TARGET
-    inFlight = false
-    return true
+    val oldest = inFlight.firstOrNull() ?: return false
+    return settle(oldest) == SeekSettleResult.Complete
   }
 
   /**
@@ -118,7 +211,8 @@ class SeekCoalescer(
   fun reset() {
     target = NO_TARGET
     pending = false
-    inFlight = false
+    inFlight.clear()
+    generation++
   }
 
   private companion object {

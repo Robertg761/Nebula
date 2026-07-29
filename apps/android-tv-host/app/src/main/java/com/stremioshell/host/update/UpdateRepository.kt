@@ -1,5 +1,7 @@
 package com.stremioshell.host.update
 
+import java.util.Locale
+
 class UpdateRepository(
   private val api: GitHubReleaseApi = GitHubReleaseApi()
 ) {
@@ -18,7 +20,10 @@ class UpdateRepository(
       return null
     }
 
-    val selectedApk = selectApkAsset(latest.assets) ?: return null
+    val selectedApk = selectApkAsset(
+      assets = latest.assets,
+      versionName = normalizeVersionLabel(latestTag),
+    ) ?: return null
     return UpdateInfo(
       latestVersionName = latestTag.removePrefix("v").removePrefix("V"),
       apkName = selectedApk.name,
@@ -48,32 +53,21 @@ class UpdateRepository(
       .removePrefix("v")
       .removePrefix("V")
       .substringBefore('-')
-      .lowercase()
+      .lowercase(Locale.ROOT)
   }
 
-  private fun selectApkAsset(assets: List<GitHubAssetDto>): GitHubAssetDto? {
-    val apkAssets = assets.filter { asset ->
-      asset.name.endsWith(".apk", ignoreCase = true)
+  companion object {
+    /**
+     * The release workflow publishes one canonical TV artifact. Do not fall
+     * back to a debug, mobile, stale-version, or ambiguously duplicated APK if
+     * a release is malformed.
+     */
+    internal fun selectApkAsset(
+      assets: List<GitHubAssetDto>,
+      versionName: String,
+    ): GitHubAssetDto? {
+      val expectedName = "StremioShell-tv-$versionName.apk"
+      return assets.filter { it.name == expectedName }.singleOrNull()
     }
-    if (apkAssets.isEmpty()) {
-      return null
-    }
-
-    val flavorMatches = apkAssets.filter { asset ->
-      asset.name.contains("-tv-", ignoreCase = true)
-    }
-    val nonDebugFlavorMatch = flavorMatches.firstOrNull { asset ->
-      !asset.name.contains("debug", ignoreCase = true)
-    }
-    if (nonDebugFlavorMatch != null) {
-      return nonDebugFlavorMatch
-    }
-    if (flavorMatches.isNotEmpty()) {
-      return flavorMatches.first()
-    }
-
-    return apkAssets.firstOrNull { asset ->
-      !asset.name.contains("debug", ignoreCase = true)
-    } ?: apkAssets.firstOrNull()
   }
 }

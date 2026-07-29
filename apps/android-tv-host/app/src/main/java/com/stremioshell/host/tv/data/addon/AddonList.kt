@@ -1,5 +1,9 @@
 package com.stremioshell.host.tv.data.addon
 
+import java.util.Locale
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+
 /**
  * The viewer's ordered list of stream addons.
  *
@@ -46,17 +50,85 @@ object AddonList {
         break
       }
     }
-    if (!value.contains("://")) value = "https://$value"
-    // A scheme and nothing else is not a URL that can be completed into one.
-    if (value.substringAfter("://").isBlank()) return ""
-    value = value.trimEnd('/')
-    // A query or fragment means the path is already whatever the addon author
-    // intended; appending to it would produce a route that matches nothing.
-    val completable = !value.contains('?') && !value.contains('#')
-    if (completable && !value.endsWith(MANIFEST_SUFFIX, ignoreCase = true)) {
-      value += MANIFEST_SUFFIX
+    // A mistyped explicit scheme must not be "fixed" into a host called
+    // `http`/`https`, and addon credentials must never travel over cleartext.
+    if (
+      value.startsWith("http:", ignoreCase = true) &&
+      !value.startsWith("http://", ignoreCase = true)
+    ) {
+      return ""
     }
-    return value
+    if (
+      value.startsWith("https:", ignoreCase = true) &&
+      !value.startsWith("https://", ignoreCase = true)
+    ) {
+      return ""
+    }
+    if (!value.contains("://")) value = "https://$value"
+    val parsed = value.toHttpUrlOrNull() ?: return ""
+    if (!parsed.isHttps || parsed.host.isBlank()) return ""
+
+    val path = parsed.encodedPath.trimEnd('/')
+    val manifestPath = if (path.endsWith(MANIFEST_SUFFIX, ignoreCase = true)) {
+      path.dropLast(MANIFEST_SUFFIX.length) + MANIFEST_SUFFIX
+    } else {
+      path + MANIFEST_SUFFIX
+    }
+    return parsed.newBuilder()
+      // A fragment is local browser state and is never part of an addon route.
+      .fragment(null)
+      .encodedPath(manifestPath)
+      .build()
+      .toString()
+  }
+
+  /**
+   * Builds one Stremio resource endpoint from a manifest URL.
+   *
+   * [HttpUrl] does the path work so a configured query stays a query (rather
+   * than becoming part of `manifest.json`) and each resource segment is encoded
+   * independently. The normalized form also makes manifest matching
+   * case-insensitive and rejects cleartext URLs before a request is attempted.
+   */
+  fun resourceUrl(
+    manifestUrl: String,
+    resource: String,
+    type: String,
+    id: String,
+    encodedExtraPathSegment: String? = null,
+  ): String {
+    val normalized = normalize(manifestUrl)
+    require(normalized.isNotEmpty()) { "Addon URL must be a valid HTTPS manifest URL" }
+    val manifest = checkNotNull(normalized.toHttpUrlOrNull())
+    val rootPath = manifest.encodedPath.dropLast(MANIFEST_SUFFIX.length)
+    return manifest.newBuilder()
+      .encodedPath(rootPath.ifEmpty { "/" })
+      .apply {
+        addPathSegment(resource)
+        addPathSegment(type)
+        addPathSegment(id)
+        // Subtitle search arguments are already percent-encoded because a
+        // literal plus and a space have different meanings in that route.
+        if (encodedExtraPathSegment != null) addEncodedPathSegment(encodedExtraPathSegment)
+      }
+      .build()
+      .toString()
+  }
+
+  /**
+   * Canonical root form used by settings that store a resource base rather than
+   * the manifest itself. Query parameters are retained and fragments are not.
+   */
+  fun baseUrl(raw: String): String {
+    val normalized = normalize(raw)
+    if (normalized.isEmpty()) return ""
+    val manifest = checkNotNull(normalized.toHttpUrlOrNull())
+    val rootPath = manifest.encodedPath.dropLast(MANIFEST_SUFFIX.length)
+    val base = manifest.newBuilder()
+      .encodedPath(rootPath.ifEmpty { "/" })
+      .build()
+      .toString()
+    return if (manifest.query == null && base.endsWith('/')) base.dropLast(1) else base
   }
 
   /**
@@ -83,6 +155,37 @@ object AddonList {
   fun removed(list: List<String>, url: String): List<String> = list.filterNot { it == url }
 
   /**
+   * Reorders a stored addon priority list. An invalid source is a no-op and the
+   * destination is clamped so Up/Down controls cannot manufacture an
+   * out-of-bounds state at either edge.
+   */
+  fun moved(list: List<String>, fromIndex: Int, toIndex: Int): List<String> {
+    val clean = sanitized(list)
+    if (fromIndex !in clean.indices || clean.size < 2) return clean
+    val destination = toIndex.coerceIn(clean.indices)
+    if (fromIndex == destination) return clean
+    return clean.toMutableList().apply {
+      val item = removeAt(fromIndex)
+      add(destination, item)
+    }
+  }
+
+  /**
+   * Moves a stable addon identity by one slot.
+   *
+   * TV remotes can enqueue several presses before Compose renders the first result. Looking up the
+   * URL in the latest stored list keeps every queued press attached to the row the viewer pressed,
+   * rather than to whichever row later occupies a captured index.
+   */
+  fun moved(list: List<String>, url: String, direction: Int): List<String> {
+    val clean = sanitized(list)
+    if (direction != -1 && direction != 1) return clean
+    val fromIndex = clean.indexOf(normalize(url))
+    if (fromIndex < 0) return clean
+    return moved(clean, fromIndex, fromIndex + direction)
+  }
+
+  /**
    * Swaps the first entry for [raw], which is what the single-URL callers that
    * predate the list (the phone pairing form, the debug launch intent) mean when
    * they set "the" addon URL. A blank value leaves the list alone rather than
@@ -107,7 +210,25 @@ object AddonList {
     if (IPV4.matches(host)) return host
     val first = host.removePrefix("www.").substringBefore('.')
     if (first.isEmpty()) return host
-    return first.replaceFirstChar { it.uppercase() }
+    return first.replaceFirstChar { it.uppercase(Locale.ROOT) }
+  }
+
+  /**
+   * A Settings-safe identifier for a configured addon.
+   *
+   * Addon paths, userinfo and query parameters can all carry debrid credentials,
+   * so none of them are displayed. The suffix still tells the viewer that this
+   * is a configured endpoint rather than the addon's public root.
+   */
+  fun safeDisplay(url: String): String {
+    val parsed = normalize(url).toHttpUrlOrNull() ?: return UNNAMED
+    val rootManifest = parsed.encodedPath == MANIFEST_SUFFIX
+    val configured = !rootManifest ||
+      parsed.query != null ||
+      parsed.username.isNotEmpty() ||
+      parsed.password.isNotEmpty()
+    val port = if (parsed.port == HttpUrl.defaultPort(parsed.scheme)) "" else ":${parsed.port}"
+    return "${parsed.host}$port" + if (configured) " (configured)" else ""
   }
 
   /**
@@ -134,15 +255,18 @@ object AddonList {
     .distinct()
     .take(MAX_ADDONS)
 
-  private fun hostOf(url: String): String = url
-    .substringAfter("://", url)
-    .substringBefore('/')
-    .substringBefore('?')
-    .substringBefore('#')
-    // Userinfo and port are addressing, not identity.
-    .substringAfterLast('@')
-    .substringBefore(':')
-    .lowercase()
+  private fun hostOf(url: String): String =
+    url.toHttpUrlOrNull()?.host?.lowercase(Locale.ROOT).orEmpty().ifEmpty {
+      url
+        .substringAfter("://", url)
+        .substringBefore('/')
+        .substringBefore('?')
+        .substringBefore('#')
+        // Userinfo and port are addressing, not identity.
+        .substringAfterLast('@')
+        .substringBefore(':')
+        .lowercase(Locale.ROOT)
+    }
 
   private val STREMIO_SCHEMES = listOf("stremio://", "stremio:")
 }

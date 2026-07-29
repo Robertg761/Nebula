@@ -64,6 +64,97 @@ class MpvTracksTest {
   }
 
   @Test
+  fun `audio rows expose channel layout count and bitrate`() {
+    val tracks = MpvTracks.parse(
+      """
+      [
+        {
+          "id":1,
+          "type":"audio",
+          "lang":"eng",
+          "codec":"truehd",
+          "demux-channel-count":8,
+          "demux-channels":"7.1",
+          "demux-bitrate":4608000
+        },
+        {
+          "id":2,
+          "type":"audio",
+          "lang":"eng",
+          "codec":"aac",
+          "demux-channel-count":6,
+          "demux-bitrate":768000
+        }
+      ]
+      """.trimIndent(),
+    )
+
+    assertEquals(8, tracks[0].channelCount)
+    assertEquals("7.1", tracks[0].channelLayout)
+    assertEquals(4_608_000L, tracks[0].bitrateBps)
+    assertEquals("TRUEHD   |   7.1   |   4.6 Mbps", tracks[0].detail)
+
+    // A count is still useful when the container does not name the layout.
+    assertEquals("", tracks[1].channelLayout)
+    assertEquals("AAC   |   6 ch   |   768 kbps", tracks[1].detail)
+  }
+
+  @Test
+  fun `accessibility dispositions identify audio description and SDH`() {
+    val tracks = MpvTracks.parse(
+      """
+      [
+        {
+          "id":1,
+          "type":"audio",
+          "lang":"eng",
+          "codec":"eac3",
+          "visual-impaired":true,
+          "default":true
+        },
+        {
+          "id":2,
+          "type":"sub",
+          "lang":"eng",
+          "codec":"subrip",
+          "hearing-impaired":true,
+          "forced":true
+        }
+      ]
+      """.trimIndent(),
+    )
+
+    assertTrue(tracks[0].visualImpaired)
+    assertFalse(tracks[0].hearingImpaired)
+    assertEquals("EAC3   |   Audio description   |   Default", tracks[0].detail)
+
+    assertFalse(tracks[1].visualImpaired)
+    assertTrue(tracks[1].hearingImpaired)
+    assertEquals("SUBRIP   |   SDH   |   Forced", tracks[1].detail)
+  }
+
+  @Test
+  fun `missing technical metadata stays absent instead of showing zero values`() {
+    val track = MpvTracks.parse(
+      """[{"id":1,"type":"audio","codec":"aac","demux-channel-count":0,"demux-bitrate":0}]""",
+    ).single()
+
+    assertNull(track.channelCount)
+    assertNull(track.bitrateBps)
+    assertEquals("AAC", track.detail)
+  }
+
+  @Test
+  fun `HLS bitrate is used when the demuxer has no average bitrate`() {
+    val track = MpvTracks.parse(
+      """[{"id":1,"type":"audio","codec":"aac","hls-bitrate":256000}]""",
+    ).single()
+
+    assertEquals(256_000L, track.bitrateBps)
+    assertEquals("AAC   |   256 kbps", track.detail)
+  }
+
+  @Test
   fun `a title that only repeats the language is not shown twice`() {
     val track = MpvTrack(id = 1, kind = TrackKind.Audio, lang = "eng", title = "English")
 

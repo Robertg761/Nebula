@@ -29,8 +29,20 @@ object WatchedThreshold {
   fun isFinished(positionSec: Double, durationSec: Double): Boolean {
     // Nothing can be established without a duration, so such a stream is always
     // treated as stopped short and stays resumable.
-    if (durationSec <= 0) return false
-    if (positionSec >= durationSec - END_GUARD_SEC) return true
+    if (!durationSec.isFinite() || !positionSec.isFinite() || durationSec <= 0 || positionSec < 0) {
+      return false
+    }
+    // Never let the absolute guard move the threshold earlier than the watched
+    // fraction. Without this, not only a one-second clip but also a six-second
+    // clip (threshold 1s) can be marked watched almost immediately.
+    val fractionThresholdSec = durationSec * FINISHED_FRACTION
+    val guardThresholdSec = durationSec - END_GUARD_SEC
+    if (
+      guardThresholdSec >= fractionThresholdSec &&
+      positionSec >= guardThresholdSec
+    ) {
+      return true
+    }
     return positionSec / durationSec >= FINISHED_FRACTION
   }
 

@@ -1,9 +1,11 @@
 package com.stremioshell.host.tv.pairing
 
+import com.stremioshell.host.tv.data.addon.AddonList
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -24,7 +26,10 @@ class ConfigPairingServerTest {
 
   @Before
   fun startServer() {
-    server = ConfigPairingServer(token) { submissions.add(it) }
+    server = ConfigPairingServer(token) { submission ->
+      submissions.add(submission)
+      PairingApplyResult.Saved(receiptFor(submission))
+    }
     server.start()
   }
 
@@ -57,6 +62,13 @@ class ConfigPairingServerTest {
 
   private fun nextSubmission(): PairingSubmission? = submissions.poll(1, TimeUnit.SECONDS)
 
+  private fun receiptFor(submission: PairingSubmission) = PairingReceipt(
+    tmdbKeyChanged = submission.tmdbKey != null,
+    addonUrlsChanged = submission.addonUrls != null,
+    hasTmdbKey = submission.tmdbKey != null,
+    addonCount = submission.addonUrls?.size ?: 0,
+  )
+
   @Test
   fun `a LAN host without the token gets nothing`() {
     assertEquals(403, request("/").code)
@@ -75,8 +87,9 @@ class ConfigPairingServerTest {
     assertTrue(reply.body, reply.body.contains("""placeholder="Leave empty to keep current key""""))
     assertTrue(reply.body, reply.body.contains("></textarea>"))
     assertFalse(reply.body, reply.body.contains("""<input name="tmdb" value="""))
-    // ...and it carries the token onward for the POST.
-    assertTrue(reply.body, reply.body.contains("""<input type="hidden" name="t" value="$token">"""))
+    // ...and it carries the token onward in the action, where the server can authenticate before
+    // parsing the credential-bearing body.
+    assertTrue(reply.body, reply.body.contains("""action="/config?t=$token""""))
   }
 
   @Test
@@ -89,7 +102,7 @@ class ConfigPairingServerTest {
 
   @Test
   fun `a POST carrying a wrong token is refused`() {
-    val reply = request("/config", form = "t=wrongwrong&tmdb=attacker-key")
+    val reply = request("/config?t=wrongwrong", form = "tmdb=attacker-key")
 
     assertEquals(403, reply.code)
     assertNull(nextSubmission())
@@ -97,7 +110,7 @@ class ConfigPairingServerTest {
 
   @Test
   fun `a tokened POST delivers the submission and reports the blank field as unchanged`() {
-    val reply = request("/config", form = "t=$token&tmdb=my-key&addon=")
+    val reply = request("/config?t=$token", form = "tmdb=my-key&addon=")
 
     assertEquals(200, reply.code)
     assertEquals(PairingSubmission(tmdbKey = "my-key", addonUrls = null), nextSubmission())
@@ -110,7 +123,7 @@ class ConfigPairingServerTest {
     val form = "t=$token&addon=" +
       "https%3A%2F%2Fcomet.example%2Fmanifest.json%0D%0Atorrentio.example"
 
-    val reply = request("/config", form = form)
+    val reply = request("/config?t=$token", form = form)
 
     assertEquals(200, reply.code)
     assertEquals(
@@ -131,7 +144,7 @@ class ConfigPairingServerTest {
 
   @Test
   fun `a tokened POST with both fields blank re-serves the form instead of clearing anything`() {
-    val reply = request("/config", form = "t=$token&tmdb=&addon=%20%20")
+    val reply = request("/config?t=$token", form = "tmdb=&addon=%20%20")
 
     assertEquals(200, reply.code)
     assertNull(nextSubmission())
@@ -140,12 +153,89 @@ class ConfigPairingServerTest {
 
   @Test
   fun `an addon box with nothing usable in it is reported, not half-applied`() {
-    val reply = request("/config", form = "t=$token&tmdb=my-key&addon=stremio%3A%2F%2F")
+    val reply = request("/config?t=$token", form = "tmdb=my-key&addon=stremio%3A%2F%2F")
 
     assertEquals(200, reply.code)
     // The key is not saved either: a success page that quietly dropped the URLs would send the
     // viewer to the TV to work out why nothing plays.
     assertNull(nextSubmission())
     assertTrue(reply.body, reply.body.contains("No usable addon link in that box."))
+  }
+
+  @Test
+  fun `the token in a POST body is never parsed as authorization`() {
+    val reply = request("/config", form = "t=$token&tmdb=attacker-key")
+
+    assertEquals(403, reply.code)
+    assertNull(nextSubmission())
+  }
+
+  @Test
+  fun `a successful submission consumes the token atomically`() {
+    assertEquals(200, request("/config?t=$token", form = "tmdb=first").code)
+
+    val second = request("/config?t=$token", form = "tmdb=second")
+
+    assertEquals(403, second.code)
+    assertEquals(403, request("/?t=$token").code)
+    assertEquals(PairingSubmission("first", null), nextSubmission())
+    assertNull(nextSubmission())
+  }
+
+  @Test
+  fun `a storage failure is reported and releases the token for a retry`() {
+    server.stop()
+    val attempts = AtomicInteger()
+    server = ConfigPairingServer(token) { submission ->
+      if (attempts.getAndIncrement() == 0) {
+        PairingApplyResult.Failed("Storage is temporarily unavailable.")
+      } else {
+        submissions.add(submission)
+        PairingApplyResult.Saved(receiptFor(submission))
+      }
+    }
+    server.start()
+
+    val failed = request("/config?t=$token", form = "tmdb=first")
+    val retried = request("/config?t=$token", form = "tmdb=second")
+
+    assertEquals(200, failed.code)
+    assertTrue(failed.body, failed.body.contains("Storage is temporarily unavailable."))
+    assertFalse(failed.body, failed.body.contains("Saved to your TV"))
+    assertEquals(200, retried.code)
+    assertTrue(retried.body, retried.body.contains("Saved to your TV"))
+    assertEquals(PairingSubmission("second", null), nextSubmission())
+  }
+
+  @Test
+  fun `an oversized authenticated form is rejected before parsing`() {
+    val reply = request("/config?t=$token", form = "tmdb=${"x".repeat(33 * 1024)}")
+
+    assertEquals(413, reply.code)
+    assertNull(nextSubmission())
+  }
+
+  @Test
+  fun `mixed valid and invalid addon lines are rejected together`() {
+    val form = "tmdb=my-key&addon=" +
+      "https%3A%2F%2Fvalid.example%2Fmanifest.json%0Astremio%3A%2F%2F"
+
+    val reply = request("/config?t=$token", form = form)
+
+    assertEquals(200, reply.code)
+    assertTrue(reply.body, reply.body.contains("Every addon line must be a usable manifest link."))
+    assertNull(nextSubmission())
+  }
+
+  @Test
+  fun `more than the supported addon count is rejected instead of truncated`() {
+    val addons = (1..AddonList.MAX_ADDONS + 1)
+      .joinToString("%0A") { "https%3A%2F%2Fa$it.example%2Fmanifest.json" }
+
+    val reply = request("/config?t=$token", form = "addon=$addons")
+
+    assertEquals(200, reply.code)
+    assertTrue(reply.body, reply.body.contains("Enter no more than ${AddonList.MAX_ADDONS}"))
+    assertNull(nextSubmission())
   }
 }

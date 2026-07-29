@@ -21,6 +21,7 @@ object PlaybackSpeeds {
    * still highlights something.
    */
   fun nearestIndex(speed: Double): Int {
+    if (!speed.isFinite() || speed <= 0.0) return STEPS.indexOf(DEFAULT)
     var best = 0
     var bestErr = Double.MAX_VALUE
     STEPS.forEachIndexed { index, step ->
@@ -47,7 +48,8 @@ object PlaybackSpeeds {
 
   /** "1x", "1.25x" — no trailing zeroes, because it is read at three metres. */
   fun label(speed: Double): String {
-    val text = String.format(Locale.ROOT, "%.2f", speed).trimEnd('0').trimEnd('.')
+    val safe = speed.takeIf { it.isFinite() && it > 0.0 } ?: DEFAULT
+    val text = String.format(Locale.ROOT, "%.2f", safe).trimEnd('0').trimEnd('.')
     return "${text}x"
   }
 }
@@ -91,14 +93,14 @@ enum class SubtitleSize(val storageName: String, val label: String, val fontSize
  *
  * [Decode] is mpv doing the work and handing the sink PCM, which every TV,
  * soundbar and pair of headphones can take — and which is why it is the default.
- * [Passthrough] hands the compressed bitstream over untouched, so an AVR gets to
- * apply its own decoding: the only way a 5.1 or Atmos mix reaches a receiver
- * intact rather than as the stereo downmix mpv's own mixer produces for it.
+ * [Passthrough] asks Android to hand supported compressed bitstreams to the sink
+ * for its own decoder. It can preserve a receiver's surround/Atmos path, but
+ * only when the Android device, active route and sink all advertise the codec;
+ * an unsupported candidate can be silence.
  *
- * The codec list is deliberately only the formats a receiver plausibly decodes
- * and mpv's `ao=audiotrack` can hand over; anything else stays decoded here,
- * because a format the sink cannot take is silence rather than a fallback a
- * viewer would recognise as one.
+ * [spdifCodecs] is therefore a candidate list, not proof of support. A playback
+ * integration that can inspect the active route should call [spdifCodecsFor]
+ * and decline passthrough when it returns null.
  */
 enum class AudioOutputMode(
   val storageName: String,
@@ -119,8 +121,31 @@ enum class AudioOutputMode(
   val osdMessage: String
     get() = when (this) {
       Decode -> "Audio output: Decode"
-      Passthrough -> "Audio output: Passthrough - switch back to Decode if it goes silent"
+      Passthrough ->
+        "Passthrough requested - device support is not verified; choose Decode if audio is silent"
     }
+
+  /**
+   * The mpv codec list that is safe to request for a known active sink.
+   *
+   * Names use mpv's `audio-spdif` spelling. Null means support is unknown or
+   * there is no supported candidate, so the conservative action is to remain in
+   * [Decode]. Decode itself always resolves to an empty list.
+   */
+  fun spdifCodecsFor(sinkCodecs: Set<String>?): String? {
+    if (this == Decode) return ""
+    val supported = sinkCodecs
+      ?.asSequence()
+      ?.map { it.trim().lowercase(Locale.ROOT) }
+      ?.filter { it.isNotBlank() }
+      ?.toSet()
+      ?: return null
+    return spdifCodecs
+      .split(',')
+      .filter { it in supported }
+      .joinToString(",")
+      .ifBlank { null }
+  }
 
   companion object {
     val DEFAULT = Decode
@@ -160,14 +185,19 @@ object DelaySteps {
    * the label.
    */
   fun stepped(currentSec: Double, steps: Int): Double {
-    val grid = Math.round(currentSec / STEP_SEC) + steps
+    val safeCurrent = currentSec
+      .takeIf(Double::isFinite)
+      ?.coerceIn(-LIMIT_SEC, LIMIT_SEC)
+      ?: 0.0
+    val grid = Math.round(safeCurrent / STEP_SEC) + steps.toLong()
     val next = (grid * STEP_SEC).coerceIn(-LIMIT_SEC, LIMIT_SEC)
     return Math.round(next * 1000.0) / 1000.0
   }
 
   /** "+150 ms" / "0 ms" / "-25 ms" — signed, because the sign is the whole point. */
   fun label(sec: Double): String {
-    val ms = Math.round(sec * 1000.0)
+    val safe = sec.takeIf(Double::isFinite)?.coerceIn(-LIMIT_SEC, LIMIT_SEC) ?: 0.0
+    val ms = Math.round(safe * 1000.0)
     return when {
       ms > 0 -> "+$ms ms"
       ms < 0 -> "$ms ms"

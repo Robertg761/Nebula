@@ -1,6 +1,7 @@
 package com.stremioshell.host.tv.player
 
-import kotlin.math.ceil
+import com.stremioshell.host.tv.data.addon.AddonStream
+import com.stremioshell.host.tv.data.addon.StreamFetch
 
 /**
  * Whether the end of an episode turns into the next one, and how hard.
@@ -44,9 +45,66 @@ object UpNextPolicy {
   /**
    * Whole seconds the card shows. Rounded up so the countdown opens on the full
    * number rather than one less, and reaches zero only when the time is up.
+   *
+   * Integer division avoids losing precision for very long durations. A
+   * negative elapsed value can happen when a restored monotonic timestamp came
+   * from a previous process; treating it as zero is safer than drawing a bar
+   * wider than its track.
    */
-  fun secondsLeft(elapsedMs: Long, totalMs: Long): Int =
-    ceil((totalMs - elapsedMs).coerceAtLeast(0L) / 1000.0).toInt()
+  fun secondsLeft(elapsedMs: Long, totalMs: Long): Int {
+    val remainingMs = remainingMs(elapsedMs, totalMs)
+    val roundedUp = remainingMs / 1_000L + if (remainingMs % 1_000L == 0L) 0L else 1L
+    return roundedUp.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+  }
 
-  fun isDue(elapsedMs: Long, totalMs: Long): Boolean = elapsedMs >= totalMs
+  /**
+   * Smooth countdown-bar progress in the closed 0..1 range.
+   *
+   * Kept beside [secondsLeft] and [isDue] so all three views of the same timer
+   * agree at negative, zero-length, exact-end and overrun boundaries.
+   */
+  fun progressRemaining(elapsedMs: Long, totalMs: Long): Float {
+    if (totalMs <= 0L) return 0f
+    if (elapsedMs <= 0L) return 1f
+    if (elapsedMs >= totalMs) return 0f
+    return ((totalMs - elapsedMs).toDouble() / totalMs.toDouble()).toFloat()
+  }
+
+  fun isDue(elapsedMs: Long, totalMs: Long): Boolean =
+    totalMs <= 0L || elapsedMs >= totalMs
+
+  private fun remainingMs(elapsedMs: Long, totalMs: Long): Long = when {
+    totalMs <= 0L -> 0L
+    elapsedMs <= 0L -> totalMs
+    elapsedMs >= totalMs -> 0L
+    else -> totalMs - elapsedMs
+  }
+}
+
+/**
+ * What an automatic next-episode stream lookup means for the player.
+ *
+ * A healthy lookup with no release belongs in the picker. A lookup where every
+ * configured addon failed does not: handing that result to the picker discards
+ * the failure and makes the viewer navigate away merely to press Retry.
+ */
+sealed interface UpNextStreamResolution {
+  data class Ready(val stream: AddonStream) : UpNextStreamResolution
+  data object NeedsPicker : UpNextStreamResolution
+  data class Retry(val message: String) : UpNextStreamResolution
+}
+
+object UpNextStreamPolicy {
+  const val DEFAULT_RETRY_MESSAGE = "Couldn't reach your stream addons."
+
+  fun classify(fetch: StreamFetch, picked: AddonStream?): UpNextStreamResolution {
+    if (fetch.merged.allFailed) {
+      return UpNextStreamResolution.Retry(
+        fetch.merged.notice?.takeIf { it.isNotBlank() } ?: DEFAULT_RETRY_MESSAGE,
+      )
+    }
+    val playable = picked?.takeIf { !it.url.isNullOrBlank() }
+      ?: return UpNextStreamResolution.NeedsPicker
+    return UpNextStreamResolution.Ready(playable)
+  }
 }

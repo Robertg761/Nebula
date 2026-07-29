@@ -76,6 +76,74 @@ class StreamAutoPickTest {
   }
 
   @Test
+  fun `resolution fallback does not switch SDR playback into HDR or Dolby Vision`() {
+    val streams = listOf(
+      stream("Comet 2160p DV HDR", group = null),
+      stream("Comet 2160p HDR", group = null),
+      stream("Comet 2160p SDR", group = null),
+    )
+    val remembered = StreamSelection(
+      seriesId = "tt0903747",
+      resolutionHeight = 2160,
+      hdr = false,
+      dolbyVision = false,
+      updatedAtMs = 1,
+    )
+
+    assertEquals(
+      "Comet 2160p SDR",
+      StreamAutoPick.pick(streams, remembered = remembered)?.label,
+    )
+  }
+
+  @Test
+  fun `known playback format with no compatible fallback asks the viewer`() {
+    val streams = listOf(stream("Comet 2160p DV HDR", group = null))
+    val remembered = StreamSelection(
+      seriesId = "tt0903747",
+      resolutionHeight = 2160,
+      hdr = false,
+      dolbyVision = false,
+      updatedAtMs = 1,
+    )
+
+    assertNull(StreamAutoPick.pick(streams, remembered = remembered))
+  }
+
+  @Test
+  fun `reused binge group cannot cross a remembered playback format`() {
+    val streams = listOf(stream("Comet 2160p DV HDR", group = "comet|season"))
+    val remembered = StreamSelection(
+      seriesId = "tt0903747",
+      bingeGroup = "comet|season",
+      resolutionHeight = 2160,
+      hdr = false,
+      dolbyVision = false,
+      updatedAtMs = 1,
+    )
+
+    assertNull(
+      StreamAutoPick.pick(
+        streams,
+        bingeGroup = "comet|season",
+        remembered = remembered,
+      ),
+    )
+  }
+
+  @Test
+  fun `legacy selection without format flags keeps resolution fallback behavior`() {
+    val streams = listOf(stream("Comet 2160p DV HDR", group = null))
+    val legacy = StreamSelection(
+      seriesId = "tt0903747",
+      resolutionHeight = 2160,
+      updatedAtMs = 1,
+    )
+
+    assertEquals("Comet 2160p DV HDR", StreamAutoPick.pick(streams, remembered = legacy)?.label)
+  }
+
+  @Test
   fun `nothing remembered means the viewer chooses`() {
     assertNull(StreamAutoPick.pick(nextEpisode, bingeGroup = null, remembered = null))
   }

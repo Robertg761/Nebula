@@ -16,6 +16,26 @@ class AddonClientTest {
   }
 
   @Test
+  fun `stream url canonicalization preserves query and ignores manifest case and fragment`() {
+    assertEquals(
+      "https://comet.example/cfg/stream/series/tt1:2:3.json?token=secret",
+      AddonClient.streamUrl(
+        "https://comet.example/cfg/MANIFEST.JSON?token=secret#install",
+        "series",
+        "tt1:2:3",
+      ),
+    )
+  }
+
+  @Test
+  fun `a base route with a query is completed before deriving the stream route`() {
+    assertEquals(
+      "https://comet.example/cfg/stream/movie/tt1.json?token=secret",
+      AddonClient.streamUrl("https://comet.example/cfg?token=secret", "movie", "tt1"),
+    )
+  }
+
+  @Test
   fun `episode ids use imdb season episode format`() = runBlocking {
     var requestedUrl = ""
     val client = AddonClient(fetcher = { url ->
@@ -82,6 +102,47 @@ class AddonClientTest {
   }
 
   @Test
+  fun `stream playback metadata survives protocol decoding intact`() = runBlocking {
+    val client = AddonClient(fetcher = {
+      """
+        {"streams":[{
+          "name":"Protected 4K",
+          "url":"https://cdn.example/video.mkv",
+          "subtitles":[
+            {"id":"forced","url":"https://cdn.example/forced.srt","lang":"eng"},
+            {"url":"https://cdn.example/signs.ass"}
+          ],
+          "behaviorHints":{
+            "filename":"Movie.2160p.mkv",
+            "videoSize":123456789,
+            "videoHash":"abcdef012345",
+            "proxyHeaders":{
+              "request":{"Authorization":"Bearer secret","Referer":"https://addon.example/"},
+              "response":{"Content-Type":"video/x-matroska"}
+            },
+            "notWebReady":true,
+            "countryWhitelist":["CA","US"]
+          }
+        }]}
+      """.trimIndent()
+    })
+
+    val stream = client.movieStreams("https://comet.example/manifest.json", "tt1").single()
+    val hints = requireNotNull(stream.behaviorHints)
+
+    assertEquals("forced", stream.subtitles.first().id)
+    assertEquals("eng", stream.subtitles.first().lang)
+    assertEquals(null, stream.subtitles.last().lang)
+    assertEquals("Movie.2160p.mkv", hints.filename)
+    assertEquals(123456789L, hints.videoSize)
+    assertEquals("abcdef012345", hints.videoHash)
+    assertEquals("Bearer secret", hints.proxyHeaders?.request?.get("Authorization"))
+    assertEquals("video/x-matroska", hints.proxyHeaders?.response?.get("Content-Type"))
+    assertEquals(true, hints.notWebReady)
+    assertEquals(listOf("CA", "US"), hints.countryWhitelist)
+  }
+
+  @Test
   fun `an addon cannot name itself as the source of a row`() = runBlocking {
     val client = AddonClient(fetcher = {
       """{"streams":[{"name":"Comet","url":"https://rd.example/v.mkv","source":"Torrentio"}]}"""
@@ -91,9 +152,9 @@ class AddonClientTest {
   }
 
   @Test
-  fun `manifest url without manifest json is rejected`() {
+  fun `cleartext manifest url is rejected before a request path is built`() {
     assertThrows(IllegalArgumentException::class.java) {
-      AddonClient.streamUrl("https://comet.example/abc123", "movie", "tt1")
+      AddonClient.streamUrl("http://comet.example/abc123/manifest.json", "movie", "tt1")
     }
   }
 }

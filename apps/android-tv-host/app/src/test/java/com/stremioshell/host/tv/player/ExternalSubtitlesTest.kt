@@ -1,5 +1,6 @@
 package com.stremioshell.host.tv.player
 
+import com.stremioshell.host.tv.data.addon.AddonStreamSubtitle
 import com.stremioshell.host.tv.data.subtitles.AddonSubtitle
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -7,6 +8,47 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ExternalSubtitlesTest {
+  @Test
+  fun `embedded stream subtitles are bounded deduplicated http urls`() {
+    val valid = (1..100).map {
+      AddonStreamSubtitle(url = "https://subs.example/$it.srt", lang = "eng")
+    }
+    val response = listOf(
+      AddonStreamSubtitle(url = "ftp://subs.example/no.srt"),
+      AddonStreamSubtitle(url = "data:text/plain,no"),
+      AddonStreamSubtitle(url = "relative.srt"),
+      AddonStreamSubtitle(url = "https://subs.example/duplicate.srt"),
+      AddonStreamSubtitle(url = " https://subs.example/duplicate.srt "),
+    ) + valid
+
+    val sanitized = EmbeddedSubtitles.sanitize(response)
+
+    assertEquals(EmbeddedSubtitles.MAX_OPTIONS, sanitized.size)
+    assertEquals(1, sanitized.count { it.url.endsWith("duplicate.srt") })
+    assertTrue(sanitized.all { it.url.startsWith("https://") })
+  }
+
+  @Test
+  fun `embedded subtitle url and metadata lengths are bounded`() {
+    val overlongUrl = "https://subs.example/" +
+      "x".repeat(EmbeddedSubtitles.MAX_URL_LENGTH) +
+      ".srt"
+    val sanitized = EmbeddedSubtitles.sanitize(
+      listOf(
+        AddonStreamSubtitle(url = overlongUrl),
+        AddonStreamSubtitle(
+          id = "i".repeat(EmbeddedSubtitles.MAX_ID_LENGTH + 20),
+          url = "http://subs.example/good.srt",
+          lang = "l".repeat(EmbeddedSubtitles.MAX_LANGUAGE_LENGTH + 20),
+        ),
+      ),
+    )
+
+    assertEquals(1, sanitized.size)
+    assertEquals(EmbeddedSubtitles.MAX_ID_LENGTH, sanitized.single().id?.length)
+    assertEquals(EmbeddedSubtitles.MAX_LANGUAGE_LENGTH, sanitized.single().lang?.length)
+  }
+
   @Test
   fun `each language is capped, keeping the addon's own order`() {
     val options = ExternalSubtitles.options(subtitles("eng" to 5, "fra" to 2), preferredLanguage = "")
@@ -160,6 +202,16 @@ class ExternalSubtitlesTest {
     val options = ExternalSubtitles.options(subtitles("eng" to 40), preferredLanguage = "")
 
     assertTrue(options.all { it.detail.endsWith("of ${ExternalSubtitles.PER_LANGUAGE}") })
+  }
+
+  @Test
+  fun `a malicious language fanout cannot create an unwalkable menu`() {
+    val response = (1..100).map { subtitle("q$it", "https://subs.example/$it.srt") }
+
+    assertEquals(
+      ExternalSubtitles.MAX_OPTIONS,
+      ExternalSubtitles.options(response, preferredLanguage = "").size,
+    )
   }
 
   @Test

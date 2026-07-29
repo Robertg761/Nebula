@@ -3,5 +3,7 @@
   <string name="app_name">Nebula</string>
   <!-- Shown by the system's voice search UI, not by our own field. -->
   <string name="search_hint">Search movies and shows</string>
-  <string name="update_install_failed">Could not open installer. Please re-download the update.</string>
+  <string name="update_install_failed">The downloaded update is missing or did not pass verification. Please download it again.</string>
+  <string name="update_installer_open_failed">Android could not open its package installer on this TV. Try again or install the update manually.</string>
+  <string name="update_settings_open_failed">Android could not open the install-permission settings on this TV. Check Nebula\u2019s app permissions in Android settings.</string>
 </resources>
