@@ -224,7 +224,7 @@ jobs:
 
       - name: Run credential-free release instrumentation
         env:
-          NEBULA_EMULATOR_GPU: host
+          NEBULA_EMULATOR_GPU: lavapipe
         run: ./scripts/run-tv-instrumentation.sh "${{ matrix.api }}"
 
       - name: Upload release instrumentation evidence

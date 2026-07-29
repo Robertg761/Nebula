@@ -103,7 +103,7 @@ jobs:
           )
       - name: Run credential-free Android TV instrumentation
         env:
-          NEBULA_EMULATOR_GPU: host
+          NEBULA_EMULATOR_GPU: lavapipe
         run: ./scripts/run-tv-instrumentation.sh "${{ matrix.api }}"
       - name: Upload Android TV instrumentation evidence
         if: always()
