@@ -215,9 +215,12 @@ jobs:
 
       - name: Install Android TV emulator image
         run: |
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            "emulator" \
-            "system-images;android-${{ matrix.api }};android-tv;x86"
+          (
+            set +o pipefail
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+              "emulator" \
+              "system-images;android-${{ matrix.api }};android-tv;x86"
+          )
 
       - name: Run credential-free release instrumentation
         env:
