@@ -280,6 +280,74 @@ class TmdbClientTest {
   }
 
   @Test
+  fun `a cached catalog read asks for exactly the url its load stored`() = runBlocking {
+    // The URL is the cache key, so any drift between how a load builds one and how the cold-open
+    // read-ahead builds one turns every read-ahead into a miss - silently, and only on a device.
+    val live = mutableListOf<String>()
+    val cached = mutableListOf<String>()
+    val fetcher = object : HttpFetcher {
+      override suspend fun get(url: String): String = """{"results":[]}"""
+
+      override suspend fun getAllowingStale(url: String): String {
+        live += url
+        return """{"results":[]}"""
+      }
+
+      override suspend fun getCachedOnly(url: String): String? {
+        cached += url
+        return null
+      }
+    }
+    val client = TmdbClient(apiKey = "test-key", fetcher = fetcher, locale = Locale.US)
+
+    client.trending(MediaType.Show)
+    client.popular(MediaType.Movie)
+    client.discover(MediaType.Show, genreId = 10765)
+    // A rail is only ever primed from its first page, which is the page a load stores.
+    client.cachedTrending(MediaType.Show)
+    client.cachedPopular(MediaType.Movie)
+    client.cachedDiscover(MediaType.Show, genreId = 10765)
+
+    assertEquals(live, cached)
+    assertTrue(live.first().contains("&page=1"))
+  }
+
+  @Test
+  fun `cached catalog reads never fall through to the network`() = runBlocking {
+    // The point of the read-ahead is that a miss costs a disk lookup rather than a round trip; a
+    // fallback here would put Home's first paint back behind TMDB.
+    var live = 0
+    val fetcher = object : HttpFetcher {
+      override suspend fun get(url: String): String {
+        live++
+        return """{"results":[]}"""
+      }
+
+      override suspend fun getAllowingStale(url: String): String {
+        live++
+        return """{"results":[]}"""
+      }
+
+      override suspend fun getCachedOnly(url: String): String? =
+        if (url.contains("trending")) {
+          """{"page":1,"total_pages":9,"results":[{"id":1,"title":"A"}]}"""
+        } else {
+          null
+        }
+    }
+    val client = TmdbClient(apiKey = "test-key", fetcher = fetcher, locale = Locale.US)
+
+    val hit = requireNotNull(client.cachedTrending(MediaType.Movie))
+    assertEquals(listOf("A"), hit.items.map { it.title })
+    // Counters come from the cached body, so a rail served from disk can be paged immediately.
+    assertEquals(9, hit.totalPages)
+
+    assertNull(client.cachedPopular(MediaType.Show))
+    assertNull(client.cachedDiscover(MediaType.Movie, genreId = 28))
+    assertEquals(0, live)
+  }
+
+  @Test
   fun `credential probe requires a live non-stale response`() = runBlocking {
     var stale = 0
     var plain = 0

@@ -109,6 +109,15 @@
         <action android:name="android.intent.action.MAIN" />
         <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
       </intent-filter>
+
+      <!-- Google TV surfaces these from the long-press menu on the app icon, and it reads
+           them off whichever component answers the launcher intent - which is this alias,
+           not the activity behind it. Nothing here depends on them: launchers on some TV
+           versions ignore app shortcuts entirely, in which case this declaration costs a
+           few bytes of manifest and changes nothing. -->
+      <meta-data
+        android:name="android.app.shortcuts"
+        android:resource="@xml/shortcuts" />
     </activity-alias>
 
     <provider

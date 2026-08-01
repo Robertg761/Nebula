@@ -52,6 +52,19 @@ fun interface HttpFetcher {
    * old - catalogs and metadata, never addon stream URLs (those expire).
    */
   suspend fun getAllowingStale(url: String): String = get(url)
+
+  /**
+   * Answers from the disk cache or not at all, returning null when nothing is stored.
+   *
+   * Never opens a socket, so a miss costs a disk lookup rather than a round trip. That is what
+   * makes it usable ahead of a network load rather than only as a fallback: Home reads its rails
+   * this way on a cold open and paints them while TMDB is still being asked. Only ever paired with
+   * a real load, because a hit says nothing about whether the body is still current.
+   *
+   * Defaults to an empty cache so test fetchers, which have no cache to consult, take the network
+   * path exactly as they do today.
+   */
+  suspend fun getCachedOnly(url: String): String? = null
 }
 
 /**
@@ -116,16 +129,21 @@ object HttpCachePolicy {
   fun freshResponseCacheControl(freshSeconds: Int = FRESH_SECONDS): String =
     "public, max-age=$freshSeconds"
 
-  /** Cache-only request used as the fallback when the network is unreachable. */
-  fun staleFallback(maxStaleSeconds: Int = MAX_STALE_SECONDS): CacheControl =
+  /**
+   * Disk or nothing: OkHttp answers from the cache or synthesises a 504, and never opens a socket.
+   *
+   * One control for both uses - the fallback after a network failure, and the deliberate read-ahead
+   * on a cold start - so the two can never disagree about how old a body may be and still count.
+   */
+  fun cacheOnly(maxStaleSeconds: Int = MAX_STALE_SECONDS): CacheControl =
     CacheControl.Builder()
       .onlyIfCached()
       .maxStale(maxStaleSeconds, TimeUnit.SECONDS)
       .build()
 
   /** The same request, but answerable only from the disk cache. */
-  fun staleFallbackRequest(request: Request, maxStaleSeconds: Int = MAX_STALE_SECONDS): Request =
-    request.newBuilder().cacheControl(staleFallback(maxStaleSeconds)).build()
+  fun cacheOnlyRequest(request: Request, maxStaleSeconds: Int = MAX_STALE_SECONDS): Request =
+    request.newBuilder().cacheControl(cacheOnly(maxStaleSeconds)).build()
 
   /** Drops our marker header so it never reaches the server. */
   fun withoutMarker(request: Request): Request =
@@ -206,7 +224,7 @@ internal class StaleOnNetworkFailureInterceptor(
 
   private fun cachedResponse(chain: Interceptor.Chain, request: Request): Response? {
     val cached = runCatching {
-      chain.proceed(HttpCachePolicy.staleFallbackRequest(request, maxStaleSeconds))
+      chain.proceed(HttpCachePolicy.cacheOnlyRequest(request, maxStaleSeconds))
     }.getOrNull()
     // `only-if-cached` with nothing stored yields a synthetic 504.
     if (cached == null || !cached.isSuccessful) {
@@ -312,29 +330,62 @@ object SharedHttpClient {
 }
 
 object OkHttpFetcher : HttpFetcher {
-  override suspend fun get(url: String): String =
-    execute(url, cacheable = false, requireNetwork = false)
+  /**
+   * Where a GET is allowed to be answered from. One enum rather than a row of booleans, because the
+   * combinations are not independent: a cache-only read must not be marked cacheable, and a forced
+   * revalidation is the opposite of both.
+   */
+  private enum class Reach {
+    /** Uncached in practice: nothing stamps the response as storable on its way past the cache. */
+    Direct,
 
-  override suspend fun getFresh(url: String): String =
-    execute(url, cacheable = false, requireNetwork = true)
+    /** A network round trip even when a fresh copy is on disk. */
+    Revalidated,
 
-  override suspend fun getAllowingStale(url: String): String =
-    execute(url, cacheable = true, requireNetwork = false)
+    /** Fresh cache, else network, else whatever the cache still holds. */
+    Cacheable,
 
-  private suspend fun execute(
-    url: String,
-    cacheable: Boolean,
-    requireNetwork: Boolean,
-  ): String {
+    /** Disk or nothing. */
+    CacheOnly,
+  }
+
+  override suspend fun get(url: String): String = execute(url, Reach.Direct)
+
+  override suspend fun getFresh(url: String): String = execute(url, Reach.Revalidated)
+
+  override suspend fun getAllowingStale(url: String): String = execute(url, Reach.Cacheable)
+
+  /**
+   * An empty cache is the expected answer here, not an error: it is what a first run looks like,
+   * and every caller has a network load behind this one. So a miss - OkHttp's synthetic 504, or a
+   * cache that could not be opened at all - comes back as null rather than as something to report.
+   */
+  override suspend fun getCachedOnly(url: String): String? =
+    try {
+      execute(url, Reach.CacheOnly)
+    } catch (_: IOException) {
+      null
+    }
+
+  private suspend fun execute(url: String, reach: Reach): String {
     val builder = Request.Builder().url(url).header("Accept", "application/json")
-    if (cacheable) builder.header(HttpCachePolicy.CACHEABLE_HEADER, "1")
+    // The marker opts a response into being stored and into the stale fallback. A cache-only read
+    // must not carry it: the miss it expects is a synthetic 504, which is a retryable status, so
+    // the interceptor would search the cache a second time for the body it was just told is absent.
+    if (reach == Reach.Cacheable) builder.header(HttpCachePolicy.CACHEABLE_HEADER, "1")
     val built = builder.build()
-    val request = if (requireNetwork) HttpCachePolicy.requiringNetwork(built) else built
+    val request = when (reach) {
+      Reach.Revalidated -> HttpCachePolicy.requiringNetwork(built)
+      Reach.CacheOnly -> HttpCachePolicy.cacheOnlyRequest(built)
+      Reach.Direct, Reach.Cacheable -> built
+    }
     return SharedHttpClient.client.newCall(request).awaitAndConsumeResponse { response ->
       if (!response.isSuccessful) {
         // The URL carries the TMDB api_key, so the detail stays here (redacted) and the thrown
         // message - which the UI may end up rendering - carries only status and host.
-        Log.w(HTTP_TAG, "GET ${redactSecrets(url)} failed: HTTP ${response.code}")
+        if (reach != Reach.CacheOnly) {
+          Log.w(HTTP_TAG, "GET ${redactSecrets(url)} failed: HTTP ${response.code}")
+        }
         throw HttpStatusException(
           code = response.code,
           host = request.url.host,

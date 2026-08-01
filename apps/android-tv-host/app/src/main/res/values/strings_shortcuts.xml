@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The launcher-shortcut labels, kept out of strings.xml on purpose: they are the only strings the
+  launcher process reads, they change as a set with res/xml/shortcuts.xml, and holding them here means
+  a shortcut edit never collides with the parallel edits the main strings file is under.
+
+  Short labels are what the long-press menu actually shows, and it clips rather than wraps - one word
+  each. The long labels are the fallback for surfaces that have the room, so they say which app they
+  belong to; "Nebula" is hardcoded there rather than composed from app_name because a shortcut label
+  is not a format string and has no arguments to substitute.
+-->
+<resources>
+  <string name="shortcut_search_short_label">Search</string>
+  <string name="shortcut_search_long_label">Search Nebula</string>
+  <string name="shortcut_settings_short_label">Settings</string>
+  <string name="shortcut_settings_long_label">Nebula settings</string>
+</resources>

@@ -120,6 +120,38 @@ class HomeRailAssemblyTest {
   }
 
   @Test
+  fun `a partly-populated cache publishes only the run of rails from the top`() {
+    // Home's cold open primes from the HTTP disk cache before it asks the network, and a rail the
+    // cache cannot answer is passed here as "not answered yet" rather than as failed. That is what
+    // makes the network pass append below what is already painted: were the gap skipped instead,
+    // the rail would arrive a second later and push the focused row down.
+    val assembled = HomeRailAssembly.visible(
+      order = order,
+      loaded = listOf(rail("Trending Movies", 1), rail("Popular Movies", 3)),
+    )
+
+    assertEquals(listOf("Trending Movies"), assembled.rails.map { it.title })
+    // Nothing to report either: a cache miss is not a failure, and the load has not run yet.
+    assertTrue(assembled.missingTitles.isEmpty())
+  }
+
+  @Test
+  fun `the network pass refreshes cache-primed rails without dropping any`() {
+    // What the cold open looks like a second in: the cache painted all four, the first wave has
+    // answered for two of them, and the other two are still in flight showing their cached copies.
+    val primed = order.mapIndexed { index, title -> rail(title, index) }
+    val assembled = HomeRailAssembly.visible(
+      order = order,
+      loaded = listOf(rail("Trending Movies", 11), rail("Popular Movies", 13)),
+      previous = primed,
+    )
+
+    assertEquals(order, assembled.rails.map { it.title })
+    assertEquals(listOf(11, 1, 13, 3), assembled.rails.map { it.items.single().tmdbId })
+    assertTrue(assembled.missingTitles.isEmpty())
+  }
+
+  @Test
   fun `a refresh keeps every row up while the new ones are still in flight`() {
     // Nothing has come back yet, so Home must look exactly as it did before the refresh started.
     val previous = order.mapIndexed { index, title -> rail(title, index) }

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Settings shortcut glyph, paired with ic_shortcut_search: same stroke weight, same flat accent,
+  same reasons (see that file).
+
+  A cog built from a stroked ring and eight round-capped teeth at 45 degree steps, rather than a single
+  filled outline. The hollow centre is what keeps it from reading as a sun once the launcher scales it
+  down, and expressing the teeth as radial segments keeps the geometry checkable: every tip is the ring
+  centre plus 8.4 along its angle, so the shape stays symmetric if the size is ever retuned.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+  android:width="48dp"
+  android:height="48dp"
+  android:viewportWidth="24"
+  android:viewportHeight="24">
+  <path
+    android:pathData="M6.8,12 A5.2,5.2 0 1 0 17.2,12 A5.2,5.2 0 1 0 6.8,12 Z"
+    android:strokeWidth="2.4"
+    android:strokeColor="@color/nebula_violet"
+    android:fillColor="#00000000" />
+  <path
+    android:pathData="M18,12 L20.4,12 M16.24,16.24 L17.94,17.94 M12,18 L12,20.4 M7.76,16.24 L6.06,17.94 M6,12 L3.6,12 M7.76,7.76 L6.06,6.06 M12,6 L12,3.6 M16.24,7.76 L17.94,6.06"
+    android:strokeWidth="2.2"
+    android:strokeLineCap="round"
+    android:strokeColor="@color/nebula_violet"
+    android:fillColor="#00000000" />
+</vector>

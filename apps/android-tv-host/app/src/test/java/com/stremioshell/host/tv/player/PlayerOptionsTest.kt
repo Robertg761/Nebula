@@ -1,6 +1,7 @@
 package com.stremioshell.host.tv.player
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -71,6 +72,126 @@ class PlayerOptionsTest {
     assertEquals(SubtitleSize.Small, SubtitleSize.stepped(SubtitleSize.Medium, -1))
     assertEquals(SubtitleSize.Huge, SubtitleSize.stepped(SubtitleSize.Huge, 1))
     assertEquals(SubtitleSize.Small, SubtitleSize.stepped(SubtitleSize.Small, -1))
+  }
+
+  @Test
+  fun `the default edge is the one mpv would have drawn unasked`() {
+    // mpv's own defaults, which is what the player shipped before this row
+    // existed: an existing viewer's subtitles must not change shape under them.
+    assertEquals(SubtitleEdge.Outline, SubtitleEdge.DEFAULT)
+    assertEquals(3, SubtitleEdge.Outline.borderSize)
+    assertEquals(0, SubtitleEdge.Outline.shadowOffset)
+  }
+
+  @Test
+  fun `each edge step is the mpv properties it claims to be`() {
+    assertEquals(
+      listOf(
+        "sub-border-size" to "0",
+        "sub-shadow-offset" to "0",
+        "sub-shadow-color" to "#000000",
+      ),
+      SubtitleEdge.None.mpvOptions,
+    )
+    assertEquals(
+      listOf(
+        "sub-border-size" to "1",
+        "sub-shadow-offset" to "3",
+        "sub-shadow-color" to "#000000",
+      ),
+      SubtitleEdge.Shadow.mpvOptions,
+    )
+    assertEquals(
+      listOf(
+        "sub-border-size" to "5",
+        "sub-shadow-offset" to "0",
+        "sub-shadow-color" to "#000000",
+      ),
+      SubtitleEdge.HighContrast.mpvOptions,
+    )
+  }
+
+  @Test
+  fun `every edge step names the same properties, so none of them leaves one behind`() {
+    // A step that wrote a subset would inherit the rest from the step before it,
+    // and the row would stop being a ladder after the first press.
+    val names = SubtitleEdge.entries.map { edge -> edge.mpvOptions.map { it.first } }.toSet()
+    assertEquals(1, names.size)
+  }
+
+  @Test
+  fun `edge round-trips through storage`() {
+    SubtitleEdge.entries.forEach { edge ->
+      assertEquals(edge, SubtitleEdge.fromStorage(edge.storageName))
+    }
+  }
+
+  @Test
+  fun `an unset or unrecognised stored edge falls back to the default`() {
+    assertEquals(SubtitleEdge.DEFAULT, SubtitleEdge.fromStorage(null))
+    assertEquals(SubtitleEdge.DEFAULT, SubtitleEdge.fromStorage(""))
+    assertEquals(SubtitleEdge.DEFAULT, SubtitleEdge.fromStorage("glow"))
+    assertEquals(SubtitleEdge.HighContrast, SubtitleEdge.fromStorage(" HIGH-CONTRAST "))
+  }
+
+  @Test
+  fun `edge steps and holds at either end`() {
+    assertEquals(SubtitleEdge.Shadow, SubtitleEdge.stepped(SubtitleEdge.Outline, 1))
+    assertEquals(SubtitleEdge.None, SubtitleEdge.stepped(SubtitleEdge.Outline, -1))
+    assertEquals(SubtitleEdge.HighContrast, SubtitleEdge.stepped(SubtitleEdge.HighContrast, 1))
+    assertEquals(SubtitleEdge.None, SubtitleEdge.stepped(SubtitleEdge.None, -1))
+    assertEquals(SubtitleEdge.None, SubtitleEdge.stepped(SubtitleEdge.HighContrast, -9))
+  }
+
+  @Test
+  fun `no background is the default, so the picture is not boxed over uninvited`() {
+    assertEquals(SubtitleBackground.Off, SubtitleBackground.DEFAULT)
+    // mpv's transparent default, in mpv's own AARRGGBB spelling.
+    assertEquals("#00000000", SubtitleBackground.Off.backColor)
+    assertEquals(
+      listOf("sub-back-color" to "#00000000"),
+      SubtitleBackground.Off.mpvOptions,
+    )
+  }
+
+  @Test
+  fun `the background box gets darker along the ladder and ends opaque`() {
+    val alphas = SubtitleBackground.entries.map { it.backColor.substring(1, 3).toInt(16) }
+    assertEquals(listOf(0x00, 0x80, 0xFF), alphas)
+    // Black, whatever the alpha: a tinted box would recolour the picture it covers.
+    SubtitleBackground.entries.forEach { background ->
+      assertEquals("000000", background.backColor.substring(3))
+    }
+  }
+
+  @Test
+  fun `background round-trips through storage`() {
+    SubtitleBackground.entries.forEach { background ->
+      assertEquals(background, SubtitleBackground.fromStorage(background.storageName))
+    }
+  }
+
+  @Test
+  fun `an unset or unrecognised stored background falls back to off`() {
+    assertEquals(SubtitleBackground.DEFAULT, SubtitleBackground.fromStorage(null))
+    assertEquals(SubtitleBackground.DEFAULT, SubtitleBackground.fromStorage(""))
+    assertEquals(SubtitleBackground.DEFAULT, SubtitleBackground.fromStorage("opaque"))
+    assertEquals(SubtitleBackground.Solid, SubtitleBackground.fromStorage(" SOLID "))
+  }
+
+  @Test
+  fun `background steps and holds at either end`() {
+    assertEquals(SubtitleBackground.Dim, SubtitleBackground.stepped(SubtitleBackground.Off, 1))
+    assertEquals(SubtitleBackground.Off, SubtitleBackground.stepped(SubtitleBackground.Dim, -1))
+    assertEquals(
+      SubtitleBackground.Solid,
+      SubtitleBackground.stepped(SubtitleBackground.Solid, 1),
+    )
+    assertEquals(SubtitleBackground.Off, SubtitleBackground.stepped(SubtitleBackground.Off, -1))
+    assertEquals(
+      SubtitleBackground.Off,
+      SubtitleBackground.stepped(SubtitleBackground.Solid, -9),
+    )
   }
 
   @Test
@@ -185,5 +306,71 @@ class PlayerOptionsTest {
     assertEquals(DelaySteps.LIMIT_SEC, DelaySteps.stepped(Double.MAX_VALUE, 1), 0.0001)
     assertEquals("0 ms", DelaySteps.label(Double.NaN))
     assertEquals("+10000 ms", DelaySteps.label(Double.MAX_VALUE))
+  }
+
+  @Test
+  fun `nobody gets a timer they did not set`() {
+    assertEquals(SleepTimer.Off, SleepTimer.DEFAULT)
+    assertFalse(SleepTimer.Off.isTimed)
+  }
+
+  @Test
+  fun `each timed option is worth the minutes on its label`() {
+    assertEquals(15L * 60_000L, SleepTimer.Minutes15.durationMs)
+    assertEquals(30L * 60_000L, SleepTimer.Minutes30.durationMs)
+    assertEquals(60L * 60_000L, SleepTimer.Minutes60.durationMs)
+    assertEquals(90L * 60_000L, SleepTimer.Minutes90.durationMs)
+    listOf(15, 30, 60, 90).forEachIndexed { index, minutes ->
+      assertEquals(minutes, SleepTimer.entries[index + 1].minutes)
+    }
+  }
+
+  @Test
+  fun `after this episode has no duration to schedule`() {
+    assertFalse(SleepTimer.AfterEpisode.isTimed)
+    assertEquals(0L, SleepTimer.AfterEpisode.durationMs)
+  }
+
+  @Test
+  fun `the sleep ladder runs from off to the ending and holds at either end`() {
+    assertEquals(SleepTimer.Minutes15, SleepTimer.stepped(SleepTimer.Off, 1))
+    assertEquals(SleepTimer.Off, SleepTimer.stepped(SleepTimer.Minutes15, -1))
+    assertEquals(SleepTimer.AfterEpisode, SleepTimer.stepped(SleepTimer.Minutes90, 1))
+    assertEquals(SleepTimer.AfterEpisode, SleepTimer.stepped(SleepTimer.AfterEpisode, 1))
+    assertEquals(SleepTimer.Off, SleepTimer.stepped(SleepTimer.Off, -1))
+    assertEquals(SleepTimer.Off, SleepTimer.stepped(SleepTimer.AfterEpisode, -9))
+  }
+
+  @Test
+  fun `the remaining label rounds up, so a part minute is never reported as none`() {
+    assertEquals(30, SleepTimer.minutesLeft(30L * 60_000L))
+    assertEquals(30, SleepTimer.minutesLeft(29L * 60_000L + 30_000L))
+    assertEquals(1, SleepTimer.minutesLeft(1L))
+    assertEquals(0, SleepTimer.minutesLeft(0L))
+    // A deadline the handler has not delivered yet; the row must not read "-1 min".
+    assertEquals(0, SleepTimer.minutesLeft(-5_000L))
+  }
+
+  @Test
+  fun `only after this episode takes the clock off the up-next card`() {
+    assertTrue(SleepTimer.autoPlaysNext(SleepTimer.Off))
+    assertTrue(SleepTimer.autoPlaysNext(SleepTimer.Minutes30))
+    assertFalse(SleepTimer.autoPlaysNext(SleepTimer.AfterEpisode))
+  }
+
+  @Test
+  fun `after this episode is spent on the ending it was armed for`() {
+    assertEquals(SleepTimer.Off, SleepTimer.afterEnding(SleepTimer.AfterEpisode))
+    // Two endings in a row: the second one autoplays like any other, because the
+    // request was about one episode.
+    assertTrue(SleepTimer.autoPlaysNext(SleepTimer.afterEnding(SleepTimer.AfterEpisode)))
+  }
+
+  @Test
+  fun `a timed option is untouched by an ending, so it is never restarted by one`() {
+    SleepTimer.entries.filter { it.isTimed }.forEach { timer ->
+      assertEquals(timer, SleepTimer.afterEnding(timer))
+    }
+    assertEquals(SleepTimer.Off, SleepTimer.afterEnding(SleepTimer.Off))
   }
 }

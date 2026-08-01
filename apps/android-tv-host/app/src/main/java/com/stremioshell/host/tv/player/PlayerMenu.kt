@@ -82,9 +82,20 @@ data class PlayerMenuState(
   val subtitleRows: List<TrackRow>,
   val speed: Double,
   val subtitleSize: SubtitleSize,
+  val subtitleEdge: SubtitleEdge,
+  val subtitleBackground: SubtitleBackground,
   val audioOutput: AudioOutputMode,
   val audioDelaySec: Double,
   val subtitleDelaySec: Double,
+  val sleepTimer: SleepTimer = SleepTimer.DEFAULT,
+  /**
+   * What an armed [SleepTimer] has left, or null when nothing is counting down.
+   *
+   * A snapshot the caller takes as it builds this state rather than a clock the
+   * menu reads: the row is a coarse reassurance, and a value that ticked would
+   * recompose the panel for a number nobody is watching change.
+   */
+  val sleepTimerRemainingMs: Long? = null,
   /** What a subtitles addon has for this file; see [ExternalSubtitlesState]. */
   val externalSubtitles: ExternalSubtitlesState = ExternalSubtitlesState.Unavailable,
 )
@@ -102,9 +113,12 @@ class PlayerMenuActions(
   val onSelectSubtitle: (Int?) -> Unit,
   val onSpeedStep: (Int) -> Unit,
   val onSubtitleSizeStep: (Int) -> Unit,
+  val onSubtitleEdgeStep: (Int) -> Unit,
+  val onSubtitleBackgroundStep: (Int) -> Unit,
   val onAudioOutputStep: (Int) -> Unit,
   val onAudioDelayStep: (Int) -> Unit,
   val onSubtitleDelayStep: (Int) -> Unit,
+  val onSleepTimerStep: (Int) -> Unit,
   /** Ask the subtitles addon what it has, or ask again after a failure. */
   val onFetchExternalSubtitles: () -> Unit = {},
   val onSelectExternalSubtitle: (ExternalSubtitleOption) -> Unit = {},
@@ -425,12 +439,52 @@ private fun localizedSubtitleSize(size: SubtitleSize): String = stringResource(
 )
 
 @Composable
+private fun localizedSubtitleEdge(edge: SubtitleEdge): String = stringResource(
+  when (edge) {
+    SubtitleEdge.None -> R.string.player_menu_subtitle_edge_none
+    SubtitleEdge.Outline -> R.string.player_menu_subtitle_edge_outline
+    SubtitleEdge.Shadow -> R.string.player_menu_subtitle_edge_shadow
+    SubtitleEdge.HighContrast -> R.string.player_menu_subtitle_edge_high_contrast
+  },
+)
+
+@Composable
+private fun localizedSubtitleBackground(background: SubtitleBackground): String = stringResource(
+  when (background) {
+    SubtitleBackground.Off -> R.string.player_menu_subtitle_background_off
+    SubtitleBackground.Dim -> R.string.player_menu_subtitle_background_dim
+    SubtitleBackground.Solid -> R.string.player_menu_subtitle_background_solid
+  },
+)
+
+@Composable
 private fun localizedAudioOutput(output: AudioOutputMode): String = stringResource(
   when (output) {
     AudioOutputMode.Decode -> R.string.player_menu_audio_output_decode
     AudioOutputMode.Passthrough -> R.string.player_menu_audio_output_passthrough
   },
 )
+
+/**
+ * An armed timer shows what is left of it rather than what it was set to: "30 min"
+ * an hour into a film is the setting, and how much of the evening is left is the
+ * only reason to walk to this row a second time. The remainder itself is a
+ * snapshot; see [PlayerMenuState.sleepTimerRemainingMs].
+ */
+@Composable
+private fun localizedSleepTimer(timer: SleepTimer, remainingMs: Long?): String = when {
+  timer == SleepTimer.Off -> stringResource(R.string.player_menu_sleep_timer_off)
+  timer == SleepTimer.AfterEpisode -> stringResource(R.string.player_menu_sleep_timer_episode)
+  remainingMs != null -> {
+    val minutes = SleepTimer.minutesLeft(remainingMs)
+    pluralStringResource(R.plurals.player_menu_sleep_timer_left, minutes, minutes)
+  }
+  else -> pluralStringResource(
+    R.plurals.player_menu_sleep_timer_minutes,
+    timer.minutes,
+    timer.minutes,
+  )
+}
 
 @Composable
 private fun TabButton(
@@ -629,7 +683,7 @@ private fun LabelledRow(
 }
 
 /**
- * The five adjustable settings, and one line of help about whichever one the
+ * The eight adjustable settings, and one line of help about whichever one the
  * highlight is on.
  *
  * That line replaced two permanent body paragraphs - a sentence about delay scope
@@ -672,6 +726,23 @@ private fun OptionsSection(
       onStep = actions.onSubtitleSizeStep,
       onFocusedHelp = { help = it },
     )
+    // Under the size, because the three of them are one question - whether the
+    // subtitles can be read from where this viewer is sitting - and a viewer who
+    // has just found the size ladder too small to help is already on the row above.
+    AdjusterRow(
+      label = stringResource(R.string.player_menu_subtitle_edge),
+      value = localizedSubtitleEdge(state.subtitleEdge),
+      help = stringResource(R.string.player_menu_subtitle_edge_help),
+      onStep = actions.onSubtitleEdgeStep,
+      onFocusedHelp = { help = it },
+    )
+    AdjusterRow(
+      label = stringResource(R.string.player_menu_subtitle_background),
+      value = localizedSubtitleBackground(state.subtitleBackground),
+      help = stringResource(R.string.player_menu_subtitle_background_help),
+      onStep = actions.onSubtitleBackgroundStep,
+      onFocusedHelp = { help = it },
+    )
     AdjusterRow(
       label = stringResource(R.string.player_menu_audio_output),
       value = localizedAudioOutput(state.audioOutput),
@@ -691,6 +762,15 @@ private fun OptionsSection(
       value = DelaySteps.label(state.subtitleDelaySec),
       help = delayHelp,
       onStep = actions.onSubtitleDelayStep,
+      onFocusedHelp = { help = it },
+    )
+    // Last of the rows: it is the only one that is not about how this file plays,
+    // and the one a viewer reaches for once an evening rather than mid-scene.
+    AdjusterRow(
+      label = stringResource(R.string.player_menu_sleep_timer),
+      value = localizedSleepTimer(state.sleepTimer, state.sleepTimerRemainingMs),
+      help = stringResource(R.string.player_menu_sleep_timer_help),
+      onStep = actions.onSleepTimerStep,
       onFocusedHelp = { help = it },
     )
     Text(
@@ -749,10 +829,11 @@ private fun AdjusterRow(
     )
     Text(
       value,
-      // Wide enough for "Passthrough", which is the longest value any of these
-      // rows shows; the label beside it ellipsizes rather than this, because the
-      // value is the part that changes under the press. Accent-tinted so the eye
-      // goes to the number between the two buttons that move it.
+      // Wide enough for the longest values these rows show - "Passthrough",
+      // "This episode" and "High contrast"; the label beside it ellipsizes rather
+      // than this, because the value is the part that changes under the press.
+      // Accent-tinted so the eye goes to the number between the two buttons that
+      // move it.
       modifier = Modifier
         .width(VALUE_WIDTH)
         .padding(horizontal = 8.dp)

@@ -641,6 +641,13 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     is CatalogQuery.Genre -> discover(query.type, query.genreId, page)
   }
 
+  /** [load]'s first page as the shared disk cache already holds it, or null when it does not. */
+  private suspend fun TmdbClient.loadCached(query: CatalogQuery): MediaPage? = when (query) {
+    is CatalogQuery.Trending -> cachedTrending(query.type)
+    is CatalogQuery.Popular -> cachedPopular(query.type)
+    is CatalogQuery.Genre -> cachedDiscover(query.type, query.genreId)
+  }
+
   fun loadHomeRails(force: Boolean = false) {
     val key = tmdbApiKey.value?.takeIf { it.isNotBlank() } ?: return
     // Catalogs change far less often than Home is revisited, so they are kept across visits - but
@@ -657,6 +664,10 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    * is reused rather than restarted, and a refresh of the key already on screen swaps the rails in
    * place instead of blanking Home back to Loading (which would throw away the row the user is on
    * plus their scroll position). Only an actual key change starts over from Loading.
+   *
+   * With nothing on screen the load opens with [primeRailsFromCache], so the skeleton is what a
+   * genuinely empty disk cache looks like rather than what every cold open looks like. Everything
+   * below then runs as an in-place refresh over those rails.
    *
    * Endpoints within a wave are fetched concurrently (awaiting them in turn made cold Home latency
    * the sum of every round trip) and scored independently: one rail failing shows the others with a
@@ -688,6 +699,10 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     }
     railsJob = viewModelScope.launch {
       val client = clientFor(key)
+      // Ahead of the snapshots below, so anything it publishes is what the network load refreshes
+      // in place rather than something it would overwrite from scratch.
+      if (!refreshingInPlace) primeRailsFromCache(client, key)
+      if (!isActive || railsLoadedForKey != key) return@launch
       // Snapshots: everything below publishes into _homeRails as it goes, so the fallback copy has
       // to be the one from before this load started.
       val previous = (_homeRails.value as? LoadState.Ready)?.value.orEmpty()
@@ -739,7 +754,11 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
               failed += spec.title
               result.exceptionOrNull()?.let { failures += it }
             } else {
-              val items = RailPaging.merge(page.items, previous.itemsFor(spec.title))
+              // The depth the row has reached, not the depth it had when this load started: rails
+              // served from the cache can be paged into while the refresh behind them is still in
+              // flight, and the tail is what stops that refresh from cutting the row back to one
+              // page under a viewer who is already past it.
+              val items = RailPaging.merge(page.items, railItemsOnScreen(spec.title))
               loaded[spec.title] = HomeRail(spec.title, items)
               pendingPaging[spec.title] =
                 RailPaging.afterFirstPage(page, items.size, carriedPaging[spec.title])
@@ -769,6 +788,54 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       // Only a complete load counts as fresh, so a partial one is retried on the next visit.
       railsLoadedAtMillis = if (failed.isEmpty()) System.currentTimeMillis() else null
     }
+  }
+
+  /**
+   * Publishes whatever of Home the shared HTTP disk cache already holds, before anything is asked
+   * of the network.
+   *
+   * The cache almost always has the last visit's catalogs, and reading nine of them off disk is
+   * tens of milliseconds against the one to three seconds TMDB takes to answer over a TV's Wi-Fi -
+   * which until now was time the viewer spent looking at a skeleton. What it publishes is the same
+   * shape a load produces, so the waves that follow are an ordinary in-place refresh: rows swap as
+   * fresh pages land, nothing blanks, and the focused row stays where it is.
+   *
+   * Deliberately leaves [railsLoadedAtMillis] alone. A cache hit is not a load - it says nothing
+   * about whether the body is still current - so staleness stays measured from the last time the
+   * network actually answered, and a cache-only Home is always followed by a real one.
+   *
+   * A rail the cache cannot answer counts as *not answered yet* rather than as failed, so
+   * [HomeRailAssembly] publishes only the unbroken run of rails from the top. A rail that arrives
+   * from the network afterwards then appends below what is on screen instead of pushing it down,
+   * which is the one thing that would move the row under the viewer's thumb. An empty cached page
+   * is a miss on the same terms: a row with no cards is worse than no row.
+   */
+  private suspend fun primeRailsFromCache(client: TmdbClient, key: String) {
+    val cached = PerformanceTrace.suspendSection("home.rails.cache") {
+      coroutineScope {
+        // All at once rather than in waves: these are disk reads, so there is no round trip for a
+        // second wave to hide behind, and one publish is one composition.
+        CatalogRails.ALL.map { spec ->
+          async { spec.title to catchingFailure { client.loadCached(spec.query) }.getOrNull() }
+        }.awaitAll()
+      }
+    }
+    if (railsLoadedForKey != key) return
+    val loaded = mutableListOf<HomeRail>()
+    val paging = mutableMapOf<String, RailPageState>()
+    for ((title, page) in cached) {
+      if (page == null || page.items.isEmpty()) continue
+      loaded += HomeRail(title, page.items)
+      // Computed exactly as the network path computes it, so a rail served from disk can be paged
+      // into immediately rather than only after the refresh lands.
+      paging[title] = RailPaging.afterFirstPage(page, page.items.size)
+    }
+    val assembled = HomeRailAssembly.visible(CatalogRails.ORDER, loaded)
+    if (assembled.rails.isEmpty()) return
+    // Only the rails that actually became visible: a rail held back above cannot be paged yet.
+    _railPaging.value = _railPaging.value +
+      assembled.rails.mapNotNull { rail -> paging[rail.title]?.let { rail.title to it } }
+    _homeRails.value = LoadState.Ready(assembled.rails)
   }
 
   /**
@@ -825,6 +892,9 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
 
   private fun List<HomeRail>.itemsFor(title: String): List<MediaItem> =
     firstOrNull { it.title == title }?.items.orEmpty()
+
+  private fun railItemsOnScreen(title: String): List<MediaItem> =
+    (_homeRails.value as? LoadState.Ready)?.value.orEmpty().itemsFor(title)
 
   /**
    * [runCatching] would swallow CancellationException too, letting a cancelled rail look like a

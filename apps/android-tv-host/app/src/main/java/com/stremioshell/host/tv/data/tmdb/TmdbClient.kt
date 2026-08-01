@@ -15,6 +15,9 @@ import kotlinx.serialization.json.Json
  * are a little old, so a cold start with no network paints the last known Home instead of an error
  * screen. [searchPage] and [probeCredentials] are the two deliberate exceptions, each for its own
  * reason.
+ *
+ * The `cached*` catalog reads take that one step further and skip the network entirely, so Home can
+ * paint from disk while the same catalogs are being fetched for real.
  */
 class TmdbClient(
   private val apiKey: String,
@@ -32,15 +35,11 @@ class TmdbClient(
     fetcher.getFresh(url("configuration"))
   }
 
-  suspend fun trending(type: MediaType, page: Int = 1): MediaPage {
-    val path = if (type == MediaType.Movie) "trending/movie/week" else "trending/tv/week"
-    return pagedItems(path, type, page)
-  }
+  suspend fun trending(type: MediaType, page: Int = 1): MediaPage =
+    pagedItems(trendingEndpoint(type), type, page)
 
-  suspend fun popular(type: MediaType, page: Int = 1): MediaPage {
-    val path = if (type == MediaType.Movie) "movie/popular" else "tv/popular"
-    return pagedItems(path, type, page)
-  }
+  suspend fun popular(type: MediaType, page: Int = 1): MediaPage =
+    pagedItems(popularEndpoint(type), type, page)
 
   /**
    * A genre rail.
@@ -49,17 +48,25 @@ class TmdbClient(
    * by popularity alone leads with whatever was uploaded this week, including titles with a handful
    * of votes and no artwork.
    */
-  suspend fun discover(type: MediaType, genreId: Int, page: Int = 1): MediaPage {
-    val isMovie = type == MediaType.Movie
-    val path = if (isMovie) "discover/movie" else "discover/tv"
-    val query = buildString {
-      append("sort_by=popularity.desc")
-      append("&with_genres=$genreId")
-      append("&vote_count.gte=$MIN_DISCOVER_VOTES")
-      if (isMovie) append("&include_adult=false")
-    }
-    return pagedItems(path, type, page, query)
-  }
+  suspend fun discover(type: MediaType, genreId: Int, page: Int = 1): MediaPage =
+    pagedItems(discoverEndpoint(type, genreId), type, page)
+
+  /**
+   * The cache-only counterparts of the three catalog reads above: the rail's first page as the
+   * shared disk cache already holds it, or null when it holds nothing for it.
+   *
+   * Home's cold open uses these to paint before TMDB has answered (see TvAppViewModel). They are
+   * first pages only because that is what a load publishes and what paging counts from; a deeper
+   * page has nothing on screen to attach to.
+   */
+  suspend fun cachedTrending(type: MediaType): MediaPage? =
+    cachedFirstPage(trendingEndpoint(type), type)
+
+  suspend fun cachedPopular(type: MediaType): MediaPage? =
+    cachedFirstPage(popularEndpoint(type), type)
+
+  suspend fun cachedDiscover(type: MediaType, genreId: Int): MediaPage? =
+    cachedFirstPage(discoverEndpoint(type, genreId), type)
 
   /** First-page compatibility API used by existing callers. */
   suspend fun search(query: String): List<MediaItem> = searchPage(query).items
@@ -200,15 +207,47 @@ class TmdbClient(
     }
   }
 
+  private fun trendingEndpoint(type: MediaType) =
+    CatalogEndpoint(if (type == MediaType.Movie) "trending/movie/week" else "trending/tv/week")
+
+  private fun popularEndpoint(type: MediaType) =
+    CatalogEndpoint(if (type == MediaType.Movie) "movie/popular" else "tv/popular")
+
+  private fun discoverEndpoint(type: MediaType, genreId: Int): CatalogEndpoint {
+    val isMovie = type == MediaType.Movie
+    return CatalogEndpoint(
+      path = if (isMovie) "discover/movie" else "discover/tv",
+      query = buildString {
+        append("sort_by=popularity.desc")
+        append("&with_genres=$genreId")
+        append("&vote_count.gte=$MIN_DISCOVER_VOTES")
+        if (isMovie) append("&include_adult=false")
+      },
+    )
+  }
+
   private suspend fun pagedItems(
-    path: String,
+    endpoint: CatalogEndpoint,
     type: MediaType,
     page: Int,
-    query: String? = null,
-  ): MediaPage {
-    val paged = listOfNotNull(query?.ifBlank { null }, "page=${page.coerceAtLeast(1)}")
+  ): MediaPage = decodePage(fetcher.getAllowingStale(catalogUrl(endpoint, page)), type)
+
+  private suspend fun cachedFirstPage(endpoint: CatalogEndpoint, type: MediaType): MediaPage? {
+    val body = fetcher.getCachedOnly(catalogUrl(endpoint, page = 1)) ?: return null
+    return decodePage(body, type)
+  }
+
+  /**
+   * The one place a catalog URL is built, so a cache-only read cannot ask for a byte-different URL
+   * from the load that stored the body - which is the whole cache key.
+   */
+  private fun catalogUrl(endpoint: CatalogEndpoint, page: Int): String {
+    val paged = listOfNotNull(endpoint.query?.ifBlank { null }, "page=${page.coerceAtLeast(1)}")
       .joinToString("&")
-    val body = fetcher.getAllowingStale(url(path, paged))
+    return url(endpoint.path, paged)
+  }
+
+  private suspend fun decodePage(body: String, type: MediaType): MediaPage {
     val decoded = decode<TmdbPagedResults>(body)
     return MediaPage(
       items = decoded.results.map { it.toItem(type) },
@@ -238,6 +277,9 @@ class TmdbClient(
       rating = voteAverage,
     )
   }
+
+  /** A catalog endpoint minus its page number: everything the live and cached reads must share. */
+  private data class CatalogEndpoint(val path: String, val query: String? = null)
 
   companion object {
     /**

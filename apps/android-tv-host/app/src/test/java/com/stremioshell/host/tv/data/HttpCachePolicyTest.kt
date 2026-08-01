@@ -47,11 +47,27 @@ class HttpCachePolicyTest {
   }
 
   @Test
-  fun `stale fallback request is answerable only from cache`() {
-    val fallback = HttpCachePolicy.staleFallbackRequest(cacheableRequest, maxStaleSeconds = 600)
-    assertTrue(fallback.cacheControl.onlyIfCached)
-    assertEquals(600, fallback.cacheControl.maxStaleSeconds)
-    assertEquals(cacheableRequest.url, fallback.url)
+  fun `a cache-only request can never reach the network`() {
+    // Both the fallback after a network failure and Home's cold-open read-ahead are built from
+    // this: `only-if-cached` is what makes a miss cost a disk lookup instead of a round trip.
+    val cacheOnly = HttpCachePolicy.cacheOnlyRequest(cacheableRequest, maxStaleSeconds = 600)
+    assertTrue(cacheOnly.cacheControl.onlyIfCached)
+    assertTrue(!cacheOnly.cacheControl.noStore)
+    assertEquals(600, cacheOnly.cacheControl.maxStaleSeconds)
+    // Same URL, because the URL is the cache key: a read-ahead that asked for anything else would
+    // miss the body the previous load stored.
+    assertEquals(cacheableRequest.url, cacheOnly.url)
+  }
+
+  @Test
+  fun `a fetcher with no cache of its own reports an empty one`() = runBlocking {
+    // The default is what every test fetcher inherits, and it has to mean "nothing stored" rather
+    // than "here is the network answer": a cache-only read is only ever a shortcut past a load that
+    // is about to happen anyway, so a fetcher that cannot cache must send its caller to the network.
+    val fetcher = HttpFetcher { "body" }
+
+    assertNull(fetcher.getCachedOnly("https://api.themoviedb.org/3/trending/movie/week"))
+    assertEquals("body", fetcher.get("https://api.themoviedb.org/3/trending/movie/week"))
   }
 
   @Test

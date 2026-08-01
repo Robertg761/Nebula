@@ -52,6 +52,7 @@
   <string name="player_loading_subtitles">Loading %1$s subtitles\u2026</string>
   <string name="player_subtitle_add_failed">Couldn\u2019t load subtitle.</string>
   <string name="player_subtitles_added">%1$s subtitles added</string>
+  <string name="player_sleep_timer_paused">Sleep timer paused playback</string>
   <string name="player_passthrough_unavailable">Passthrough unavailable on the connected audio device</string>
   <string name="player_audio_route_decode">Audio route changed \u2014 switched to Decode</string>
   <string name="player_software_decoding">This device can\u2019t decode this stream in hardware \u2014 try a lower-resolution release</string>
@@ -85,16 +86,39 @@
   <string name="player_menu_playback_speed">Playback speed</string>
   <string name="player_menu_subtitle_size">Subtitle size</string>
   <string name="player_menu_subtitle_help">Changes text subtitles. Bitmap PGS/DVD subtitles keep their encoded size.</string>
+  <string name="player_menu_subtitle_edge">Subtitle edge</string>
+  <string name="player_menu_subtitle_edge_help">Separates the text from the picture behind it. Bitmap PGS/DVD subtitles are unaffected.</string>
+  <string name="player_menu_subtitle_background">Subtitle background</string>
+  <string name="player_menu_subtitle_background_help">A box behind the text, for bright scenes. Takes the place of the edge outline while it is on.</string>
   <string name="player_menu_audio_output">Audio output</string>
   <string name="player_menu_audio_output_help">Passthrough is session-only and appears only when a receiver reports support.</string>
   <string name="player_menu_audio_delay">Audio delay</string>
   <string name="player_menu_subtitle_delay">Subtitle delay</string>
+  <string name="player_menu_sleep_timer">Sleep timer</string>
+  <string name="player_menu_sleep_timer_off">Off</string>
+  <string name="player_menu_sleep_timer_episode">This episode</string>
+  <plurals name="player_menu_sleep_timer_minutes">
+    <item quantity="one">%1$d min</item>
+    <item quantity="other">%1$d min</item>
+  </plurals>
+  <plurals name="player_menu_sleep_timer_left">
+    <item quantity="one">%1$d min left</item>
+    <item quantity="other">%1$d min left</item>
+  </plurals>
+  <string name="player_menu_sleep_timer_help">Pauses playback when it runs out, or at the end of this episode. Ends when you leave the player.</string>
   <string name="player_menu_speed_help">Lasts until you leave the player.</string>
   <string name="player_menu_delay_help">Per file; reset when you leave this stream.</string>
   <string name="player_menu_subtitle_size_small">Small</string>
   <string name="player_menu_subtitle_size_medium">Medium</string>
   <string name="player_menu_subtitle_size_large">Large</string>
   <string name="player_menu_subtitle_size_huge">Huge</string>
+  <string name="player_menu_subtitle_edge_none">None</string>
+  <string name="player_menu_subtitle_edge_outline">Outline</string>
+  <string name="player_menu_subtitle_edge_shadow">Shadow</string>
+  <string name="player_menu_subtitle_edge_high_contrast">High contrast</string>
+  <string name="player_menu_subtitle_background_off">Off</string>
+  <string name="player_menu_subtitle_background_dim">Dim</string>
+  <string name="player_menu_subtitle_background_solid">Solid</string>
   <string name="player_menu_audio_output_decode">Decode</string>
   <string name="player_menu_audio_output_passthrough">Passthrough</string>
   <string name="player_menu_decrease">Decrease %1$s</string>

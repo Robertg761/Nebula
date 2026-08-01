@@ -43,6 +43,18 @@ data class PlayerPrefs(
   /** A [com.stremioshell.host.tv.player.SubtitleSize] storage name; blank means the default. */
   val subtitleSize: String = "",
   /**
+   * A [com.stremioshell.host.tv.player.SubtitleEdge] storage name; blank means the
+   * default. Stored beside the size because it answers the same question the size
+   * does — whether this room can read the subtitles — and nobody wants to answer
+   * it once per film.
+   */
+  val subtitleEdge: String = "",
+  /**
+   * A [com.stremioshell.host.tv.player.SubtitleBackground] storage name; blank
+   * means the default.
+   */
+  val subtitleBackground: String = "",
+  /**
    * A [com.stremioshell.host.tv.player.AudioOutputMode] storage name; blank means
    * the default. Stored because it describes the room's amplifier rather than the
    * film: a viewer who has an AVR has it for every film they watch.
@@ -70,7 +82,7 @@ class PlayerPrefsStore(private val context: Context) {
    * started. Distinct on the assembled value keeps those out of Compose.
    *
    * No [kotlinx.coroutines.flow.flowOn] here on purpose, unlike the stores in `Stores.kt`: [read]
-   * is seven map lookups, so a dispatcher hop would cost more than the work it moved off the
+   * is nine map lookups, so a dispatcher hop would cost more than the work it moved off the
    * caller.
    */
   val prefs: Flow<PlayerPrefs> = data.map(::read).distinctUntilChanged()
@@ -100,6 +112,14 @@ class PlayerPrefsStore(private val context: Context) {
 
   suspend fun setSubtitleSize(storageName: String) {
     store.edit { it[KEY_SUB_SIZE] = storageName.trim() }
+  }
+
+  suspend fun setSubtitleEdge(storageName: String) {
+    store.edit { it[KEY_SUB_EDGE] = storageName.trim() }
+  }
+
+  suspend fun setSubtitleBackground(storageName: String) {
+    store.edit { it[KEY_SUB_BACKGROUND] = storageName.trim() }
   }
 
   suspend fun setAudioOutput(storageName: String) {
@@ -132,6 +152,8 @@ class PlayerPrefsStore(private val context: Context) {
       it.remove(KEY_AUDIO_LANG)
       it.remove(KEY_SUB_LANG)
       it.remove(KEY_SUB_SIZE)
+      it.remove(KEY_SUB_EDGE)
+      it.remove(KEY_SUB_BACKGROUND)
       it.remove(KEY_AUDIO_OUTPUT)
       it.remove(KEY_AUTO_PLAY_NEXT)
       it.remove(KEY_UP_NEXT_COUNTDOWN_SECONDS)
@@ -142,6 +164,8 @@ class PlayerPrefsStore(private val context: Context) {
     audioLanguage = prefs[KEY_AUDIO_LANG].orEmpty(),
     subtitleLanguage = prefs[KEY_SUB_LANG].orEmpty(),
     subtitleSize = prefs[KEY_SUB_SIZE].orEmpty(),
+    subtitleEdge = prefs[KEY_SUB_EDGE].orEmpty(),
+    subtitleBackground = prefs[KEY_SUB_BACKGROUND].orEmpty(),
     audioOutput = prefs[KEY_AUDIO_OUTPUT].orEmpty(),
     autoPlayNext = prefs[KEY_AUTO_PLAY_NEXT] ?: true,
     upNextCountdownSeconds = PlaybackPreferencePolicy.countdownSeconds(
@@ -156,6 +180,8 @@ class PlayerPrefsStore(private val context: Context) {
     val KEY_AUDIO_LANG = stringPreferencesKey("player_audio_language")
     val KEY_SUB_LANG = stringPreferencesKey("player_subtitle_language")
     val KEY_SUB_SIZE = stringPreferencesKey("player_subtitle_size")
+    val KEY_SUB_EDGE = stringPreferencesKey("player_subtitle_edge")
+    val KEY_SUB_BACKGROUND = stringPreferencesKey("player_subtitle_background")
     val KEY_AUDIO_OUTPUT = stringPreferencesKey("player_audio_output")
     val KEY_AUTO_PLAY_NEXT = booleanPreferencesKey("player_auto_play_next")
     val KEY_UP_NEXT_COUNTDOWN_SECONDS = intPreferencesKey("player_up_next_countdown_seconds")

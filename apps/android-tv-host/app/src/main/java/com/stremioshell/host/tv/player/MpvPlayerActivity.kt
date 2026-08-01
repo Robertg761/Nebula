@@ -508,9 +508,25 @@ class MpvPlayerActivity : ComponentActivity() {
   private val menuVisible = mutableStateOf(false)
   private val menuTab = mutableStateOf(PlayerMenuTab.Audio)
   private val subtitleSize = mutableStateOf(SubtitleSize.DEFAULT)
+  private val subtitleEdge = mutableStateOf(SubtitleEdge.DEFAULT)
+  private val subtitleBackground = mutableStateOf(SubtitleBackground.DEFAULT)
   private val audioOutput = mutableStateOf(AudioOutputMode.DEFAULT)
   private val audioDelaySec = mutableDoubleStateOf(0.0)
   private val subtitleDelaySec = mutableDoubleStateOf(0.0)
+
+  /**
+   * The sleep timer, and the [SystemClock.uptimeMillis] its armed runnable is due
+   * at - zero when nothing is counting down.
+   *
+   * Session state, and the one option here that is neither persisted nor per
+   * file: it outlives an episode transition on purpose (see [resetFileRuntime]),
+   * and dies with the activity, which is the whole contract of a timer set for
+   * one evening. The deadline is a plain field because it only ever moves when
+   * [sleepTimer] does, so the composition that reads the state reads a matching
+   * deadline.
+   */
+  private val sleepTimer = mutableStateOf(SleepTimer.DEFAULT)
+  private var sleepTimerDueAtMs = 0L
 
   /**
    * Whether this file's Dolby Vision notice has been shown. Per file, and reset in
@@ -621,6 +637,34 @@ class MpvPlayerActivity : ComponentActivity() {
       saveWatchState(SaveReason.Progress)
       scheduleProgressSave()
     }
+  }
+
+  /**
+   * Stops the evening where the viewer stopped watching it; see [setSleepTimer].
+   *
+   * Pauses rather than leaves. A timer running out is a guess about someone who
+   * may well still be awake, and finishing the activity would throw away the
+   * stream, the tracks and the position that a single press of OK otherwise
+   * carries straight on with. Through [pausePlayback] so audio focus, the screen
+   * flag and the resume point are left exactly as they are by a pause the viewer
+   * asked for; [showOsdMessage] both names what happened and brings the controls
+   * up, because a paused player that says nothing is indistinguishable from a
+   * stream that has frozen.
+   */
+  private val sleepTimerRunnable = Runnable {
+    // Cleared first and unconditionally: whatever state the player is in, this
+    // deadline has passed and the row must not go on offering to count it down.
+    sleepTimer.value = SleepTimer.DEFAULT
+    sleepTimerDueAtMs = 0L
+    if (!mpvCreated || finishing) return@Runnable
+    // An episode that ended a moment before this has a card counting down on it,
+    // and pausing a video that has already finished would leave that countdown to
+    // start the next episode anyway - the one thing the timer exists to prevent.
+    // The card itself stays up, without its clock, exactly as it does when the
+    // player is backgrounded.
+    freezeUpNextCountdown()
+    pausePlayback()
+    showOsdMessage(getString(R.string.player_sleep_timer_paused))
   }
 
   /**
@@ -1075,6 +1119,12 @@ class MpvPlayerActivity : ComponentActivity() {
       // The starting size, replaced by the stored one a moment later. Medium is 44,
       // which is the size the player used to give everyone.
       MPVLib.setOptionString("sub-font-size", SubtitleSize.DEFAULT.fontSize.toString())
+      // The starting edge and background, replaced by the stored ones alongside
+      // the size. Both defaults are what mpv would have done unasked, so the
+      // subtitles a viewer who has never opened either row sees are the ones this
+      // player has always drawn.
+      val subtitleStyle = SubtitleEdge.DEFAULT.mpvOptions + SubtitleBackground.DEFAULT.mpvOptions
+      subtitleStyle.forEach { (name, value) -> MPVLib.setOptionString(name, value) }
       MPVLib.setOptionString("keep-open", "yes")
       MPVLib.setOptionString("force-window", "no")
       MPVLib.init()
@@ -1259,8 +1309,8 @@ class MpvPlayerActivity : ComponentActivity() {
 
   /**
    * Drops every event and piece of UI that belongs to the file being replaced. The selected
-   * playback speed and stored language/size/output preferences intentionally survive an episode
-   * transition; delays and track lists do not.
+   * playback speed, the sleep timer and stored language/size/output preferences intentionally
+   * survive an episode transition; delays and track lists do not.
    */
   private fun resetFileRuntime(
     clearUpNext: Boolean,
@@ -1394,8 +1444,8 @@ class MpvPlayerActivity : ComponentActivity() {
   }.getOrDefault(0L)
 
   /**
-   * Reads the stored audio/subtitle languages, subtitle size and audio output
-   * mode, and hands them to mpv before the file is opened.
+   * Reads the stored audio/subtitle languages, the subtitle size and style, and
+   * the audio output mode, and hands them to mpv before the file is opened.
    *
    * The read is asynchronous and `loadfile` cannot run ahead of it — mpv reads
    * `alang`/`slang` when it opens a file, so applying them afterwards would do
@@ -1419,6 +1469,10 @@ class MpvPlayerActivity : ComponentActivity() {
     osdOpens.intValue = prefs.osdOpens
     val size = SubtitleSize.fromStorage(prefs.subtitleSize)
     subtitleSize.value = size
+    val edge = SubtitleEdge.fromStorage(prefs.subtitleEdge)
+    subtitleEdge.value = edge
+    val background = SubtitleBackground.fromStorage(prefs.subtitleBackground)
+    subtitleBackground.value = background
     val requestedOutput = AudioOutputMode.fromStorage(prefs.audioOutput)
     // A persisted passthrough choice is a preference, never proof that this particular route can
     // carry it. Honour it only when Android reports compatible codecs for the active media route;
@@ -1437,6 +1491,8 @@ class MpvPlayerActivity : ComponentActivity() {
     if (mpvCreated && !finishing) {
       applyTrackPreferencesForNextFile()
       MPVLib.setPropertyString("sub-font-size", size.fontSize.toString())
+      applySubtitleStyle(edge.mpvOptions)
+      applySubtitleStyle(background.mpvOptions)
       // Read when mpv builds the audio chain, which is at file open — so like
       // `alang` this only lands because the gate below holds `loadfile` back
       // until it has. A mid-file change needs [reselectAudioTrack] instead.
@@ -1891,11 +1947,22 @@ class MpvPlayerActivity : ComponentActivity() {
    */
   private fun offerUpNext(pausedByViewer: Boolean) {
     val target = upNextTarget.value
+    // "Sleep after this episode" is spent here, on the ending it was armed for. It
+    // rides in as "autoplay is off for this offer" rather than as a case of its
+    // own: the card, its focus and the press that reaches the next episode are all
+    // exactly what a viewer with autoplay switched off already gets, and only the
+    // clock on it has to go.
+    val sleepTimerAtEnding = sleepTimer.value
+    val sleepTimerAfterEnding = SleepTimer.afterEnding(sleepTimerAtEnding)
+    // Guarded rather than set unconditionally: a timed option is unchanged by an
+    // ending, and handing it back to [setSleepTimer] would restart its countdown
+    // from the credits of every episode.
+    if (sleepTimerAfterEnding != sleepTimerAtEnding) setSleepTimer(sleepTimerAfterEnding)
     val offer = UpNextPolicy.offer(
       hasNext = target != null,
       paused = pausedByViewer,
       msSinceInteractionMs = SystemClock.uptimeMillis() - lastInteractionMs,
-      autoPlayNext = playerPrefs.autoPlayNext,
+      autoPlayNext = playerPrefs.autoPlayNext && SleepTimer.autoPlaysNext(sleepTimerAtEnding),
       countdownMs = playerPrefs.upNextCountdownSeconds * 1_000L,
     )
     if (target == null || offer == UpNextPolicy.Offer.None) {
@@ -2200,9 +2267,16 @@ class MpvPlayerActivity : ComponentActivity() {
       subtitleRows = MpvTracks.subtitleRows(tracks.value),
       speed = playbackSpeed.doubleValue,
       subtitleSize = subtitleSize.value,
+      subtitleEdge = subtitleEdge.value,
+      subtitleBackground = subtitleBackground.value,
       audioOutput = audioOutput.value,
       audioDelaySec = audioDelaySec.doubleValue,
       subtitleDelaySec = subtitleDelaySec.doubleValue,
+      sleepTimer = sleepTimer.value,
+      // Read here rather than observed: this recomposes when the menu opens and on
+      // every press that changes an option, which is every moment the number is
+      // being looked at, and it costs nothing in between.
+      sleepTimerRemainingMs = sleepTimerRemainingMs(),
       externalSubtitles = externalSubtitles.value,
     )
     val actions = remember {
@@ -2212,9 +2286,12 @@ class MpvPlayerActivity : ComponentActivity() {
         onSelectSubtitle = { noteInteraction(); selectSubtitleTrack(it) },
         onSpeedStep = { noteInteraction(); stepPlaybackSpeed(it) },
         onSubtitleSizeStep = { noteInteraction(); stepSubtitleSize(it) },
+        onSubtitleEdgeStep = { noteInteraction(); stepSubtitleEdge(it) },
+        onSubtitleBackgroundStep = { noteInteraction(); stepSubtitleBackground(it) },
         onAudioOutputStep = { noteInteraction(); stepAudioOutput(it) },
         onAudioDelayStep = { noteInteraction(); stepAudioDelay(it) },
         onSubtitleDelayStep = { noteInteraction(); stepSubtitleDelay(it) },
+        onSleepTimerStep = { noteInteraction(); stepSleepTimer(it) },
         onFetchExternalSubtitles = { noteInteraction(); fetchExternalSubtitles() },
         onSelectExternalSubtitle = { noteInteraction(); addExternalSubtitle(it) },
         onInteraction = ::noteInteraction,
@@ -4030,6 +4107,44 @@ class MpvPlayerActivity : ComponentActivity() {
     persistenceScope.launch { runCatching { store.setSubtitleSize(next.storageName) } }
   }
 
+  private fun stepSubtitleEdge(steps: Int) {
+    if (!mpvCreated) return
+    val next = SubtitleEdge.stepped(subtitleEdge.value, steps)
+    if (next == subtitleEdge.value) return
+    subtitleEdge.value = next
+    runMpvMutationOffMain { applySubtitleStyle(next.mpvOptions) }
+    playerPrefs = playerPrefs.copy(subtitleEdge = next.storageName)
+    val store = playerPrefsStore
+    persistenceScope.launch { runCatching { store.setSubtitleEdge(next.storageName) } }
+  }
+
+  private fun stepSubtitleBackground(steps: Int) {
+    if (!mpvCreated) return
+    val next = SubtitleBackground.stepped(subtitleBackground.value, steps)
+    if (next == subtitleBackground.value) return
+    subtitleBackground.value = next
+    // Only this row's own property, so that the write carries no snapshot of the
+    // edge row: the two are set independently and libass re-renders from whatever
+    // combination it is holding.
+    runMpvMutationOffMain { applySubtitleStyle(next.mpvOptions) }
+    playerPrefs = playerPrefs.copy(subtitleBackground = next.storageName)
+    val store = playerPrefsStore
+    persistenceScope.launch { runCatching { store.setSubtitleBackground(next.storageName) } }
+  }
+
+  /**
+   * Writes one subtitle style step, in the spelling [SubtitleEdge.mpvOptions] and
+   * [SubtitleBackground.mpvOptions] give it.
+   *
+   * Called both on the main thread from [applyPlayerPrefs], where the stored value
+   * has to land before `loadfile`, and from a worker hop on a press. Property
+   * writes only, with no demuxer involvement, so neither caller can block on the
+   * other's work.
+   */
+  private fun applySubtitleStyle(options: List<Pair<String, String>>) {
+    options.forEach { (name, value) -> MPVLib.setPropertyString(name, value) }
+  }
+
   /**
    * Switches between decoding here and handing the bitstream to the sink, and
    * remembers the choice: an AVR is a property of the room, not of the film.
@@ -4170,6 +4285,39 @@ class MpvPlayerActivity : ComponentActivity() {
     val next = DelaySteps.stepped(subtitleDelaySec.doubleValue, steps)
     subtitleDelaySec.doubleValue = next
     runMpvMutationOffMain { MPVLib.setPropertyDouble("sub-delay", next) }
+  }
+
+  /**
+   * No [mpvCreated] guard, unlike every other row: this one asks nothing of the
+   * core until it fires, and [sleepTimerRunnable] checks for itself by then.
+   */
+  private fun stepSleepTimer(steps: Int) {
+    val next = SleepTimer.stepped(sleepTimer.value, steps)
+    if (next == sleepTimer.value) return
+    setSleepTimer(next)
+  }
+
+  /**
+   * Arms, re-arms or disarms the timer. Any change starts the new duration from
+   * now: a viewer stepping from 30 to 60 minutes twenty minutes in means an hour
+   * more television, not another forty minutes.
+   *
+   * The pending runnable is removed explicitly even though `onDestroy`'s
+   * `removeCallbacksAndMessages(null)` would eventually get it, because between
+   * two selections there is no teardown to rely on and a stale deadline would
+   * pause the film at the old time.
+   */
+  private fun setSleepTimer(option: SleepTimer) {
+    mainHandler.removeCallbacks(sleepTimerRunnable)
+    sleepTimer.value = option
+    sleepTimerDueAtMs = if (option.isTimed) SystemClock.uptimeMillis() + option.durationMs else 0L
+    if (option.isTimed) mainHandler.postDelayed(sleepTimerRunnable, option.durationMs)
+  }
+
+  /** What an armed timer has left; see [PlayerMenuState.sleepTimerRemainingMs]. */
+  private fun sleepTimerRemainingMs(): Long? {
+    if (!sleepTimer.value.isTimed) return null
+    return (sleepTimerDueAtMs - SystemClock.uptimeMillis()).coerceAtLeast(0L)
   }
 
   /**

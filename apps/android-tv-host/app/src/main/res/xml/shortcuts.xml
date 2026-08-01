@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Static launcher shortcuts, declared from the manifest's LEANBACK_LAUNCHER entry.
+
+  Both intents name the component explicitly (targetPackage is the applicationId,
+  com.stremioshell.host.tv; targetClass is the real class behind the .TvLauncherActivity alias). That
+  is what makes the Settings one work: TvAppActivity's VIEW filter only declares the watch-next host,
+  so stremio-tv://settings resolves by component here, not by filter, and LaunchIntents routes it on
+  the data string once it arrives. The search shortcut sends the same ACTION_SEARCH the Assistant does,
+  with no query attached, which LaunchIntents already reads as "the viewer asked for search" and lands
+  on the empty field.
+
+  Ordering is the ranking: Search sits closest to the app icon because it is the one worth reaching for
+  without opening the app first. Both are enabled unconditionally, so neither needs a disabled message.
+
+  Static shortcuts cannot be removed by the launcher, only disabled by an app update, so this list stays
+  small and stays at destinations that exist regardless of setup state - a shortcut into a screen that
+  needs a TMDB key would dead-end on a first run.
+-->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+  <shortcut
+    android:enabled="true"
+    android:icon="@drawable/ic_shortcut_search"
+    android:shortcutId="search"
+    android:shortcutLongLabel="@string/shortcut_search_long_label"
+    android:shortcutShortLabel="@string/shortcut_search_short_label">
+    <intent
+      android:action="android.intent.action.SEARCH"
+      android:targetClass="com.stremioshell.host.tv.TvAppActivity"
+      android:targetPackage="com.stremioshell.host.tv" />
+  </shortcut>
+
+  <shortcut
+    android:enabled="true"
+    android:icon="@drawable/ic_shortcut_settings"
+    android:shortcutId="settings"
+    android:shortcutLongLabel="@string/shortcut_settings_long_label"
+    android:shortcutShortLabel="@string/shortcut_settings_short_label">
+    <intent
+      android:action="android.intent.action.VIEW"
+      android:data="stremio-tv://settings"
+      android:targetClass="com.stremioshell.host.tv.TvAppActivity"
+      android:targetPackage="com.stremioshell.host.tv" />
+  </shortcut>
+</shortcuts>

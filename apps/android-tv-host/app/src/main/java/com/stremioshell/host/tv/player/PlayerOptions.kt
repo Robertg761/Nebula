@@ -88,6 +88,118 @@ enum class SubtitleSize(val storageName: String, val label: String, val fontSize
 }
 
 /**
+ * What separates the glyphs from the picture behind them, as the mpv properties
+ * libass draws them with.
+ *
+ * [Outline] is mpv's own defaults — a border of 3 and no drop shadow — which is
+ * what the player has always shipped, so an existing viewer's subtitles do not
+ * change shape under them.
+ *
+ * The ladder runs from nothing around the letters to the most ink around them.
+ * [None] is for a clean encode on a dark picture, where an outline is only
+ * thickening text that was already legible; [HighContrast] is what keeps white
+ * subtitles readable over snow, sand and a credit roll.
+ */
+enum class SubtitleEdge(
+  val storageName: String,
+  val label: String,
+  /** `sub-border-size`, in the same scaled pixels as `sub-font-size`. */
+  val borderSize: Int,
+  /** `sub-shadow-offset`; 0 draws no drop shadow at all. */
+  val shadowOffset: Int,
+) {
+  None("none", "None", 0, 0),
+  Outline("outline", "Outline", 3, 0),
+  Shadow("shadow", "Shadow", 1, 3),
+  HighContrast("high-contrast", "High contrast", 5, 0),
+  ;
+
+  /**
+   * This step as mpv property names and values.
+   *
+   * The names live here and nowhere else. The player writes them at three points
+   * — as options before `init`, as properties when the stored value arrives, and
+   * again on every press of the row — and a name that had drifted between two of
+   * those sites would fail silently, because mpv reports an unknown property by
+   * returning an error nothing on this path reads.
+   */
+  val mpvOptions: List<Pair<String, String>>
+    get() = listOf(
+      "sub-border-size" to borderSize.toString(),
+      "sub-shadow-offset" to shadowOffset.toString(),
+      // Written by the steps with no shadow too, so that [Shadow] draws against a
+      // value this ladder states rather than one an mpv release is free to move.
+      "sub-shadow-color" to SHADOW_COLOR,
+    )
+
+  companion object {
+    val DEFAULT = Outline
+
+    /** Opaque black: a shadow that is not darker than the picture is not a shadow. */
+    private const val SHADOW_COLOR = "#000000"
+
+    /** The stored name, falling back to [DEFAULT] for anything unrecognised. */
+    fun fromStorage(name: String?): SubtitleEdge {
+      val key = name?.trim()?.lowercase(Locale.ROOT).orEmpty()
+      return entries.firstOrNull { it.storageName == key } ?: DEFAULT
+    }
+
+    /** [steps] places along the ladder, stopping at either end, as [SubtitleSize]. */
+    fun stepped(current: SubtitleEdge, steps: Int): SubtitleEdge {
+      val index = (current.ordinal + steps).coerceIn(0, entries.lastIndex)
+      return entries[index]
+    }
+  }
+}
+
+/**
+ * A box behind the subtitles, as mpv's `sub-back-color`.
+ *
+ * [Off] is mpv's default and therefore the shipped look, for the same reason
+ * [SubtitleEdge.Outline] is: a viewer who never opens these rows keeps the
+ * subtitles this player has always drawn.
+ *
+ * A box that is not fully transparent changes what [SubtitleEdge] does: mpv
+ * hands libass its box border style as soon as this has any alpha, and the
+ * edge's border becomes the padding around the box rather than an outline around
+ * each letter. The two rows stay independent settings — the edge is what shows
+ * through while this is [Off], and how much room the box leaves once it is not.
+ */
+enum class SubtitleBackground(
+  val storageName: String,
+  val label: String,
+  /** `sub-back-color`, as mpv's `#AARRGGBB`, where alpha `FF` is opaque. */
+  val backColor: String,
+) {
+  Off("off", "Off", "#00000000"),
+  // Half alpha: enough that the text sits on something, little enough that the
+  // part of the picture it covers is still being watched through it.
+  Dim("dim", "Dim", "#80000000"),
+  Solid("solid", "Solid", "#FF000000"),
+  ;
+
+  /** As [SubtitleEdge.mpvOptions]: the property name lives here and nowhere else. */
+  val mpvOptions: List<Pair<String, String>>
+    get() = listOf("sub-back-color" to backColor)
+
+  companion object {
+    val DEFAULT = Off
+
+    /** The stored name, falling back to [DEFAULT] for anything unrecognised. */
+    fun fromStorage(name: String?): SubtitleBackground {
+      val key = name?.trim()?.lowercase(Locale.ROOT).orEmpty()
+      return entries.firstOrNull { it.storageName == key } ?: DEFAULT
+    }
+
+    /** [steps] places along the ladder, stopping at either end, as [SubtitleSize]. */
+    fun stepped(current: SubtitleBackground, steps: Int): SubtitleBackground {
+      val index = (current.ordinal + steps).coerceIn(0, entries.lastIndex)
+      return entries[index]
+    }
+  }
+}
+
+/**
  * Where the soundtrack is decoded: here, or by whatever is on the other end of
  * the HDMI cable.
  *
@@ -203,5 +315,80 @@ object DelaySteps {
       ms < 0 -> "$ms ms"
       else -> "0 ms"
     }
+  }
+}
+
+/**
+ * How much longer the player keeps going before it stops itself.
+ *
+ * Session state and deliberately never persisted: a timer is a statement about
+ * this evening, and one that came back on the next launch would pause a film
+ * nobody asked it to. It does survive an episode transition, because "sleep in
+ * thirty minutes" is thirty minutes of television rather than thirty minutes of
+ * whichever episode happened to be playing when it was set.
+ *
+ * [AfterEpisode] is the same statement without a clock. It has no duration to
+ * schedule: the ending is the deadline, and what it changes is that the ending
+ * offers the next episode without starting it.
+ *
+ * A short ladder for the reason [PlaybackSpeeds] is one: every value has to be a
+ * couple of D-pad presses from either end of it.
+ */
+enum class SleepTimer(val durationMs: Long) {
+  Off(0L),
+  Minutes15(15L * 60_000L),
+  Minutes30(30L * 60_000L),
+  Minutes60(60L * 60_000L),
+  Minutes90(90L * 60_000L),
+  AfterEpisode(0L),
+  ;
+
+  /** Whether arming this one means a deadline the player has to schedule. */
+  val isTimed: Boolean get() = durationMs > 0L
+
+  /** The whole minutes on the face of the option, for the menu's label. */
+  val minutes: Int get() = (durationMs / 60_000L).toInt()
+
+  companion object {
+    val DEFAULT = Off
+
+    /** [steps] places along the ladder, stopping at either end, as [SubtitleSize]. */
+    fun stepped(current: SleepTimer, steps: Int): SleepTimer {
+      val index = (current.ordinal + steps).coerceIn(0, entries.lastIndex)
+      return entries[index]
+    }
+
+    /**
+     * Whole minutes left on an armed timer, rounded up so that the last part
+     * minute still reads as one: a label that said "0 min" would be reporting an
+     * evening that has not ended yet. Zero only once the deadline itself has
+     * passed, which is the moment the timer is about to fire.
+     */
+    fun minutesLeft(remainingMs: Long): Int {
+      if (remainingMs <= 0L) return 0
+      val roundedUp = remainingMs / 60_000L + if (remainingMs % 60_000L == 0L) 0L else 1L
+      return roundedUp.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+    }
+
+    /**
+     * Whether an ending under [current] may start the next episode on its own.
+     *
+     * The only thing [AfterEpisode] changes about the end of an episode: the card
+     * still appears, and the next episode is still one press away. Suppressing
+     * the offer as well would leave a viewer who is awake after all with nothing
+     * on screen but a stopped player.
+     */
+    fun autoPlaysNext(current: SleepTimer): Boolean = current != AfterEpisode
+
+    /**
+     * The timer an ending leaves behind. [AfterEpisode] is spent on the ending it
+     * was armed for, whether or not there was anything to play next.
+     *
+     * One-shot on purpose: left armed it would also stop the episode after the
+     * one the viewer asked about, which is a different request from the one the
+     * row makes and one nothing on screen would explain the second time.
+     */
+    fun afterEnding(current: SleepTimer): SleepTimer =
+      if (current == AfterEpisode) DEFAULT else current
   }
 }

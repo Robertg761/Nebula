@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -22,9 +23,11 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Info
@@ -50,6 +53,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -100,6 +104,8 @@ import com.stremioshell.host.tv.ui.theme.NebulaPalette
 import com.stremioshell.host.tv.ui.theme.NebulaShapes
 import com.stremioshell.host.tv.ui.theme.NebulaSpace
 import java.util.Locale
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -177,6 +183,13 @@ fun SettingsScreen(
   var pendingAppReset by remember { mutableStateOf(false) }
   var pendingAppResetFeedback by remember { mutableStateOf<String?>(null) }
   var addonEditTick by remember { mutableIntStateOf(0) }
+  // Which addon a reorder is holding focus for, and the direction that was pressed. Identity is
+  // the URL rather than the index, because the index is the one thing the press changed. Never
+  // cleared: the target simply follows the last addon that moved, and a row that is removed takes
+  // it with it. See the recovery effect below for why it exists at all.
+  var movedAddonUrl by remember { mutableStateOf<String?>(null) }
+  var movedAddonDirection by remember { mutableIntStateOf(0) }
+  var addonMoveTick by remember { mutableIntStateOf(0) }
   var playbackControls by remember { mutableStateOf<PlayerPrefs?>(null) }
   var playbackMutationInFlight by remember { mutableStateOf(false) }
   val currentOnSaveComplete by rememberUpdatedState(onSaveComplete)
@@ -189,15 +202,25 @@ fun SettingsScreen(
   val playback = playbackControls ?: storedPlayerPrefs ?: PlayerPrefs()
   val playbackSubtitleSize = SubtitleSize.fromStorage(playback.subtitleSize)
   val playbackAudioOutput = AudioOutputMode.fromStorage(playback.audioOutput)
-  val scrollState = rememberScrollState()
+  val listState = rememberLazyListState()
+  // Own scope, not the one the diagnostics export borrows: these coroutines are the D-pad's
+  // recovery path and must not be cancelled or queued behind a share sheet.
+  val focusScope = rememberCoroutineScope()
+  // Whether any control in the form holds focus. Read by the two effects that scroll the page on
+  // their own initiative, so they can tell "the viewer was on a node we just disposed" from "a
+  // dialog owns focus and this scroll is happening behind it".
+  var formFocused by remember { mutableStateOf(false) }
 
   // Mostly the nodes a text field has to aim at: button-to-button moves are left to the default
   // focus search, which handles them, while a text field is the one thing on the screen that
-  // would swallow the key first. The exception is addButtonFocus, which is also where focus is
-  // sent after a removal destroys the row it was sitting on.
+  // would swallow the key first. Two of them are not that: addButtonFocus is also where focus is
+  // sent after a removal destroys the row it was sitting on, and movedAddonFocus belongs to no
+  // fixed node at all - it migrates to whichever control of whichever row now holds the addon a
+  // reorder just moved.
   val pairInitialFocus = rememberInitialFocusTarget()
   val clearKeyFocus = rememberInitialFocusTarget()
   val lastRemoveFocus = rememberInitialFocusTarget()
+  val movedAddonFocus = rememberInitialFocusTarget()
   val addonRevealFocus = rememberInitialFocusTarget()
   val addButtonFocus = rememberInitialFocusTarget()
   val audioLanguageFocus = rememberInitialFocusTarget()
@@ -206,6 +229,31 @@ fun SettingsScreen(
   val advancedFocus = rememberInitialFocusTarget()
   val subtitlesRevealFocus = rememberInitialFocusTarget()
   val saveFocus = rememberInitialFocusTarget()
+
+  // Which row of the list composes each of those targets. Every explicit focus jump on this screen
+  // goes through here, because a target whose section is scrolled off no longer exists - see
+  // [SettingsFocusJumper]. The targets are remembered objects whose identity never changes, so the
+  // map is built once for the life of the screen.
+  val focusJumper = remember(listState) {
+    SettingsFocusJumper(
+      scope = focusScope,
+      listState = listState,
+      itemOf = mapOf(
+        pairInitialFocus to SettingsItem.QuickSetup,
+        clearKeyFocus to SettingsItem.Tmdb,
+        lastRemoveFocus to SettingsItem.Addons,
+        movedAddonFocus to SettingsItem.Addons,
+        addonRevealFocus to SettingsItem.Addons,
+        addButtonFocus to SettingsItem.Addons,
+        audioLanguageFocus to SettingsItem.Playback,
+        subtitleLanguageFocus to SettingsItem.Playback,
+        playbackLanguageSaveFocus to SettingsItem.Playback,
+        advancedFocus to SettingsItem.Advanced,
+        subtitlesRevealFocus to SettingsItem.Advanced,
+        saveFocus to SettingsItem.Save,
+      ),
+    )
+  }
 
   LaunchedEffect(resetRequest, storedKey, storedSubtitles) {
     if (
@@ -286,16 +334,36 @@ fun SettingsScreen(
   // is still settling - the addon list and the seeded field values arrive a frame or two later, so
   // the distance computed is against a layout that no longer exists by the time it animates. The
   // measured result was Settings opening with its own heading cut in half by the top edge, which
-  // is exactly where a viewer looks first. A single scrollTo(0) does not fix it either, because
-  // the bringIntoView animation finishes afterwards and puts it back.
+  // is exactly where a viewer looks first. A single scroll to the top does not fix it either,
+  // because the bringIntoView animation finishes afterwards and puts it back.
   //
   // So the page is held at its top until the viewer actually drives - the same one-shot idiom
   // HomeScreen uses to stop a late-arriving rail from yanking focus. The moment they press a
   // direction, the scroll is theirs.
+  //
+  // The lazy list states the same position as two numbers rather than one, and both have to be
+  // watched: an item-sized nudge and a sub-item one are equally capable of cutting the heading.
   var userNavigated by remember { mutableStateOf(false) }
   LaunchedEffect(userNavigated) {
     if (userNavigated) return@LaunchedEffect
-    snapshotFlow { scrollState.value }.collect { if (it != 0) scrollState.scrollTo(0) }
+    snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
+      .collect { (index, offset) ->
+        if (index != 0 || offset != 0) listState.scrollToItem(0)
+      }
+  }
+
+  // The return trip deserves the same courtesy as the arrival: walking focus back up the form
+  // stops at the first control, and bringIntoView reveals exactly that control's rect - which
+  // leaves the screen's own heading cut off one item above it. When focus comes back to the
+  // top control after the viewer has driven away, put the heading back on screen too.
+  LaunchedEffect(Unit) {
+    snapshotFlow { pairInitialFocus.focused }.collect { focused ->
+      // Both coordinates, for the same reason the hold-at-top watches both: a heading cut off
+      // by half an item is exactly as absent as one whole items away.
+      val scrolled = listState.firstVisibleItemIndex > 0 ||
+        listState.firstVisibleItemScrollOffset > 0
+      if (focused && userNavigated && scrolled) listState.animateScrollToItem(0)
+    }
   }
 
   // Removing a row destroys the node focus is sitting on, and the confirmation dialog owns focus
@@ -303,19 +371,70 @@ fun SettingsScreen(
   // button is the nearest live target. Without it the D-pad is dead after a removal.
   LaunchedEffect(addonEditTick) {
     if (addonEditTick == 0) return@LaunchedEffect
-    repeat(10) {
+    repeat(FocusRecoveryFrames) {
       withFrameNanos { }
       if (addButtonFocus.focused) return@LaunchedEffect
       runCatching { addButtonFocus.requester.requestFocus() }
     }
+    // Since the page became a lazy list the Add button can also be gone rather than merely busy:
+    // a viewer who scrolled the addon card off while the dialog was up leaves this requester
+    // attached to nothing. Bring the card back rather than ending a removal with a dead D-pad.
+    focusJumper.jump(addButtonFocus)
+  }
+
+  // The same problem one step gentler: a reorder does not destroy the row focus is on, it moves it.
+  // The row is keyed by URL, so its subtree survives the reshuffle - but the button that was
+  // pressed can be disabled by the very press that moved it, because an addon that reaches the top
+  // has no Up left and one that reaches the bottom has no Down, and a disabled node cannot hold
+  // focus. That strands the D-pad at exactly the two positions a viewer reorders towards.
+  //
+  // So movedAddonFocus migrates: the row owning movedAddonUrl claims it on whichever of its two
+  // controls is still live (see [addonMoveControl]), and this asks that node for focus. Unlike the
+  // removal recovery it does not stop at the first frame that reports focus - the write callback,
+  // the list emission and the relayout land on different frames, so a request satisfied against the
+  // pre-move layout can be undone a frame later. Re-asking for the whole budget gives the settled
+  // list the last word; a request is skipped on any frame the target already holds focus, so a move
+  // that lands immediately costs nothing but the check.
+  LaunchedEffect(addonMoveTick) {
+    if (addonMoveTick == 0) return@LaunchedEffect
+    var requested = false
+    var recovered = false
+    repeat(FocusRecoveryFrames) {
+      withFrameNanos { }
+      when {
+        // Focus is where it belongs. Only counts as a recovery once we have actually asked for
+        // it: the first frames of a move are the pressed button still holding focus, which says
+        // nothing about where the reshuffle will leave it.
+        movedAddonFocus.focused -> if (requested) recovered = true
+        movedAddonFocus.placed -> {
+          requested = true
+          runCatching { movedAddonFocus.requester.requestFocus() }
+        }
+      }
+    }
+    // And the same last resort, for the same reason: the addon card can have been scrolled off
+    // while the write was in flight, which leaves this requester attached to nothing at all.
+    // Skipped once a recovery has landed, so a viewer who moved on within the budget - the row is
+    // theirs again the moment focus returns to it - is not dragged back to it.
+    if (!recovered && !movedAddonFocus.focused) focusJumper.jump(movedAddonFocus)
   }
 
   // The strip renders under Save, which is now the last thing on the page. Nothing below Save is
   // focusable, so no bringIntoView would ever pull the result of the press into view on a screen
   // taller than the viewport. Keyed on the status so it only fires for a save, never for the
   // in-card notices, which appear beside the button that produced them.
+  //
+  // Save is the last item, and a lazy list will not scroll past its own end, so asking for that
+  // item is the same destination the old animateScrollTo(maxValue) reached. What is new is that
+  // the scroll can dispose whatever the viewer was focused on - the watchdog fires a minute after
+  // the press, from anywhere on the page - so focus is handed to Save when the form had it and
+  // lost it on the way down. A save started from the leave dialog is left alone: the form never
+  // held focus, so nothing here takes it away from the dialog.
   LaunchedEffect(saveStatus) {
-    if (saveStatus.isNotBlank()) scrollState.animateScrollTo(scrollState.maxValue)
+    if (saveStatus.isBlank()) return@LaunchedEffect
+    val hadFocus = formFocused
+    listState.animateScrollToItem(SettingsItem.Save.ordinal)
+    if (hadFocus && !formFocused) focusJumper.jump(saveFocus)
   }
 
   // Draft text counts even where the save guard will protect a stored key. Otherwise deleting the
@@ -380,7 +499,10 @@ fun SettingsScreen(
           context.getString(R.string.settings_addon_draft_pending),
           StatusTone.Caution,
         )
-        runCatching { addButtonFocus.requester.requestFocus() }
+        // The notice it just wrote is inside the addon card, which the viewer is standing on Save
+        // to have missed entirely. The jump scrolls that card back before asking for focus, so the
+        // refusal is answered where the answer is written.
+        focusJumper.jump(addButtonFocus)
         currentOnSaveComplete(false)
       } else {
         val attempt = saveAttempt + 1
@@ -446,7 +568,20 @@ fun SettingsScreen(
     }
   }
 
-  Column(
+  // Deliberately a plain LazyColumn with no LocalBringIntoViewSpec override. Home provides one
+  // because its rails want a fixed focus line; this page is a stack of cards of wildly different
+  // heights, and a vertical spec is also inherited by every text field on it as that field's own
+  // horizontal spec. The default "scroll the minimum needed" is what the focus behaviour above was
+  // measured against.
+  LazyColumn(
+    state = listState,
+    verticalArrangement = Arrangement.spacedBy(NebulaDimens.RailGap),
+    // Where the Column applied its padding: inside the scroll container, so the screen margins
+    // scroll with the content instead of cropping it.
+    contentPadding = PaddingValues(
+      horizontal = NebulaDimens.ScreenEdge,
+      vertical = NebulaDimens.ScreenEdgeVertical,
+    ),
     modifier = Modifier
       .fillMaxSize()
       // Observed only, never consumed: notes that the viewer is driving, which releases the
@@ -457,890 +592,948 @@ fun SettingsScreen(
         }
         false
       }
-      .verticalScroll(scrollState)
-      .padding(
-        horizontal = NebulaDimens.ScreenEdge,
-        vertical = NebulaDimens.ScreenEdgeVertical,
-      ),
-    verticalArrangement = Arrangement.spacedBy(NebulaDimens.RailGap),
+      // Whether anything in the form holds focus at all. A programmatic scroll can now dispose
+      // the node the viewer was sitting on, and this is what tells that apart from a scroll that
+      // ran while a dialog or the nav rail owned focus and must not be interrupted.
+      .onFocusChanged { formFocused = it.hasFocus },
   ) {
-    // ScreenHeader pads itself to the content line and hangs its tick in the margin, so it
-    // expects a container with no padding of its own. This Column has already padded to
-    // ScreenEdge, which would indent the heading a second time; the offset cancels exactly that,
-    // landing the words flush with the cards below and the tick TickInset to their left.
-    ScreenHeader(
-      title = stringResource(R.string.nav_settings),
-      // The only place the running build is stated anywhere in the app; without it the owner of a
-      // sideloaded, self-updating APK cannot find out what they have without adb.
-      subtitle = stringResource(
-        R.string.settings_version,
-        stringResource(R.string.app_name),
-        BuildConfig.VERSION_NAME,
-      ),
-      modifier = Modifier.offset(x = -NebulaDimens.ScreenEdge),
-    )
-
-    SettingsSection(
-      title = stringResource(R.string.settings_quick_setup_title),
-      description = stringResource(R.string.settings_quick_setup_description),
-    ) {
-      NebulaButton(
-        // Same words as the button on Home that opens the same screen. It used to carry a
-        // parenthetical here and not there, which is two names for one destination.
-        text = stringResource(R.string.home_action_setup_phone),
-        onClick = onPairWithPhone,
-        icon = Icons.Filled.Phone,
-        modifier = Modifier.initialFocusTarget(pairInitialFocus),
-      )
-    }
-
-    SettingsSection(
-      title = stringResource(R.string.settings_tmdb_title),
-      description = stringResource(
-        R.string.settings_tmdb_description,
-        stringResource(R.string.app_name),
-        stringResource(R.string.settings_tmdb_key_path),
-      ),
-    ) {
-      OutlinedTextField(
-        value = tmdbKey,
-        onValueChange = {
-          if (it != tmdbKey) invalidateConnectionVerdict()
-          tmdbKey = it
-        },
-        singleLine = true,
-        placeholder = { Text(stringResource(R.string.settings_tmdb_key_placeholder)) },
-        visualTransformation = if (showTmdbKey) {
-          VisualTransformation.None
-        } else {
-          PasswordVisualTransformation()
-        },
-        shape = NebulaShapes.medium,
-        colors = settingsFieldColors(),
-        // A leanback IME capitalising the first character of a v3 key produces a key that fails
-        // authentication with nothing on screen saying why.
-        keyboardOptions = KeyboardOptions(
-          capitalization = KeyboardCapitalization.None,
-          autoCorrectEnabled = false,
-          keyboardType = KeyboardType.Ascii,
-          imeAction = ImeAction.Done,
+    settingsItem(SettingsItem.Header) {
+      // ScreenHeader pads itself to the content line and hangs its tick in the margin, so it
+      // expects a container with no padding of its own. The list's contentPadding has already
+      // inset this item by ScreenEdge, which would indent the heading a second time; the offset
+      // cancels exactly that, landing the words flush with the cards below and the tick
+      // TickInset to their left.
+      ScreenHeader(
+        title = stringResource(R.string.nav_settings),
+        // The only place the running build is stated anywhere in the app; without it the owner of a
+        // sideloaded, self-updating APK cannot find out what they have without adb.
+        subtitle = stringResource(
+          R.string.settings_version,
+          stringResource(R.string.app_name),
+          BuildConfig.VERSION_NAME,
         ),
-        modifier = Modifier
-          // Sized to the 32 characters it holds rather than to a fraction of the card, which left
-          // a field twice as wide as any value it can ever contain.
-          .widthIn(max = 460.dp)
-          .fillMaxWidth()
-          .semantics {
-            contentDescription = context.getString(R.string.settings_tmdb_api_key)
-          }
-          // A material3 text field traps the D-pad on TV, so move focus
-          // between fields explicitly before it consumes the key.
-          .fieldNav(down = clearKeyFocus, up = pairInitialFocus),
+        modifier = Modifier.offset(x = -NebulaDimens.ScreenEdge),
       )
-      // Under the field rather than beside it. Every button on this screen is reachable
-      // by pressing down, which is the only direction a text field can be talked out of:
-      // left and right are the caret's, and a button that needed one of those to reach
-      // would be unreachable from a focused field.
-      Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
-        NebulaButton(
-          text = stringResource(
-            if (showTmdbKey) R.string.settings_hide_key else R.string.settings_show_key,
-          ),
-          onClick = { showTmdbKey = !showTmdbKey },
-          style = NebulaButtonStyle.Ghost,
-          modifier = Modifier
-            .initialFocusTarget(clearKeyFocus)
-            .semantics {
-              contentDescription = if (showTmdbKey) {
-                context.getString(R.string.settings_hide_tmdb_key_description)
-              } else {
-                context.getString(R.string.settings_show_tmdb_key_description)
-              }
-            },
-        )
-        NebulaButton(
-          text = stringResource(R.string.settings_clear_key),
-          onClick = {
-            // A key takes minutes to re-enter on a remote. Confirm a real deletion instead of
-            // making the most destructive control in the section a one-press action.
-            if (tmdbKey.isBlank() && storedKey.isNullOrBlank()) {
-              tmdbNotice = Notice(
-                context.getString(R.string.settings_no_tmdb_key_to_clear),
-                StatusTone.Info,
-              )
-            } else {
-              pendingClearKeyFeedback = null
-              pendingClearKey = true
-            }
-          },
-          style = NebulaButtonStyle.Danger,
-        )
-      }
-      tmdbNotice?.let { SectionNotice(it) }
     }
 
-    SettingsSection(
-      title = stringResource(R.string.settings_stream_addons_title),
-      description = stringResource(R.string.settings_stream_addons_description),
-      // The two commit models on this screen were silently different. Now they are visibly
-      // different: this list writes on press, the fields below Save do not.
-      badge = {
-        NebulaBadge(
-          text = stringResource(R.string.settings_saves_immediately),
-          tone = BadgeTone.Good,
-        )
-      },
-    ) {
-      if (addons.isEmpty()) {
-        // A placeholder shaped like a row rather than a second muted paragraph stacked on the
-        // section description - two consecutive paragraphs at one size and colour are
-        // indistinguishable at three metres.
-        Box(
-          modifier = Modifier
-            .fillMaxWidth()
-            .height(64.dp)
-            .background(NebulaPalette.Surface, NebulaShapes.medium)
-            .border(1.dp, NebulaPalette.Outline, NebulaShapes.medium),
-          contentAlignment = Alignment.Center,
-        ) {
-          Text(
-            stringResource(R.string.settings_no_addons),
-            style = MaterialTheme.typography.bodySmall,
-            color = NebulaPalette.TextMuted,
-            textAlign = TextAlign.Center,
-          )
-        }
-      }
-
-      addons.forEachIndexed { index, url ->
-        key(url) {
-          Row(
-          horizontalArrangement = Arrangement.spacedBy(NebulaSpace.sm),
-          verticalAlignment = Alignment.CenterVertically,
-          modifier = Modifier
-            .fillMaxWidth()
-            .background(NebulaPalette.SurfaceVariant, NebulaShapes.medium)
-            .padding(horizontal = NebulaSpace.md, vertical = NebulaSpace.sm),
-        ) {
-          NebulaBadge(text = "${index + 1}", tone = BadgeTone.Accent)
-          // weight, not a width fraction: a Row measures unweighted children against the space
-          // left after its siblings, so `fillMaxWidth(0.65f)` left ~117dp of dead gutter at the
-          // end of every row with the Remove button floating in the middle of it.
-          Column(modifier = Modifier.weight(1f)) {
-            Text(
-              addonLabels[index],
-              style = MaterialTheme.typography.titleSmall,
-              color = NebulaPalette.TextHigh,
-              maxLines = 1,
-              overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-              AddonList.safeDisplay(url),
-              style = MaterialTheme.typography.bodySmall,
-              color = NebulaPalette.TextMuted,
-              maxLines = 1,
-              overflow = TextOverflow.Ellipsis,
-            )
-          }
-          NebulaButton(
-            text = stringResource(R.string.settings_move_up),
-            icon = Icons.Filled.KeyboardArrowUp,
-            enabled = index > 0,
-            style = NebulaButtonStyle.Ghost,
-            onClick = {
-              val label = addonLabels[index]
-              viewModel.moveAddon(url, -1) { result ->
-                when (result) {
-                  SettingsMutationResult.Changed -> {
-                    invalidateConnectionVerdict()
-                    addonNotice = Notice(
-                      context.getString(R.string.settings_addon_moved_earlier, label),
-                      StatusTone.Success,
-                    )
-                  }
-                  SettingsMutationResult.Unchanged -> {
-                    addonNotice = Notice(
-                      context.getString(R.string.settings_addon_already_positioned, label),
-                      StatusTone.Info,
-                    )
-                  }
-                  SettingsMutationResult.Failed -> {
-                    addonNotice = Notice(
-                      context.getString(R.string.settings_addon_move_failed, label),
-                      StatusTone.Danger,
-                    )
-                  }
-                }
-              }
-            },
-            modifier = Modifier.semantics {
-              contentDescription = context.getString(
-                R.string.settings_move_addon_earlier_description,
-                addonLabels[index],
-              )
-            },
-          )
-          NebulaButton(
-            text = stringResource(R.string.settings_move_down),
-            icon = Icons.Filled.KeyboardArrowDown,
-            enabled = index < addons.lastIndex,
-            style = NebulaButtonStyle.Ghost,
-            onClick = {
-              val label = addonLabels[index]
-              viewModel.moveAddon(url, 1) { result ->
-                when (result) {
-                  SettingsMutationResult.Changed -> {
-                    invalidateConnectionVerdict()
-                    addonNotice = Notice(
-                      context.getString(R.string.settings_addon_moved_later, label),
-                      StatusTone.Success,
-                    )
-                  }
-                  SettingsMutationResult.Unchanged -> {
-                    addonNotice = Notice(
-                      context.getString(R.string.settings_addon_already_positioned, label),
-                      StatusTone.Info,
-                    )
-                  }
-                  SettingsMutationResult.Failed -> {
-                    addonNotice = Notice(
-                      context.getString(R.string.settings_addon_move_failed, label),
-                      StatusTone.Danger,
-                    )
-                  }
-                }
-              }
-            },
-            modifier = Modifier.semantics {
-              contentDescription = context.getString(
-                R.string.settings_move_addon_later_description,
-                addonLabels[index],
-              )
-            },
-          )
-          NebulaButton(
-            text = stringResource(R.string.settings_remove),
-            // Not Ghost: its focused fill is SurfaceVariant, which is exactly the colour of the
-            // row it sits on, so the one control here that destroys configuration marked focus
-            // with a ring and nothing else. Danger's plate is a step down from the row at rest
-            // and flips to solid pink when focused.
-            style = NebulaButtonStyle.Danger,
-            onClick = {
-              pendingRemovalFeedback = null
-              pendingRemoval = url
-            },
-            modifier = Modifier
-              // Where the field below the list sends its D-pad up, so it lands on the
-              // nearest row rather than skipping the whole list.
-              .then(
-                if (index == addons.lastIndex) {
-                  Modifier.initialFocusTarget(lastRemoveFocus)
-                } else {
-                  Modifier
-                }
-              )
-              // Every row's button is labelled "Remove", so a screen reader stepping down the
-              // list heard "Remove, Remove, Remove" with no way to tell which one it was on.
-              .semantics {
-                contentDescription = context.getString(
-                  R.string.settings_remove_addon_description,
-                  addonLabels[index],
-                )
-              },
-          )
-          }
-        }
-      }
-
-      OutlinedTextField(
-        value = newAddonUrl,
-        onValueChange = {
-          if (it != newAddonUrl) invalidateConnectionVerdict()
-          newAddonUrl = it
-        },
-        singleLine = true,
-        placeholder = { Text(stringResource(R.string.settings_addon_url_placeholder)) },
-        visualTransformation = if (showAddonUrl) {
-          VisualTransformation.None
-        } else {
-          PasswordVisualTransformation()
-        },
-        shape = NebulaShapes.medium,
-        colors = settingsFieldColors(),
-        // Uri rather than plain text: the "/" and ".com" keys are dozens of D-pad presses each
-        // on a leanback keyboard that does not offer them.
-        keyboardOptions = KeyboardOptions(
-          capitalization = KeyboardCapitalization.None,
-          autoCorrectEnabled = false,
-          keyboardType = KeyboardType.Uri,
-          imeAction = ImeAction.Done,
-        ),
-        modifier = Modifier
-          // Shares its right edge with the rows above it, which are fillMaxWidth. At 0.8f the
-          // list terminated 151dp further right than the field that adds to it.
-          .fillMaxWidth()
-          .semantics {
-            contentDescription = context.getString(R.string.settings_new_addon_url_description)
-          }
-          .fieldNav(
-            down = addonRevealFocus,
-            up = if (addons.isEmpty()) clearKeyFocus else lastRemoveFocus,
-          ),
-      )
-      Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
-        NebulaButton(
-          text = stringResource(
-            if (showAddonUrl) R.string.settings_hide_url else R.string.settings_show_url,
-          ),
-          onClick = { showAddonUrl = !showAddonUrl },
-          style = NebulaButtonStyle.Ghost,
-          modifier = Modifier
-            .initialFocusTarget(addonRevealFocus)
-            .semantics {
-              contentDescription = if (showAddonUrl) {
-                context.getString(R.string.settings_hide_new_addon_url_description)
-              } else {
-                context.getString(R.string.settings_show_new_addon_url_description)
-              }
-            },
-        )
-        NebulaButton(
-          text = stringResource(R.string.settings_add_addon),
-          onClick = {
-            // Persisted on press rather than staged behind Save: a list whose edits only
-            // land later shows a configuration that is not the one being used.
-            val submittedUrl = newAddonUrl
-            val normalized = AddonList.normalize(submittedUrl)
-            addonNotice = when {
-              normalized.isEmpty() -> Notice(
-                context.getString(R.string.settings_enter_addon_url_first),
-                StatusTone.Caution,
-              )
-              normalized in addons -> Notice(
-                context.getString(R.string.settings_addon_already_in_list),
-                StatusTone.Caution,
-              )
-              addons.size >= AddonList.MAX_ADDONS ->
-                Notice(
-                  context.getString(R.string.settings_addon_limit_reached),
-                  StatusTone.Caution,
-                )
-              else -> {
-                viewModel.addAddon(submittedUrl) { result ->
-                  when (result) {
-                    SettingsMutationResult.Changed -> {
-                      invalidateConnectionVerdict()
-                      // Do not erase a second URL typed while the first write was completing.
-                      if (newAddonUrl == submittedUrl) {
-                        newAddonUrl = ""
-                        showAddonUrl = false
-                      }
-                      addonNotice = Notice(
-                        context.getString(
-                          R.string.settings_addon_added,
-                          AddonList.label(normalized),
-                        ),
-                        StatusTone.Success,
-                      )
-                    }
-                    SettingsMutationResult.Unchanged -> {
-                      addonNotice = Notice(
-                        context.getString(R.string.settings_addon_already_in_list),
-                        StatusTone.Caution,
-                      )
-                    }
-                    SettingsMutationResult.Failed -> {
-                      addonNotice = Notice(
-                        context.getString(
-                          R.string.settings_addon_add_failed,
-                          AddonList.label(normalized),
-                        ),
-                        StatusTone.Danger,
-                      )
-                    }
-                  }
-                }
-                null
-              }
-            }
-          },
-          modifier = Modifier.initialFocusTarget(addButtonFocus),
-        )
-      }
-      addonNotice?.let { SectionNotice(it) }
-    }
-
-    SettingsSection(
-      title = stringResource(R.string.settings_playback_title),
-      description = stringResource(R.string.settings_playback_description),
-      badge = {
-        NebulaBadge(
-          text = stringResource(R.string.settings_saves_immediately),
-          tone = BadgeTone.Good,
-        )
-      },
-    ) {
-      Text(
-        stringResource(R.string.settings_audio_language_label),
-        style = MaterialTheme.typography.labelMedium,
-        color = NebulaPalette.TextMuted,
-      )
-      OutlinedTextField(
-        value = audioLanguage,
-        onValueChange = {
-          audioLanguage = it
-          playbackNotice = null
-        },
-        enabled = playbackReady && !playbackMutationInFlight,
-        singleLine = true,
-        placeholder = {
-          Text(
-            stringResource(
-              R.string.settings_audio_language_placeholder,
-              stringResource(R.string.settings_language_code_english),
-            ),
-          )
-        },
-        shape = NebulaShapes.medium,
-        colors = settingsFieldColors(),
-        keyboardOptions = KeyboardOptions(
-          capitalization = KeyboardCapitalization.None,
-          autoCorrectEnabled = false,
-          keyboardType = KeyboardType.Ascii,
-          imeAction = ImeAction.Next,
-        ),
-        modifier = Modifier
-          .widthIn(max = 460.dp)
-          .fillMaxWidth()
-          .initialFocusTarget(audioLanguageFocus)
-          .semantics {
-            contentDescription = context.getString(R.string.settings_audio_language_label)
-          }
-          .fieldNav(down = subtitleLanguageFocus, up = addButtonFocus),
-      )
-      Text(
-        stringResource(R.string.settings_subtitle_language_label),
-        style = MaterialTheme.typography.labelMedium,
-        color = NebulaPalette.TextMuted,
-      )
-      OutlinedTextField(
-        value = subtitleLanguage,
-        onValueChange = {
-          subtitleLanguage = it
-          playbackNotice = null
-        },
-        enabled = playbackReady && !playbackMutationInFlight,
-        singleLine = true,
-        placeholder = {
-          Text(
-            stringResource(
-              R.string.settings_subtitle_language_placeholder,
-              stringResource(R.string.settings_language_code_english),
-              stringResource(R.string.settings_subtitle_off_code),
-            ),
-          )
-        },
-        shape = NebulaShapes.medium,
-        colors = settingsFieldColors(),
-        keyboardOptions = KeyboardOptions(
-          capitalization = KeyboardCapitalization.None,
-          autoCorrectEnabled = false,
-          keyboardType = KeyboardType.Ascii,
-          imeAction = ImeAction.Done,
-        ),
-        modifier = Modifier
-          .widthIn(max = 460.dp)
-          .fillMaxWidth()
-          .initialFocusTarget(subtitleLanguageFocus)
-          .semantics {
-            contentDescription = context.getString(R.string.settings_subtitle_language_label)
-          }
-          .fieldNav(down = playbackLanguageSaveFocus, up = audioLanguageFocus),
-      )
-      NebulaButton(
-        text = stringResource(R.string.settings_apply_language_preferences),
-        enabled = playbackReady && !playbackMutationInFlight,
-        onClick = {
-          val submittedAudio = audioLanguage
-          val submittedSubtitles = subtitleLanguage
-          playbackMutationInFlight = true
-          viewModel.savePlaybackLanguages(submittedAudio, submittedSubtitles) { result ->
-            result.prefs?.let { playbackControls = it }
-            playbackMutationInFlight = false
-            playbackNotice = when (result.outcome) {
-              SettingsMutationResult.Changed -> {
-                // Mirror the store's normalisation so the field is also the value now in use.
-                result.prefs?.let { saved ->
-                  if (audioLanguage == submittedAudio) audioLanguage = saved.audioLanguage
-                  if (subtitleLanguage == submittedSubtitles) {
-                    subtitleLanguage = saved.subtitleLanguage
-                  }
-                }
-                Notice(
-                  context.getString(R.string.settings_language_preferences_saved),
-                  StatusTone.Success,
-                )
-              }
-              SettingsMutationResult.Unchanged ->
-                Notice(
-                  context.getString(R.string.settings_language_preferences_unchanged),
-                  StatusTone.Info,
-                )
-              SettingsMutationResult.Failed ->
-                Notice(
-                  context.getString(R.string.settings_language_preferences_failed),
-                  StatusTone.Danger,
-                )
-            }
-          }
-        },
-        modifier = Modifier.initialFocusTarget(playbackLanguageSaveFocus),
-      )
-
-      Row(
-        horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
-        verticalAlignment = Alignment.CenterVertically,
-      ) {
-        NebulaButton(
-          text = stringResource(
-            R.string.settings_subtitle_size,
-            stringResource(playbackSubtitleSize.labelResource()),
-          ),
-          enabled = playbackReady && !playbackMutationInFlight,
-          onClick = {
-            val next = SubtitleSize.stepped(playbackSubtitleSize, 1)
-            playbackMutationInFlight = true
-            viewModel.setPlaybackSubtitleSize(next.storageName) { result ->
-              result.prefs?.let { playbackControls = it }
-              playbackMutationInFlight = false
-              playbackNotice = if (result.outcome == SettingsMutationResult.Failed) {
-                Notice(
-                  context.getString(R.string.settings_subtitle_size_failed),
-                  StatusTone.Danger,
-                )
-              } else {
-                Notice(
-                  context.getString(
-                    R.string.settings_subtitle_size_saved,
-                    context.getString(next.labelResource()),
-                  ),
-                  StatusTone.Success,
-                )
-              }
-            }
-          },
-        )
-        NebulaButton(
-          text = stringResource(
-            R.string.settings_audio_output,
-            stringResource(playbackAudioOutput.labelResource()),
-          ),
-          enabled = playbackReady && !playbackMutationInFlight,
-          onClick = {
-            val next = AudioOutputMode.stepped(playbackAudioOutput, 1)
-            playbackMutationInFlight = true
-            viewModel.setPlaybackAudioOutput(next.storageName) { result ->
-              result.prefs?.let { playbackControls = it }
-              playbackMutationInFlight = false
-              playbackNotice = if (result.outcome == SettingsMutationResult.Failed) {
-                Notice(
-                  context.getString(R.string.settings_audio_output_failed),
-                  StatusTone.Danger,
-                )
-              } else {
-                Notice(
-                  context.getString(
-                    R.string.settings_audio_output_saved,
-                    context.getString(next.labelResource()),
-                  ),
-                  StatusTone.Success,
-                )
-              }
-            }
-          },
-        )
-      }
-      if (playbackAudioOutput == AudioOutputMode.Passthrough) {
-        Text(
-          stringResource(
-            R.string.settings_passthrough_description,
-            stringResource(R.string.app_name),
-            stringResource(R.string.settings_audio_output_decode),
-          ),
-          style = MaterialTheme.typography.bodySmall,
-          color = NebulaPalette.Caution,
-        )
-      }
-
-      Row(
-        horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
-        verticalAlignment = Alignment.CenterVertically,
-      ) {
-        NebulaButton(
-          text = stringResource(
-            if (playback.autoPlayNext) {
-              R.string.settings_autoplay_next_on
-            } else {
-              R.string.settings_autoplay_next_off
-            },
-          ),
-          enabled = playbackReady && !playbackMutationInFlight,
-          onClick = {
-            val next = !playback.autoPlayNext
-            playbackMutationInFlight = true
-            viewModel.setAutoPlayNext(next) { result ->
-              result.prefs?.let { playbackControls = it }
-              playbackMutationInFlight = false
-              playbackNotice = if (result.outcome == SettingsMutationResult.Failed) {
-                Notice(
-                  context.getString(R.string.settings_autoplay_failed),
-                  StatusTone.Danger,
-                )
-              } else {
-                Notice(
-                  context.getString(
-                    if (next) {
-                      R.string.settings_autoplay_enabled
-                    } else {
-                      R.string.settings_autoplay_disabled
-                    },
-                  ),
-                  StatusTone.Success,
-                )
-              }
-            }
-          },
-        )
-        NebulaButton(
-          text = pluralStringResource(
-            R.plurals.settings_countdown,
-            playback.upNextCountdownSeconds,
-            playback.upNextCountdownSeconds,
-          ),
-          enabled = playbackReady && playback.autoPlayNext && !playbackMutationInFlight,
-          onClick = {
-            val next = PlaybackPreferencePolicy.nextCountdownSeconds(
-              playback.upNextCountdownSeconds,
-            )
-            playbackMutationInFlight = true
-            viewModel.setUpNextCountdownSeconds(next) { result ->
-              result.prefs?.let { playbackControls = it }
-              playbackMutationInFlight = false
-              playbackNotice = if (result.outcome == SettingsMutationResult.Failed) {
-                Notice(
-                  context.getString(R.string.settings_countdown_failed),
-                  StatusTone.Danger,
-                )
-              } else {
-                Notice(
-                  context.resources.getQuantityString(
-                    R.plurals.settings_countdown_saved,
-                    next,
-                    next,
-                  ),
-                  StatusTone.Success,
-                )
-              }
-            }
-          },
-        )
-      }
-      NebulaButton(
-        text = stringResource(R.string.settings_reset_playback_defaults),
-        enabled = playbackReady && !playbackMutationInFlight,
-        style = NebulaButtonStyle.Ghost,
-        onClick = {
-          pendingPlaybackResetFeedback = null
-          pendingPlaybackReset = true
-        },
-      )
-      playbackNotice?.let { SectionNotice(it) }
-    }
-
-    SettingsSection(
-      title = stringResource(R.string.settings_support_title),
-      description = stringResource(R.string.settings_support_description),
-    ) {
-      Row(
-        horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
-        verticalAlignment = Alignment.CenterVertically,
-      ) {
-        NebulaButton(
-          text = stringResource(
-            if (exportingDiagnostics) {
-              R.string.settings_preparing_diagnostics
-            } else {
-              R.string.settings_share_diagnostics
-            },
-          ),
-          enabled = !exportingDiagnostics,
-          onClick = {
-            exportingDiagnostics = true
-            supportNotice = null
-            supportScope.launch {
-              val report = NebulaDiagnostics.export(context)
-              exportingDiagnostics = false
-              report.onSuccess { uri ->
-                val chooser = Intent.createChooser(
-                  NebulaDiagnostics.shareIntent(uri),
-                  context.getString(
-                    R.string.settings_share_diagnostics_chooser,
-                    context.getString(R.string.app_name),
-                  ),
-                )
-                if (runCatching { context.startActivity(chooser) }.isFailure) {
-                  supportNotice = Notice(
-                    context.getString(R.string.settings_share_app_failed),
-                    StatusTone.Danger,
-                  )
-                }
-              }.onFailure {
-                supportNotice = Notice(
-                  context.getString(
-                    R.string.settings_create_diagnostics_failed,
-                    context.getString(R.string.app_name),
-                  ),
-                  StatusTone.Danger,
-                )
-              }
-            }
-          },
-        )
-        NebulaButton(
-          text = stringResource(R.string.settings_erase_all_app_data),
-          style = NebulaButtonStyle.Danger,
-          onClick = {
-            pendingAppResetFeedback = null
-            pendingAppReset = true
-          },
-        )
-      }
-      supportNotice?.let { SectionNotice(it) }
-    }
-
-    NebulaButton(
-      text = stringResource(R.string.settings_advanced),
-      icon = if (advanced) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-      style = NebulaButtonStyle.Ghost,
-      onClick = { advanced = !advanced },
-      // The chevron is the only thing that says which way this button goes, and it is drawn
-      // decoratively, so open/closed has to be spelled out for anything not looking at it.
-      modifier = Modifier
-        .initialFocusTarget(advancedFocus)
-        .semantics(mergeDescendants = true) {
-          contentDescription = context.getString(
-            if (advanced) {
-              R.string.settings_advanced_expanded
-            } else {
-              R.string.settings_advanced_collapsed
-            },
-          )
-        },
-    )
-
-    // The one layout animation in the app. Affordable here and nowhere else: this screen decodes
-    // no images, holds no lazy list and the expansion runs for ~13 frames on a six-child Column.
-    // Without it the whole lower half of the page teleports.
-    AnimatedVisibility(
-      visible = advanced,
-      // From the top, not the default bottom: a disclosure unrolls downward from the button that
-      // opened it, and expanding from the bottom edge reads as the card sliding up out of Save.
-      enter = expandVertically(
-        animationSpec = NebulaMotion.enter(),
-        expandFrom = Alignment.Top,
-      ) + fadeIn(animationSpec = NebulaMotion.enter()),
-      exit = shrinkVertically(
-        animationSpec = NebulaMotion.exit(),
-        shrinkTowards = Alignment.Top,
-      ) + fadeOut(animationSpec = NebulaMotion.exit()),
-    ) {
+    settingsItem(SettingsItem.QuickSetup) {
       SettingsSection(
-        // Named for its subject. It used to be titled "Advanced" directly under a button reading
-        // "Advanced", so the word appeared twice in 60dp and the card's actual topic never did.
-        title = stringResource(R.string.settings_subtitles_addon_title),
-        description = stringResource(R.string.settings_subtitles_addon_description),
+        title = stringResource(R.string.settings_quick_setup_title),
+        description = stringResource(R.string.settings_quick_setup_description),
       ) {
-        // Above the field, not below it. As the last element of a scrolling Column with nothing
-        // focusable after it, the only feedback this field has could never be scrolled into view.
-        Text(
-          stringResource(
-            R.string.settings_currently_using,
-            AddonList.safeDisplay(SettingsSaveGuard.normalizeSubtitlesBase(subtitlesUrl)),
-          ),
-          style = MaterialTheme.typography.bodySmall,
-          color = NebulaPalette.TextMuted,
+        NebulaButton(
+          // Same words as the button on Home that opens the same screen. It used to carry a
+          // parenthetical here and not there, which is two names for one destination.
+          text = stringResource(R.string.home_action_setup_phone),
+          onClick = onPairWithPhone,
+          icon = Icons.Filled.Phone,
+          modifier = Modifier.initialFocusTarget(pairInitialFocus),
         )
+      }
+    }
+
+    settingsItem(SettingsItem.Tmdb) {
+      SettingsSection(
+        title = stringResource(R.string.settings_tmdb_title),
+        description = stringResource(
+          R.string.settings_tmdb_description,
+          stringResource(R.string.app_name),
+          stringResource(R.string.settings_tmdb_key_path),
+        ),
+      ) {
         OutlinedTextField(
-          value = subtitlesUrl,
+          value = tmdbKey,
           onValueChange = {
-            if (it != subtitlesUrl) invalidateConnectionVerdict()
-            subtitlesUrl = it
+            if (it != tmdbKey) invalidateConnectionVerdict()
+            tmdbKey = it
           },
           singleLine = true,
-          placeholder = { Text(SubtitlesClient.OPENSUBTITLES_V3_BASE) },
-          visualTransformation = if (showSubtitlesUrl) {
+          placeholder = { Text(stringResource(R.string.settings_tmdb_key_placeholder)) },
+          visualTransformation = if (showTmdbKey) {
             VisualTransformation.None
           } else {
             PasswordVisualTransformation()
           },
           shape = NebulaShapes.medium,
           colors = settingsFieldColors(),
+          // A leanback IME capitalising the first character of a v3 key produces a key that fails
+          // authentication with nothing on screen saying why.
+          keyboardOptions = KeyboardOptions(
+            capitalization = KeyboardCapitalization.None,
+            autoCorrectEnabled = false,
+            keyboardType = KeyboardType.Ascii,
+            imeAction = ImeAction.Done,
+          ),
+          modifier = Modifier
+            // Sized to the 32 characters it holds rather than to a fraction of the card, which left
+            // a field twice as wide as any value it can ever contain.
+            .widthIn(max = 460.dp)
+            .fillMaxWidth()
+            .semantics {
+              contentDescription = context.getString(R.string.settings_tmdb_api_key)
+            }
+            // A material3 text field traps the D-pad on TV, so move focus
+            // between fields explicitly before it consumes the key.
+            .fieldNav(focusJumper, down = clearKeyFocus, up = pairInitialFocus),
+        )
+        // Under the field rather than beside it. Every button on this screen is reachable
+        // by pressing down, which is the only direction a text field can be talked out of:
+        // left and right are the caret's, and a button that needed one of those to reach
+        // would be unreachable from a focused field.
+        Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
+          NebulaButton(
+            text = stringResource(
+              if (showTmdbKey) R.string.settings_hide_key else R.string.settings_show_key,
+            ),
+            onClick = { showTmdbKey = !showTmdbKey },
+            style = NebulaButtonStyle.Ghost,
+            modifier = Modifier
+              .initialFocusTarget(clearKeyFocus)
+              .semantics {
+                contentDescription = if (showTmdbKey) {
+                  context.getString(R.string.settings_hide_tmdb_key_description)
+                } else {
+                  context.getString(R.string.settings_show_tmdb_key_description)
+                }
+              },
+          )
+          NebulaButton(
+            text = stringResource(R.string.settings_clear_key),
+            onClick = {
+              // A key takes minutes to re-enter on a remote. Confirm a real deletion instead of
+              // making the most destructive control in the section a one-press action.
+              if (tmdbKey.isBlank() && storedKey.isNullOrBlank()) {
+                tmdbNotice = Notice(
+                  context.getString(R.string.settings_no_tmdb_key_to_clear),
+                  StatusTone.Info,
+                )
+              } else {
+                pendingClearKeyFeedback = null
+                pendingClearKey = true
+              }
+            },
+            style = NebulaButtonStyle.Danger,
+          )
+        }
+        tmdbNotice?.let { SectionNotice(it) }
+      }
+    }
+
+    settingsItem(SettingsItem.Addons) {
+      SettingsSection(
+        title = stringResource(R.string.settings_stream_addons_title),
+        description = stringResource(R.string.settings_stream_addons_description),
+        // The two commit models on this screen were silently different. Now they are visibly
+        // different: this list writes on press, the fields below Save do not.
+        badge = {
+          NebulaBadge(
+            text = stringResource(R.string.settings_saves_immediately),
+            tone = BadgeTone.Good,
+          )
+        },
+      ) {
+        if (addons.isEmpty()) {
+          // A placeholder shaped like a row rather than a second muted paragraph stacked on the
+          // section description - two consecutive paragraphs at one size and colour are
+          // indistinguishable at three metres.
+          Box(
+            modifier = Modifier
+              .fillMaxWidth()
+              .height(64.dp)
+              .background(NebulaPalette.Surface, NebulaShapes.medium)
+              .border(1.dp, NebulaPalette.Outline, NebulaShapes.medium),
+            contentAlignment = Alignment.Center,
+          ) {
+            Text(
+              stringResource(R.string.settings_no_addons),
+              style = MaterialTheme.typography.bodySmall,
+              color = NebulaPalette.TextMuted,
+              textAlign = TextAlign.Center,
+            )
+          }
+        }
+
+        addons.forEachIndexed { index, url ->
+          key(url) {
+            Row(
+            horizontalArrangement = Arrangement.spacedBy(NebulaSpace.sm),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+              .fillMaxWidth()
+              .background(NebulaPalette.SurfaceVariant, NebulaShapes.medium)
+              .padding(horizontal = NebulaSpace.md, vertical = NebulaSpace.sm),
+          ) {
+            NebulaBadge(text = "${index + 1}", tone = BadgeTone.Accent)
+            // weight, not a width fraction: a Row measures unweighted children against the space
+            // left after its siblings, so `fillMaxWidth(0.65f)` left ~117dp of dead gutter at the
+            // end of every row with the Remove button floating in the middle of it.
+            Column(modifier = Modifier.weight(1f)) {
+              Text(
+                addonLabels[index],
+                style = MaterialTheme.typography.titleSmall,
+                color = NebulaPalette.TextHigh,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+              )
+              Text(
+                AddonList.safeDisplay(url),
+                style = MaterialTheme.typography.bodySmall,
+                color = NebulaPalette.TextMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+              )
+            }
+            // Which of this row's two controls, if either, the recovery after a move is aiming at.
+            // Computed from the settled list, so it answers for the row's position *after* the
+            // reshuffle rather than the one the press was made from.
+            val moveFocusControl = addonMoveControl(
+              recovering = url == movedAddonUrl,
+              direction = movedAddonDirection,
+              index = index,
+              lastIndex = addons.lastIndex,
+            )
+            NebulaButton(
+              text = stringResource(R.string.settings_move_up),
+              icon = Icons.Filled.KeyboardArrowUp,
+              enabled = index > 0,
+              style = NebulaButtonStyle.Ghost,
+              onClick = {
+                val label = addonLabels[index]
+                // Claimed before the write, not in its callback: the target then attaches to the
+                // button that already holds focus and the reshuffle migrates it, rather than the
+                // recovery having to find focus again from wherever the reorder dropped it.
+                movedAddonUrl = url
+                movedAddonDirection = -1
+                viewModel.moveAddon(url, -1) { result ->
+                  when (result) {
+                    SettingsMutationResult.Changed -> {
+                      invalidateConnectionVerdict()
+                      addonNotice = Notice(
+                        context.getString(R.string.settings_addon_moved_earlier, label),
+                        StatusTone.Success,
+                      )
+                      addonMoveTick++
+                    }
+                    SettingsMutationResult.Unchanged -> {
+                      addonNotice = Notice(
+                        context.getString(R.string.settings_addon_already_positioned, label),
+                        StatusTone.Info,
+                      )
+                    }
+                    SettingsMutationResult.Failed -> {
+                      addonNotice = Notice(
+                        context.getString(R.string.settings_addon_move_failed, label),
+                        StatusTone.Danger,
+                      )
+                    }
+                  }
+                }
+              },
+              modifier = Modifier
+                .initialFocusTarget(
+                  movedAddonFocus.takeIf { moveFocusControl == AddonMoveControl.Up },
+                )
+                .semantics {
+                  contentDescription = context.getString(
+                    R.string.settings_move_addon_earlier_description,
+                    addonLabels[index],
+                  )
+                },
+            )
+            NebulaButton(
+              text = stringResource(R.string.settings_move_down),
+              icon = Icons.Filled.KeyboardArrowDown,
+              enabled = index < addons.lastIndex,
+              style = NebulaButtonStyle.Ghost,
+              onClick = {
+                val label = addonLabels[index]
+                movedAddonUrl = url
+                movedAddonDirection = 1
+                viewModel.moveAddon(url, 1) { result ->
+                  when (result) {
+                    SettingsMutationResult.Changed -> {
+                      invalidateConnectionVerdict()
+                      addonNotice = Notice(
+                        context.getString(R.string.settings_addon_moved_later, label),
+                        StatusTone.Success,
+                      )
+                      addonMoveTick++
+                    }
+                    SettingsMutationResult.Unchanged -> {
+                      addonNotice = Notice(
+                        context.getString(R.string.settings_addon_already_positioned, label),
+                        StatusTone.Info,
+                      )
+                    }
+                    SettingsMutationResult.Failed -> {
+                      addonNotice = Notice(
+                        context.getString(R.string.settings_addon_move_failed, label),
+                        StatusTone.Danger,
+                      )
+                    }
+                  }
+                }
+              },
+              modifier = Modifier
+                .initialFocusTarget(
+                  movedAddonFocus.takeIf { moveFocusControl == AddonMoveControl.Down },
+                )
+                .semantics {
+                  contentDescription = context.getString(
+                    R.string.settings_move_addon_later_description,
+                    addonLabels[index],
+                  )
+                },
+            )
+            NebulaButton(
+              text = stringResource(R.string.settings_remove),
+              // Not Ghost: its focused fill is SurfaceVariant, which is exactly the colour of the
+              // row it sits on, so the one control here that destroys configuration marked focus
+              // with a ring and nothing else. Danger's plate is a step down from the row at rest
+              // and flips to solid pink when focused.
+              style = NebulaButtonStyle.Danger,
+              onClick = {
+                pendingRemovalFeedback = null
+                pendingRemoval = url
+              },
+              modifier = Modifier
+                // Where the field below the list sends its D-pad up, so it lands on the
+                // nearest row rather than skipping the whole list.
+                .then(
+                  if (index == addons.lastIndex) {
+                    Modifier.initialFocusTarget(lastRemoveFocus)
+                  } else {
+                    Modifier
+                  }
+                )
+                // Every row's button is labelled "Remove", so a screen reader stepping down the
+                // list heard "Remove, Remove, Remove" with no way to tell which one it was on.
+                .semantics {
+                  contentDescription = context.getString(
+                    R.string.settings_remove_addon_description,
+                    addonLabels[index],
+                  )
+                },
+            )
+            }
+          }
+        }
+
+        OutlinedTextField(
+          value = newAddonUrl,
+          onValueChange = {
+            if (it != newAddonUrl) invalidateConnectionVerdict()
+            newAddonUrl = it
+          },
+          singleLine = true,
+          placeholder = { Text(stringResource(R.string.settings_addon_url_placeholder)) },
+          visualTransformation = if (showAddonUrl) {
+            VisualTransformation.None
+          } else {
+            PasswordVisualTransformation()
+          },
+          shape = NebulaShapes.medium,
+          colors = settingsFieldColors(),
+          // Uri rather than plain text: the "/" and ".com" keys are dozens of D-pad presses each
+          // on a leanback keyboard that does not offer them.
           keyboardOptions = KeyboardOptions(
             capitalization = KeyboardCapitalization.None,
             autoCorrectEnabled = false,
             keyboardType = KeyboardType.Uri,
             imeAction = ImeAction.Done,
           ),
-          // Down goes to Save, which is the only thing that commits this value - the reason the
-          // button now sits below the field instead of above it.
           modifier = Modifier
+            // Shares its right edge with the rows above it, which are fillMaxWidth. At 0.8f the
+            // list terminated 151dp further right than the field that adds to it.
             .fillMaxWidth()
             .semantics {
-              contentDescription = context.getString(
-                R.string.settings_subtitles_addon_url_description,
-              )
+              contentDescription = context.getString(R.string.settings_new_addon_url_description)
             }
-            .fieldNav(down = subtitlesRevealFocus, up = advancedFocus),
+            .fieldNav(
+              focusJumper,
+              down = addonRevealFocus,
+              up = if (addons.isEmpty()) clearKeyFocus else lastRemoveFocus,
+            ),
         )
-        NebulaButton(
-          text = stringResource(
-            if (showSubtitlesUrl) R.string.settings_hide_url else R.string.settings_show_url,
-          ),
-          onClick = { showSubtitlesUrl = !showSubtitlesUrl },
-          style = NebulaButtonStyle.Ghost,
-          modifier = Modifier
-            .initialFocusTarget(subtitlesRevealFocus)
-            .semantics {
-              contentDescription = if (showSubtitlesUrl) {
-                context.getString(R.string.settings_hide_subtitles_url_description)
-              } else {
-                context.getString(R.string.settings_show_subtitles_url_description)
+        Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
+          NebulaButton(
+            text = stringResource(
+              if (showAddonUrl) R.string.settings_hide_url else R.string.settings_show_url,
+            ),
+            onClick = { showAddonUrl = !showAddonUrl },
+            style = NebulaButtonStyle.Ghost,
+            modifier = Modifier
+              .initialFocusTarget(addonRevealFocus)
+              .semantics {
+                contentDescription = if (showAddonUrl) {
+                  context.getString(R.string.settings_hide_new_addon_url_description)
+                } else {
+                  context.getString(R.string.settings_show_new_addon_url_description)
+                }
+              },
+          )
+          NebulaButton(
+            text = stringResource(R.string.settings_add_addon),
+            onClick = {
+              // Persisted on press rather than staged behind Save: a list whose edits only
+              // land later shows a configuration that is not the one being used.
+              val submittedUrl = newAddonUrl
+              val normalized = AddonList.normalize(submittedUrl)
+              addonNotice = when {
+                normalized.isEmpty() -> Notice(
+                  context.getString(R.string.settings_enter_addon_url_first),
+                  StatusTone.Caution,
+                )
+                normalized in addons -> Notice(
+                  context.getString(R.string.settings_addon_already_in_list),
+                  StatusTone.Caution,
+                )
+                addons.size >= AddonList.MAX_ADDONS ->
+                  Notice(
+                    context.getString(R.string.settings_addon_limit_reached),
+                    StatusTone.Caution,
+                  )
+                else -> {
+                  viewModel.addAddon(submittedUrl) { result ->
+                    when (result) {
+                      SettingsMutationResult.Changed -> {
+                        invalidateConnectionVerdict()
+                        // Do not erase a second URL typed while the first write was completing.
+                        if (newAddonUrl == submittedUrl) {
+                          newAddonUrl = ""
+                          showAddonUrl = false
+                        }
+                        addonNotice = Notice(
+                          context.getString(
+                            R.string.settings_addon_added,
+                            AddonList.label(normalized),
+                          ),
+                          StatusTone.Success,
+                        )
+                      }
+                      SettingsMutationResult.Unchanged -> {
+                        addonNotice = Notice(
+                          context.getString(R.string.settings_addon_already_in_list),
+                          StatusTone.Caution,
+                        )
+                      }
+                      SettingsMutationResult.Failed -> {
+                        addonNotice = Notice(
+                          context.getString(
+                            R.string.settings_addon_add_failed,
+                            AddonList.label(normalized),
+                          ),
+                          StatusTone.Danger,
+                        )
+                      }
+                    }
+                  }
+                  null
+                }
               }
             },
+            modifier = Modifier.initialFocusTarget(addButtonFocus),
+          )
+        }
+        addonNotice?.let { SectionNotice(it) }
+      }
+    }
+
+    settingsItem(SettingsItem.Playback) {
+      SettingsSection(
+        title = stringResource(R.string.settings_playback_title),
+        description = stringResource(R.string.settings_playback_description),
+        badge = {
+          NebulaBadge(
+            text = stringResource(R.string.settings_saves_immediately),
+            tone = BadgeTone.Good,
+          )
+        },
+      ) {
+        Text(
+          stringResource(R.string.settings_audio_language_label),
+          style = MaterialTheme.typography.labelMedium,
+          color = NebulaPalette.TextMuted,
         )
+        OutlinedTextField(
+          value = audioLanguage,
+          onValueChange = {
+            audioLanguage = it
+            playbackNotice = null
+          },
+          enabled = playbackReady && !playbackMutationInFlight,
+          singleLine = true,
+          placeholder = {
+            Text(
+              stringResource(
+                R.string.settings_audio_language_placeholder,
+                stringResource(R.string.settings_language_code_english),
+              ),
+            )
+          },
+          shape = NebulaShapes.medium,
+          colors = settingsFieldColors(),
+          keyboardOptions = KeyboardOptions(
+            capitalization = KeyboardCapitalization.None,
+            autoCorrectEnabled = false,
+            keyboardType = KeyboardType.Ascii,
+            imeAction = ImeAction.Next,
+          ),
+          modifier = Modifier
+            .widthIn(max = 460.dp)
+            .fillMaxWidth()
+            .initialFocusTarget(audioLanguageFocus)
+            .semantics {
+              contentDescription = context.getString(R.string.settings_audio_language_label)
+            }
+            .fieldNav(focusJumper, down = subtitleLanguageFocus, up = addButtonFocus),
+        )
+        Text(
+          stringResource(R.string.settings_subtitle_language_label),
+          style = MaterialTheme.typography.labelMedium,
+          color = NebulaPalette.TextMuted,
+        )
+        OutlinedTextField(
+          value = subtitleLanguage,
+          onValueChange = {
+            subtitleLanguage = it
+            playbackNotice = null
+          },
+          enabled = playbackReady && !playbackMutationInFlight,
+          singleLine = true,
+          placeholder = {
+            Text(
+              stringResource(
+                R.string.settings_subtitle_language_placeholder,
+                stringResource(R.string.settings_language_code_english),
+                stringResource(R.string.settings_subtitle_off_code),
+              ),
+            )
+          },
+          shape = NebulaShapes.medium,
+          colors = settingsFieldColors(),
+          keyboardOptions = KeyboardOptions(
+            capitalization = KeyboardCapitalization.None,
+            autoCorrectEnabled = false,
+            keyboardType = KeyboardType.Ascii,
+            imeAction = ImeAction.Done,
+          ),
+          modifier = Modifier
+            .widthIn(max = 460.dp)
+            .fillMaxWidth()
+            .initialFocusTarget(subtitleLanguageFocus)
+            .semantics {
+              contentDescription = context.getString(R.string.settings_subtitle_language_label)
+            }
+            .fieldNav(focusJumper, down = playbackLanguageSaveFocus, up = audioLanguageFocus),
+        )
+        NebulaButton(
+          text = stringResource(R.string.settings_apply_language_preferences),
+          enabled = playbackReady && !playbackMutationInFlight,
+          onClick = {
+            val submittedAudio = audioLanguage
+            val submittedSubtitles = subtitleLanguage
+            playbackMutationInFlight = true
+            viewModel.savePlaybackLanguages(submittedAudio, submittedSubtitles) { result ->
+              result.prefs?.let { playbackControls = it }
+              playbackMutationInFlight = false
+              playbackNotice = when (result.outcome) {
+                SettingsMutationResult.Changed -> {
+                  // Mirror the store's normalisation so the field is also the value now in use.
+                  result.prefs?.let { saved ->
+                    if (audioLanguage == submittedAudio) audioLanguage = saved.audioLanguage
+                    if (subtitleLanguage == submittedSubtitles) {
+                      subtitleLanguage = saved.subtitleLanguage
+                    }
+                  }
+                  Notice(
+                    context.getString(R.string.settings_language_preferences_saved),
+                    StatusTone.Success,
+                  )
+                }
+                SettingsMutationResult.Unchanged ->
+                  Notice(
+                    context.getString(R.string.settings_language_preferences_unchanged),
+                    StatusTone.Info,
+                  )
+                SettingsMutationResult.Failed ->
+                  Notice(
+                    context.getString(R.string.settings_language_preferences_failed),
+                    StatusTone.Danger,
+                  )
+              }
+            }
+          },
+          modifier = Modifier.initialFocusTarget(playbackLanguageSaveFocus),
+        )
+
+        Row(
+          horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          NebulaButton(
+            text = stringResource(
+              R.string.settings_subtitle_size,
+              stringResource(playbackSubtitleSize.labelResource()),
+            ),
+            enabled = playbackReady && !playbackMutationInFlight,
+            onClick = {
+              val next = SubtitleSize.stepped(playbackSubtitleSize, 1)
+              playbackMutationInFlight = true
+              viewModel.setPlaybackSubtitleSize(next.storageName) { result ->
+                result.prefs?.let { playbackControls = it }
+                playbackMutationInFlight = false
+                playbackNotice = if (result.outcome == SettingsMutationResult.Failed) {
+                  Notice(
+                    context.getString(R.string.settings_subtitle_size_failed),
+                    StatusTone.Danger,
+                  )
+                } else {
+                  Notice(
+                    context.getString(
+                      R.string.settings_subtitle_size_saved,
+                      context.getString(next.labelResource()),
+                    ),
+                    StatusTone.Success,
+                  )
+                }
+              }
+            },
+          )
+          NebulaButton(
+            text = stringResource(
+              R.string.settings_audio_output,
+              stringResource(playbackAudioOutput.labelResource()),
+            ),
+            enabled = playbackReady && !playbackMutationInFlight,
+            onClick = {
+              val next = AudioOutputMode.stepped(playbackAudioOutput, 1)
+              playbackMutationInFlight = true
+              viewModel.setPlaybackAudioOutput(next.storageName) { result ->
+                result.prefs?.let { playbackControls = it }
+                playbackMutationInFlight = false
+                playbackNotice = if (result.outcome == SettingsMutationResult.Failed) {
+                  Notice(
+                    context.getString(R.string.settings_audio_output_failed),
+                    StatusTone.Danger,
+                  )
+                } else {
+                  Notice(
+                    context.getString(
+                      R.string.settings_audio_output_saved,
+                      context.getString(next.labelResource()),
+                    ),
+                    StatusTone.Success,
+                  )
+                }
+              }
+            },
+          )
+        }
+        if (playbackAudioOutput == AudioOutputMode.Passthrough) {
+          Text(
+            stringResource(
+              R.string.settings_passthrough_description,
+              stringResource(R.string.app_name),
+              stringResource(R.string.settings_audio_output_decode),
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = NebulaPalette.Caution,
+          )
+        }
+
+        Row(
+          horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          NebulaButton(
+            text = stringResource(
+              if (playback.autoPlayNext) {
+                R.string.settings_autoplay_next_on
+              } else {
+                R.string.settings_autoplay_next_off
+              },
+            ),
+            enabled = playbackReady && !playbackMutationInFlight,
+            onClick = {
+              val next = !playback.autoPlayNext
+              playbackMutationInFlight = true
+              viewModel.setAutoPlayNext(next) { result ->
+                result.prefs?.let { playbackControls = it }
+                playbackMutationInFlight = false
+                playbackNotice = if (result.outcome == SettingsMutationResult.Failed) {
+                  Notice(
+                    context.getString(R.string.settings_autoplay_failed),
+                    StatusTone.Danger,
+                  )
+                } else {
+                  Notice(
+                    context.getString(
+                      if (next) {
+                        R.string.settings_autoplay_enabled
+                      } else {
+                        R.string.settings_autoplay_disabled
+                      },
+                    ),
+                    StatusTone.Success,
+                  )
+                }
+              }
+            },
+          )
+          NebulaButton(
+            text = pluralStringResource(
+              R.plurals.settings_countdown,
+              playback.upNextCountdownSeconds,
+              playback.upNextCountdownSeconds,
+            ),
+            enabled = playbackReady && playback.autoPlayNext && !playbackMutationInFlight,
+            onClick = {
+              val next = PlaybackPreferencePolicy.nextCountdownSeconds(
+                playback.upNextCountdownSeconds,
+              )
+              playbackMutationInFlight = true
+              viewModel.setUpNextCountdownSeconds(next) { result ->
+                result.prefs?.let { playbackControls = it }
+                playbackMutationInFlight = false
+                playbackNotice = if (result.outcome == SettingsMutationResult.Failed) {
+                  Notice(
+                    context.getString(R.string.settings_countdown_failed),
+                    StatusTone.Danger,
+                  )
+                } else {
+                  Notice(
+                    context.resources.getQuantityString(
+                      R.plurals.settings_countdown_saved,
+                      next,
+                      next,
+                    ),
+                    StatusTone.Success,
+                  )
+                }
+              }
+            },
+          )
+        }
+        NebulaButton(
+          text = stringResource(R.string.settings_reset_playback_defaults),
+          enabled = playbackReady && !playbackMutationInFlight,
+          style = NebulaButtonStyle.Ghost,
+          onClick = {
+            pendingPlaybackResetFeedback = null
+            pendingPlaybackReset = true
+          },
+        )
+        playbackNotice?.let { SectionNotice(it) }
       }
     }
 
-    Row(
-      horizontalArrangement = Arrangement.spacedBy(NebulaSpace.md),
-      verticalAlignment = Alignment.CenterVertically,
-    ) {
-      NebulaButton(
-        // Says what the wait is for: this writes, then probes every addon manifest and TMDB,
-        // each of which can block for ~30s.
-        text = stringResource(R.string.settings_save_and_test),
-        onClick = startSave,
-        style = NebulaButtonStyle.Primary,
-        modifier = Modifier.initialFocusTarget(saveFocus),
-      )
-      // Warn, not Bad: an edit that has not been written yet is a caveat, not a failure.
-      if (dirty) {
-        NebulaBadge(text = stringResource(R.string.settings_unsaved_changes), tone = BadgeTone.Warn)
+    settingsItem(SettingsItem.Support) {
+      SettingsSection(
+        title = stringResource(R.string.settings_support_title),
+        description = stringResource(R.string.settings_support_description),
+      ) {
+        Row(
+          horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          NebulaButton(
+            text = stringResource(
+              if (exportingDiagnostics) {
+                R.string.settings_preparing_diagnostics
+              } else {
+                R.string.settings_share_diagnostics
+              },
+            ),
+            enabled = !exportingDiagnostics,
+            onClick = {
+              exportingDiagnostics = true
+              supportNotice = null
+              supportScope.launch {
+                val report = NebulaDiagnostics.export(context)
+                exportingDiagnostics = false
+                report.onSuccess { uri ->
+                  val chooser = Intent.createChooser(
+                    NebulaDiagnostics.shareIntent(uri),
+                    context.getString(
+                      R.string.settings_share_diagnostics_chooser,
+                      context.getString(R.string.app_name),
+                    ),
+                  )
+                  if (runCatching { context.startActivity(chooser) }.isFailure) {
+                    supportNotice = Notice(
+                      context.getString(R.string.settings_share_app_failed),
+                      StatusTone.Danger,
+                    )
+                  }
+                }.onFailure {
+                  supportNotice = Notice(
+                    context.getString(
+                      R.string.settings_create_diagnostics_failed,
+                      context.getString(R.string.app_name),
+                    ),
+                    StatusTone.Danger,
+                  )
+                }
+              }
+            },
+          )
+          NebulaButton(
+            text = stringResource(R.string.settings_erase_all_app_data),
+            style = NebulaButtonStyle.Danger,
+            onClick = {
+              pendingAppResetFeedback = null
+              pendingAppReset = true
+            },
+          )
+        }
+        supportNotice?.let { SectionNotice(it) }
       }
     }
 
-    if (saveStatus.isNotBlank()) {
-      StatusStrip(status = saveStatus, busy = saving)
+    settingsItem(SettingsItem.Advanced) {
+      // The toggle and the card it opens are one row of the list. Two rows would let the
+      // subtitles field aim its D-pad up at a toggle the list had disposed, and would put a
+      // height animation across an item boundary; this way the disclosure resizes one item.
+      Column(verticalArrangement = Arrangement.spacedBy(NebulaDimens.RailGap)) {
+        NebulaButton(
+          text = stringResource(R.string.settings_advanced),
+          icon = if (advanced) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+          style = NebulaButtonStyle.Ghost,
+          onClick = { advanced = !advanced },
+          // The chevron is the only thing that says which way this button goes, and it is drawn
+          // decoratively, so open/closed has to be spelled out for anything not looking at it.
+          modifier = Modifier
+            .initialFocusTarget(advancedFocus)
+            .semantics(mergeDescendants = true) {
+              contentDescription = context.getString(
+                if (advanced) {
+                  R.string.settings_advanced_expanded
+                } else {
+                  R.string.settings_advanced_collapsed
+                },
+              )
+            },
+        )
+
+        // The one layout animation in the app. Affordable here and nowhere else: this screen
+        // decodes no images, the expansion runs for ~13 frames on a six-child Column, and it is
+        // confined to this one list item - the lazy list around it re-measures a single row per
+        // frame rather than a page. Without it the whole lower half of the page teleports.
+        AnimatedVisibility(
+          visible = advanced,
+          // From the top, not the default bottom: a disclosure unrolls downward from the button
+          // that opened it, and expanding from the bottom edge reads as the card sliding up out
+          // of Save.
+          enter = expandVertically(
+            animationSpec = NebulaMotion.enter(),
+            expandFrom = Alignment.Top,
+          ) + fadeIn(animationSpec = NebulaMotion.enter()),
+          exit = shrinkVertically(
+            animationSpec = NebulaMotion.exit(),
+            shrinkTowards = Alignment.Top,
+          ) + fadeOut(animationSpec = NebulaMotion.exit()),
+        ) {
+          SettingsSection(
+            // Named for its subject. It used to be titled "Advanced" directly under a button
+            // reading "Advanced", so the word appeared twice in 60dp and the card's actual topic
+            // never did.
+            title = stringResource(R.string.settings_subtitles_addon_title),
+            description = stringResource(R.string.settings_subtitles_addon_description),
+          ) {
+            // Above the field, not below it. As the last element of a scrolling page with
+            // nothing focusable after it, the only feedback this field has could never be
+            // scrolled into view.
+            Text(
+              stringResource(
+                R.string.settings_currently_using,
+                AddonList.safeDisplay(SettingsSaveGuard.normalizeSubtitlesBase(subtitlesUrl)),
+              ),
+              style = MaterialTheme.typography.bodySmall,
+              color = NebulaPalette.TextMuted,
+            )
+            OutlinedTextField(
+              value = subtitlesUrl,
+              onValueChange = {
+                if (it != subtitlesUrl) invalidateConnectionVerdict()
+                subtitlesUrl = it
+              },
+              singleLine = true,
+              placeholder = { Text(SubtitlesClient.OPENSUBTITLES_V3_BASE) },
+              visualTransformation = if (showSubtitlesUrl) {
+                VisualTransformation.None
+              } else {
+                PasswordVisualTransformation()
+              },
+              shape = NebulaShapes.medium,
+              colors = settingsFieldColors(),
+              keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.None,
+                autoCorrectEnabled = false,
+                keyboardType = KeyboardType.Uri,
+                imeAction = ImeAction.Done,
+              ),
+              // Down goes to Save, which is the only thing that commits this value - the reason the
+              // button now sits below the field instead of above it.
+              modifier = Modifier
+                .fillMaxWidth()
+                .semantics {
+                  contentDescription = context.getString(
+                    R.string.settings_subtitles_addon_url_description,
+                  )
+                }
+                .fieldNav(focusJumper, down = subtitlesRevealFocus, up = advancedFocus),
+            )
+            NebulaButton(
+              text = stringResource(
+                if (showSubtitlesUrl) R.string.settings_hide_url else R.string.settings_show_url,
+              ),
+              onClick = { showSubtitlesUrl = !showSubtitlesUrl },
+              style = NebulaButtonStyle.Ghost,
+              modifier = Modifier
+                .initialFocusTarget(subtitlesRevealFocus)
+                .semantics {
+                  contentDescription = if (showSubtitlesUrl) {
+                    context.getString(R.string.settings_hide_subtitles_url_description)
+                  } else {
+                    context.getString(R.string.settings_show_subtitles_url_description)
+                  }
+                },
+            )
+          }
+        }
+      }
+    }
+
+    settingsItem(SettingsItem.Save) {
+      // Save and the verdict it produces are one row, so the scroll that reveals the verdict
+      // is a scroll to the button that was pressed.
+      Column(verticalArrangement = Arrangement.spacedBy(NebulaDimens.RailGap)) {
+        Row(
+          horizontalArrangement = Arrangement.spacedBy(NebulaSpace.md),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          NebulaButton(
+            // Says what the wait is for: this writes, then probes every addon manifest and TMDB,
+            // each of which can block for ~30s.
+            text = stringResource(R.string.settings_save_and_test),
+            onClick = startSave,
+            style = NebulaButtonStyle.Primary,
+            modifier = Modifier.initialFocusTarget(saveFocus),
+          )
+          // Warn, not Bad: an edit that has not been written yet is a caveat, not a failure.
+          if (dirty) {
+            NebulaBadge(
+              text = stringResource(R.string.settings_unsaved_changes),
+              tone = BadgeTone.Warn,
+            )
+          }
+        }
+
+        if (saveStatus.isNotBlank()) {
+          StatusStrip(status = saveStatus, busy = saving)
+        }
+      }
     }
   }
 
@@ -1727,12 +1920,21 @@ private fun SectionNotice(notice: Notice) {
 /**
  * Sends D-pad up and down to explicit neighbours before the text field can eat them.
  *
- * A key is only reported handled when focus actually moved. requestFocus throws for
- * a requester attached to nothing - the addon list is empty, the Advanced section is
- * collapsed - and the previous version of this claimed those keys anyway, which left
- * the viewer pressing a direction that did nothing at all.
+ * A key is only reported handled when focus actually moved, or when the jump that will move it is
+ * already under way. requestFocus throws for a requester attached to nothing - the addon list is
+ * empty, the Advanced section is collapsed - and the previous version of this claimed those keys
+ * anyway, which left the viewer pressing a direction that did nothing at all.
+ *
+ * Since the page became a lazy list, "attached to nothing" also covers a section that is merely
+ * off screen, which is why the move goes through [SettingsFocusJumper] rather than straight to the
+ * requester: only it can tell a target that does not exist from one that has been scrolled out and
+ * disposed, and bring the second kind back.
  */
-private fun Modifier.fieldNav(down: InitialFocusTarget?, up: InitialFocusTarget?): Modifier =
+private fun Modifier.fieldNav(
+  jumper: SettingsFocusJumper,
+  down: InitialFocusTarget?,
+  up: InitialFocusTarget?,
+): Modifier =
   onPreviewKeyEvent { event ->
     if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
     val target = when (event.key) {
@@ -1742,11 +1944,137 @@ private fun Modifier.fieldNav(down: InitialFocusTarget?, up: InitialFocusTarget?
       // button sits under the field it belongs to, not beside it.
       else -> null
     }
-    target != null && runCatching {
-      target.requester.requestFocus()
-      target.focused
-    }.getOrDefault(false)
+    target != null && jumper.jump(target)
   }
+
+/** The two reorder controls an addon row carries, and so the two nodes focus can land on. */
+internal enum class AddonMoveControl { Up, Down }
+
+/**
+ * Which control of an addon row should hold focus once that row's addon has been moved.
+ *
+ * The one that was pressed, wherever it is still live: focus belongs where the viewer left it, and
+ * a second press then carries the addon another step the same way. At the two edges that
+ * control is precisely the one the move just disabled - an addon at the top has no Up, one at the
+ * bottom has no Down - and a disabled button cannot take focus, so the answer there is the opposite
+ * control. That is both the only direction the row has left and the one that undoes the move, which
+ * is what a viewer who has just overshot is reaching for.
+ *
+ * Null for every row but the one that moved, and for a list of one, which cannot be reordered at
+ * all and whose row therefore has nothing focusable to offer.
+ */
+internal fun addonMoveControl(
+  recovering: Boolean,
+  direction: Int,
+  index: Int,
+  lastIndex: Int,
+): AddonMoveControl? = when {
+  !recovering -> null
+  direction < 0 && index > 0 -> AddonMoveControl.Up
+  direction > 0 && index < lastIndex -> AddonMoveControl.Down
+  index > 0 -> AddonMoveControl.Up
+  index < lastIndex -> AddonMoveControl.Down
+  else -> null
+}
+
+/**
+ * The rows of the settings list, in the order they are emitted.
+ *
+ * Every one of these is always emitted - the Advanced disclosure expands inside its row rather
+ * than adding one - which is what lets a focus jump turn a target into a scroll index without
+ * asking the list what it happens to be showing. A section that could come and go would have to be
+ * counted at runtime instead, and it would be counted on the frame *after* the one that needed it.
+ */
+private enum class SettingsItem {
+  Header,
+  QuickSetup,
+  Tmdb,
+  Addons,
+  Playback,
+  Support,
+  Advanced,
+  Save,
+}
+
+/**
+ * One row of the settings list.
+ *
+ * The key is stable across every recomposition and the contentType is unique per section, so no
+ * two sections ever share a reuse slot: these subtrees have nothing in common, and a form field
+ * recomposed into the position of a button is exactly the kind of reuse that strands focus.
+ */
+private fun LazyListScope.settingsItem(section: SettingsItem, content: @Composable () -> Unit) =
+  item(key = section.name, contentType = section.name) { content() }
+
+/**
+ * Frames an explicit focus move waits for a node it had to bring back.
+ *
+ * The same budget the post-removal recovery uses, and for the same reason: long enough for a
+ * subcomposition to compose, lay out and accept focus on a slow frame, short enough that a move
+ * which is never going to land does not sit on the remote for half a second first.
+ */
+private const val FocusRecoveryFrames = 10
+
+/**
+ * Moves focus to a target that the list may have disposed.
+ *
+ * When every section was composed eagerly an explicit focus move was just `requestFocus()`: the
+ * node it aimed at existed whether or not it was on screen. Under a lazy list an off-screen
+ * section is *disposed*, its requester is attached to nothing, and the same call throws - which is
+ * how the cross-section moves this screen is built on (the TMDB field's up to the pair button, the
+ * audio language field's up to Add, the recovery after a removal, Save's refusal of a draft addon)
+ * would each end with a dead D-pad.
+ *
+ * So a move that finds its target gone scrolls the section that owns it back into the list and
+ * asks again over the next few frames - the same retry [RequestInitialFocus] runs for a node that
+ * has not been placed yet. A move whose target is present behaves exactly as it always did,
+ * including when the target refuses.
+ */
+private class SettingsFocusJumper(
+  private val scope: CoroutineScope,
+  private val listState: LazyListState,
+  /** Which row composes each target, for the scroll that brings it back. */
+  private val itemOf: Map<InitialFocusTarget, SettingsItem>,
+) {
+  // One in flight at a time. Held down, the D-pad can ask for two different sections inside a
+  // frame of each other, and the loser would scroll the winner's target straight back off.
+  private var pending: Job? = null
+
+  /**
+   * @return true when the key that asked for this move has been dealt with - either focus moved
+   *   now, or a scroll that will move it is running. False means nothing happened and the key
+   *   still belongs to whoever else wants it, which is the verdict a live-but-unfocusable target
+   *   has always produced.
+   */
+  fun jump(target: InitialFocusTarget): Boolean {
+    // `placed` is cleared on dispose, so it reads as "there is a node here now", not "there was
+    // one once". A live node answers within this frame exactly as it did before the page was
+    // lazy - and a live node that refuses (disabled, not focusable yet) also answers as it did.
+    if (target.placed) {
+      return runCatching {
+        target.requester.requestFocus()
+        target.focused
+      }.getOrDefault(false)
+    }
+    // Not placed and not ours: the caller aimed at something this screen never composes, which is
+    // the case the old runCatching existed for. Leave the key alone.
+    val section = itemOf[target] ?: return false
+    pending?.cancel()
+    pending = scope.launch {
+      listState.scrollToItem(section.ordinal)
+      repeat(FocusRecoveryFrames) {
+        withFrameNanos { }
+        if (target.focused) return@launch
+        if (target.placed) runCatching { target.requester.requestFocus() }
+      }
+      // Nothing left to aim at that would not be a guess. Focus is still on whatever held it, or
+      // on the list itself if the scroll disposed that node, and the section asked for is now at
+      // the top of the viewport - so the next press searches from something the viewer can see
+      // rather than from nowhere. Never a throw, and never a jump into an unrelated section.
+    }
+    return true
+  }
+}
 
 @Composable
 private fun settingsFieldColors() = OutlinedTextFieldDefaults.colors(
