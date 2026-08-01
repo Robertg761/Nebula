@@ -47,11 +47,17 @@ cd "$ANDROID_PROJECT"
 mapfile -d '' -t preexisting_profile_dirs < <(
   find app/src -type d -path '*/generated/baselineProfiles' -print0
 )
-if [ "${#preexisting_profile_dirs[@]}" -ne 0 ]; then
-  echo "Refusing to run while generated Baseline Profile source output already exists:" >&2
-  printf '  %s\n' "${preexisting_profile_dirs[@]}" >&2
-  exit 1
-fi
+for profile_dir in "${preexisting_profile_dirs[@]}"; do
+  if [ -n "$(find "$profile_dir" -type f -print -quit)" ]; then
+    echo "Refusing to run while generated Baseline Profile source output already exists:" >&2
+    echo "  $profile_dir" >&2
+    exit 1
+  fi
+  # Ordinary builds recreate this directory empty; an empty husk holds nothing the
+  # guard above exists to protect, so clear it rather than refusing over it.
+  rmdir "$profile_dir"
+  rmdir "$(dirname "$profile_dir")" 2>/dev/null || true
+done
 
 WORK_DIR="$(mktemp -d "$ANDROID_PROJECT/app/build/baseline-profile-work.XXXXXX")"
 generation_succeeded=0
@@ -84,7 +90,13 @@ on_exit() {
 }
 trap on_exit EXIT
 
+# leaveApksInstalledAfterTest keeps the app - and with it the configured fixture
+# credentials, which live in its private DataStore - installed after the run.
+# Without it, connected-test cleanup uninstalls the package, so the second
+# generation attempt ever run finds a factory-fresh setup screen and fails its
+# first wait. (This is the property Android Studio sets for the same reason.)
 ./gradlew :app:generateBaselineProfile \
+  -Pandroid.injected.androidTest.leaveApksInstalledAfterTest=true \
   -Pandroid.testInstrumentationRunnerArguments.androidx.benchmark.enabledRules=BaselineProfile
 
 mapfile -d '' -t generated_profiles < <(

@@ -14,6 +14,9 @@ sealed interface LaunchRequest {
   data class OpenSearch(val launch: SearchLaunch) : LaunchRequest
 
   data class OpenWatchNext(val target: WatchNextTarget) : LaunchRequest
+
+  /** `stremio-tv://settings`: launcher shortcuts, Assistant, and the baseline-profile generator. */
+  data object OpenSettings : LaunchRequest
 }
 
 /**
@@ -63,10 +66,19 @@ object LaunchIntents {
    * @param query the QUERY extra, already read off the intent (see [EXTRA_QUERY]); null
    *   when it was absent or was not a string.
    */
+  /**
+   * `stremio-tv://settings`, exactly: a startsWith would let `settings.evil.example` paths
+   * through, and a destination-only link has no parameters to carry. Trailing slash included
+   * because Android's Uri normalisation is free to add one.
+   */
+  private fun isSettingsDeepLink(dataString: String?): Boolean =
+    dataString == "stremio-tv://settings" || dataString == "stremio-tv://settings/"
+
   fun route(action: String?, dataString: String?, query: String?): LaunchRequest {
-    // The URI form is unambiguous - it only ever comes from a row this app published -
-    // so it wins over an action, which anyone can send with anything attached.
+    // The URI forms are unambiguous - they only ever come from surfaces this app published -
+    // so they win over an action, which anyone can send with anything attached.
     WatchNextDeepLink.parse(dataString)?.let { return LaunchRequest.OpenWatchNext(it) }
+    if (isSettingsDeepLink(dataString)) return LaunchRequest.OpenSettings
     if (!isSearchAction(action)) return LaunchRequest.Launch
     // A search action with nothing usable attached still means "the viewer asked for
     // search": the destination is the answer, they can type the rest.

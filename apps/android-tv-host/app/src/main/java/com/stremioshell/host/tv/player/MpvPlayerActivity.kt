@@ -1030,7 +1030,7 @@ class MpvPlayerActivity : ComponentActivity() {
       mpvCreated = true
       mpvAlive = true
       startMpvWorker()
-      MPVLib.setOptionString("vo", "gpu")
+      MPVLib.setOptionString("vo", VIDEO_OUTPUT_DRIVER)
       MPVLib.setOptionString("gpu-context", "android")
       MPVLib.setOptionString("opengl-es", "yes")
       // Direct-surface mediacodec first, then copy-back, then software; without a
@@ -1048,9 +1048,11 @@ class MpvPlayerActivity : ComponentActivity() {
       // (linear-light) downscaling, sigmoid upscaling, error-diffusion dithering
       // and `hdr-compute-peak=auto` are all on, and each is another full-frame
       // pass every time a 4K stream is scaled into this box's 1080p output plane.
-      // Mali-G57 advertises GLES 3.2 compute, so `hdr-compute-peak` in particular
-      // is taken up: an extra whole-frame compute dispatch on every HDR10 frame,
-      // to tone-map with a peak the panel is about to re-derive anyway.
+      // The Streamer's PowerVR GE9215 advertises GLES 3.2 compute, so
+      // `hdr-compute-peak` in particular is taken up: an extra whole-frame
+      // compute dispatch on every HDR10 frame being tone-mapped (which on this
+      // pipeline is all of them - see VIDEO_OUTPUT_DRIVER), to find a peak the
+      // panel would re-derive anyway.
       //
       // These are the same settings mpv's built-in `fast` profile applies. They
       // are written out one at a time rather than as `profile=fast` because a
@@ -1068,9 +1070,6 @@ class MpvPlayerActivity : ComponentActivity() {
       MPVLib.setOptionString("sigmoid-upscaling", "no")
       MPVLib.setOptionString("hdr-compute-peak", "no")
       MPVLib.setOptionString("ao", "audiotrack")
-      // This build is mpv 0.39 with vo=gpu. `target-colorspace-hint` only applies to gpu-next in
-      // that version, so setting it would be a false HDR guarantee. Android HDR output remains an
-      // explicit hardware-validation item; do not claim the display entered HDR from this option.
       MPVLib.setOptionString("ytdl", "no")
       applyNetworkOptions()
       // The starting size, replaced by the stored one a moment later. Medium is 44,
@@ -2859,7 +2858,8 @@ class MpvPlayerActivity : ComponentActivity() {
    * `surfaceDestroyed` return while mpv's render thread was still drawing into a buffer the
    * compositor is entitled to free — a native crash, and an intermittent one. The ordering here is
    * also load-bearing in itself (`vo=null` before `detachSurface`, `attachSurface` before
-   * `vo=gpu`), and it has to interleave correctly with callbacks this activity does not control.
+   * the [VIDEO_OUTPUT_DRIVER] revive), and it has to interleave correctly with callbacks this
+   * activity does not control.
    *
    * These calls are cheap in the case that matters — mpv's surface handling does not wait on the
    * demuxer — so the main-thread rule in this class's own KDoc is suspended here on purpose rather
@@ -2877,7 +2877,7 @@ class MpvPlayerActivity : ComponentActivity() {
         if (fileLoaded) {
           // Returning to an already-loaded stream: revive the video output that
           // surfaceDestroyed switched off, or playback continues blind.
-          MPVLib.setPropertyString("vo", "gpu")
+          MPVLib.setPropertyString("vo", VIDEO_OUTPUT_DRIVER)
           applyDisplayFrameRateVote()
         } else {
           maybeLoadFile()
@@ -4768,6 +4768,21 @@ class MpvPlayerActivity : ComponentActivity() {
       forwardBytes = 16L * 1024 * 1024,
       backBytes = 4L * 1024 * 1024,
     )
+
+    /**
+     * The classic gpu driver, in one place because the surface handoff switches `vo` off and back
+     * on around every surface teardown.
+     *
+     * gpu-next was tried on the Google TV Streamer (libmpv 0.4.1, libplacebo v7.349, PowerVR
+     * GE9215, 2026-08) and rejected on the evidence, not on caution. What it was tried for -
+     * `target-colorspace-hint` HDR passthrough - does not work there: the PowerVR EGL refuses the
+     * BT.2020/PQ surface colorspace (GL_INVALID_ENUM at reconfig) and the video surface stays
+     * sRGB, so HDR10 is tone-mapped to SDR exactly as vo=gpu does. And it broke the session: after
+     * one gpu-next playback, the native core was never handed back on destroy, so every further
+     * player launch in the process bounced off MpvCoreCoordinator until the app was killed.
+     * Re-evaluate only on a libmpv upgrade, and test *second* playback when doing so.
+     */
+    private const val VIDEO_OUTPUT_DRIVER = "gpu"
 
     /**
      * The width above which software decoding is worth telling the viewer about. 2560 rather than

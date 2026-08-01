@@ -58,6 +58,9 @@ proof.
   the full hardware matrix.
 - R8/resource shrinking now ships in `release` with explicit JNI/serialization
   keep rules; retain it only while APK/startup measurements justify the risk.
+- Split the Baseline Profile generator into a launch-only collect plus the full
+  journey, so the startup profile is tighter than the whole-journey copy of the
+  baseline profile it currently duplicates and dex layout favors launch alone.
 - Automate the currently blocked, reviewed CycloneDX/SPDX release inventory only
   after its generator/schema and embedded native inputs are pinned and
   dependency-verified.

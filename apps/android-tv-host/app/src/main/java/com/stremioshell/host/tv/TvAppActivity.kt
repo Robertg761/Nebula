@@ -98,6 +98,13 @@ class TvAppActivity : ComponentActivity() {
   internal val pendingSearch = mutableStateOf<SearchLaunch?>(null)
 
   /**
+   * A `stremio-tv://settings` link: launcher shortcuts and the baseline-profile generator,
+   * which needs a deterministic route to Settings that no focus or IME state can divert.
+   * Compose state and fed from onNewIntent, on the same singleTask terms as the two above.
+   */
+  internal val pendingOpenSettings = mutableStateOf(false)
+
+  /**
    * The player is started for a result purely so it can hand an episode back for
    * stream selection; a plain exit returns no data and only clears the guard.
    */
@@ -173,6 +180,8 @@ class TvAppActivity : ComponentActivity() {
           onPendingDeepLinkHandled = { pendingWatchNextTarget.value = null },
           pendingSearch = pendingSearch.value,
           onPendingSearchHandled = { pendingSearch.value = null },
+          pendingOpenSettings = pendingOpenSettings.value,
+          onPendingOpenSettingsHandled = { pendingOpenSettings.value = false },
         )
         UpdatePromptHost()
       }
@@ -196,6 +205,7 @@ class TvAppActivity : ComponentActivity() {
     when (val request = LaunchIntents.route(intent?.action, intent?.dataString, queryOf(intent))) {
       is LaunchRequest.OpenWatchNext -> pendingWatchNextTarget.value = request.target
       is LaunchRequest.OpenSearch -> pendingSearch.value = request.launch
+      LaunchRequest.OpenSettings -> pendingOpenSettings.value = true
       LaunchRequest.Launch -> Unit
     }
   }

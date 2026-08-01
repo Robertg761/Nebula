@@ -102,6 +102,9 @@ private sealed interface SettingsExit {
  *   it straight back.
  * @param pendingSearch a spoken query, or the bare search key. Cleared through
  *   [onPendingSearchHandled] on the same terms as the deep link.
+ * @param pendingOpenSettings a `stremio-tv://settings` link. Cleared through
+ *   [onPendingOpenSettingsHandled]; routed like the drawer's own Settings item, so an
+ *   unsaved draft still gets its dialog rather than being silently replaced.
  */
 @Composable
 fun TvApp(
@@ -112,6 +115,8 @@ fun TvApp(
   onPendingDeepLinkHandled: () -> Unit = {},
   pendingSearch: SearchLaunch? = null,
   onPendingSearchHandled: () -> Unit = {},
+  pendingOpenSettings: Boolean = false,
+  onPendingOpenSettingsHandled: () -> Unit = {},
 ) {
   val viewModel: TvAppViewModel = viewModel()
   // Saveable: Screen is Parcelable, so the stack outlives activity recreation
@@ -255,6 +260,14 @@ fun TvApp(
     if (request.query.isNotEmpty()) viewModel.submitVoiceQuery(request.query)
     openRootDestination(Screen.Search, focusSearchField = request.query.isEmpty())
     onPendingSearchHandled()
+  }
+
+  // Through the same drawer helper as the rail's own Settings item, so a dirty draft is
+  // guarded by its dialog and a second link while already there keeps the existing entry.
+  LaunchedEffect(pendingOpenSettings) {
+    if (!pendingOpenSettings) return@LaunchedEffect
+    openRootDestination(Screen.Settings)
+    onPendingOpenSettingsHandled()
   }
 
   val openDetails: (MediaType, Int) -> Unit = { type, id -> push(Screen.Details(type, id)) }

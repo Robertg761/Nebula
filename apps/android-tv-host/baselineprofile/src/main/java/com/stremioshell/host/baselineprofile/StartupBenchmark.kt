@@ -38,9 +38,14 @@ class StartupBenchmark {
       setupBlock = { pressHome() },
     ) {
       startActivityAndWait()
+      // The first rail heading, not the literal text "Home": the collapsed nav rail is
+      // icons-only, so nothing on a settled, configured Home says "Home" and the old wait
+      // failed against a launch that had worked. Riding out the rail fetch here also hands
+      // FrameTimingMetric the frames of Home actually populating, which is the startup the
+      // viewer watches.
       assertTrue(
-        "Cold launch never exposed Home",
-        device.wait(Until.hasObject(By.text("Home")), UI_TIMEOUT_MS),
+        "Cold launch never composed the first rail",
+        device.wait(Until.hasObject(By.text("Trending Movies")), UI_TIMEOUT_MS),
       )
     }
   }
@@ -48,6 +53,6 @@ class StartupBenchmark {
   private companion object {
     const val PACKAGE_NAME = "com.stremioshell.host.tv"
     const val ITERATIONS = 10
-    const val UI_TIMEOUT_MS = 10_000L
+    const val UI_TIMEOUT_MS = 20_000L
   }
 }
