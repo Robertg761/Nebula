@@ -86,8 +86,9 @@ releases through the protected `release` environment:
    verifies the APK plus reviewed Gradle SBOM, native SBOM, and native source
    archive by name, size, and digest before making the release public.
 
-The in-app updater polls GitHub Releases on startup and hourly in the
-background (release builds only), matches the `-tv-` named asset, and
+The in-app updater polls GitHub Releases on startup and every six hours in
+the background on an unmetered connection (release builds only), matches the
+`-tv-` named asset, and
 downloads it in the background. Update source defaults live in
 `app/build.gradle.kts` (`githubReleaseOwner`, `githubReleaseRepo`) and can be
 overridden with `-PgithubReleaseOwner=... -PgithubReleaseRepo=...`.

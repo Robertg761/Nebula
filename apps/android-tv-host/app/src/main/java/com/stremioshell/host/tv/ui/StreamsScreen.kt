@@ -17,14 +17,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -44,8 +43,11 @@ import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.R
+import com.stremioshell.host.tv.StreamsRequestKey
 import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.data.addon.AddonStream
 import com.stremioshell.host.tv.data.addon.StreamAutoPick
@@ -84,10 +86,11 @@ fun StreamsScreen(
   onOpenSettings: () -> Unit = {},
   onStreamClick: (AddonStream) -> Unit,
 ) {
-  val streams by viewModel.streams.collectAsState()
-  val notice by viewModel.streamsNotice.collectAsState()
-  val addons by viewModel.addonManifestUrls.collectAsState()
-  val remembered by viewModel.rememberedPicks.collectAsState()
+  val streams by viewModel.streams.collectAsStateWithLifecycle()
+  val streamsRequest by viewModel.streamsRequest.collectAsStateWithLifecycle()
+  val notice by viewModel.streamsNotice.collectAsStateWithLifecycle()
+  val addons by viewModel.addonManifestUrls.collectAsStateWithLifecycle()
+  val remembered by viewModel.rememberedPicks.collectAsStateWithLifecycle()
   val addonCount = addons?.size ?: 0
   val firstStreamFocus = rememberInitialFocusTarget()
   val goBack = rememberBackAction()
@@ -100,12 +103,34 @@ fun StreamsScreen(
   // this screen instance has issued its own load.
   var loadIssued by remember(screen) { mutableStateOf(false) }
 
-  LaunchedEffect(screen) {
-    viewModel.loadStreams(screen.imdbId, screen.season, screen.episode)
-    loadIssued = true
+  val request = StreamsRequestKey(screen.imdbId, screen.season, screen.episode)
+
+  // Issues this screen's load, and re-issues it if the list is ever dropped underneath it: memory
+  // pressure clears the shared streams state (see TvAppViewModel.onTrimMemory), and this screen is
+  // usually the one waiting behind the player when that happens. A request the ViewModel no longer
+  // holds is the only sign of it, and without the re-issue a return from the player would land on
+  // a spinner that never resolves.
+  //
+  // Resume-scoped rather than a plain LaunchedEffect so a drop while the player is starting is not
+  // answered by refetching from every addon there and then, which is the moment the memory and the
+  // bandwidth were being reclaimed for. Keyed on the collected request as well, so a drop while
+  // the picker is actually on screen is picked up without waiting for the next resume - and read
+  // off the flow rather than off that key, because a resume can outrun the collector restarting.
+  LifecycleResumeEffect(screen, streamsRequest) {
+    if (!loadIssued || viewModel.streamsRequest.value != request) {
+      viewModel.loadStreams(screen.imdbId, screen.season, screen.episode)
+      loadIssued = true
+    }
+    onPauseOrDispose { }
   }
 
-  val state: LoadState<List<AddonStream>> = if (loadIssued) streams else LoadState.Loading
+  val state: LoadState<List<AddonStream>> = if (
+    loadIssued && streamsRequest == request
+  ) {
+    streams
+  } else {
+    LoadState.Loading
+  }
 
   // The row matching what was last picked for this series, which focus starts on instead
   // of the top of the list. Deliberately only preselected, never auto-played: the addon's
@@ -115,7 +140,12 @@ fun StreamsScreen(
   var filters by remember(screen) { mutableStateOf(StreamFilters()) }
   var streamListFocusTick by remember(screen) { mutableIntStateOf(0) }
   val sourceOptions = remember(rawList) { StreamFilterPolicy.sources(rawList) }
-  val list = remember(rawList, filters) { StreamFilterPolicy.apply(rawList, filters) }
+  // Read once per load, not once per press. Every regex on this screen lives behind this call, and
+  // filtering, tier headings and each row's badges all read the result rather than the free text
+  // again - so cycling a filter chip is now list comparisons and nothing else.
+  val rated = remember(rawList) { StreamFilterPolicy.rate(rawList) }
+  val visible = remember(rated, filters) { StreamFilterPolicy.applyRated(rated, filters) }
+  val list = remember(visible) { visible.map(RatedStream::stream) }
   val memory = if (screen.season != null) remembered[screen.imdbId] else null
   val matched = remember(list, memory) {
     memory?.let { StreamAutoPick.pick(list, bingeGroup = null, remembered = it) }
@@ -127,9 +157,9 @@ fun StreamsScreen(
   // to be the best one, so the same stream was badged on one episode and bare on the next.
   val preselected = matched?.let { list.indexOf(it) }?.coerceAtLeast(0) ?: 0
 
-  // Tier headings and per-row text, built once per list rather than per row: this is where the
-  // regexes live, and a focus move down the list recomposes every row it passes.
-  val rows = remember(list) { StreamPresentation.rows(list) }
+  // Tier headings, built once per list rather than per row: a focus move down the list recomposes
+  // every row it passes.
+  val rows = remember(visible) { StreamPresentation.rows(visible) }
   val preselectedRow = remember(rows, preselected) {
     rows.indexOfFirst { it is StreamListItem.Release && it.index == preselected }
   }
@@ -328,20 +358,21 @@ fun StreamsScreen(
             ),
             modifier = Modifier.weight(1f),
           ) {
-            // Debrid addons hand back the same resolved URL under several quality labels, and the
-            // addon client only drops blank URLs - so a url-only key throws "Key was already used"
-            // and takes the screen down. The position prefix keeps keys unique there while staying
-            // stable for recompositions of the same list.
-            itemsIndexed(
+            // The key is the row's own identity, computed with the list; see [StreamPresentation.rows]
+            // for why it cannot simply be the URL, and why it must not be the position.
+            items(
               rows,
-              key = { position, row ->
+              key = { row -> row.key },
+              // A tier heading is a line of text and a release is a two-line card with a badge
+              // run: without this Compose is free to recycle one into the other every time a
+              // filter changes the shape of the list.
+              contentType = { row ->
                 when (row) {
-                  is StreamListItem.Tier -> "tier:$position:${row.label}"
-                  is StreamListItem.Release ->
-                    "row:$position:${row.stream.url ?: row.stream.label}"
+                  is StreamListItem.Tier -> "tier"
+                  is StreamListItem.Release -> "release"
                 }
               },
-            ) { _, row ->
+            ) { row ->
               when (row) {
                 // Carries no focusable, so the D-pad steps straight past it and the screen keeps
                 // every focus target it had.
@@ -738,12 +769,22 @@ private fun NoticeStrip(message: String, modifier: Modifier = Modifier) {
 
 /** One entry in the picker: a tier heading, or a release. */
 sealed interface StreamListItem {
+  /**
+   * What this row is, independent of where it currently sits.
+   *
+   * Deliberately not derived from the position. The key used to be `"row:$position:$url"`, so every
+   * press of a filter chip renamed every row: the lazy list could reuse nothing, each surviving row
+   * was torn down and rebuilt, and the node holding focus went with it.
+   */
+  val key: String
+
   /** @param count how many releases are in this tier, so the heading is also a map. */
-  data class Tier(val label: String, val count: Int) : StreamListItem
+  data class Tier(override val key: String, val label: String, val count: Int) : StreamListItem
 
   /** @param index the release's position in the *unflattened* list, which is what focus and the
    *   remembered pick are addressed by. */
   data class Release(
+    override val key: String,
     val index: Int,
     val stream: AddonStream,
     val quality: StreamQuality,
@@ -902,21 +943,53 @@ object StreamPresentation {
    * Safe to group in one pass because the list arrives sorted by `StreamOrder`, which is descending
    * by resolution - so a tier is always contiguous. A single tier gets no heading at all: it would
    * only repeat the summary line above the list.
+   *
+   * Each entry is also given the identity the lazy list keys on. A release is named by its URL,
+   * which is what actually distinguishes two rows - but debrid addons hand back the *same* resolved
+   * URL under several quality labels and the addon client only drops blank ones, so a bare URL key
+   * throws "Key was already used" and takes the screen down. [RatedStream.occurrence] - counted
+   * over the unfiltered list in [StreamFilterPolicy.rate] - is what makes it unique without making
+   * it positional: a row keeps its name when a filter removes the duplicates above it, which is
+   * what lets the list reuse its nodes and keeps focus on the release the viewer was standing on.
+   * The newline separator is deliberate: a URL cannot contain one, so no URL ending in `#1` can
+   * forge another row's suffixed key.
    */
-  fun rows(streams: List<AddonStream>): List<StreamListItem> {
-    val parsed = streams.map { StreamQuality.parse(it) }
-    val labels = parsed.map(::tierLabel)
+  fun rows(streams: List<RatedStream>): List<StreamListItem> {
+    val labels = streams.map { tierLabel(it.quality) }
     val tiers = labels.distinct().size
     val out = ArrayList<StreamListItem>(streams.size + tiers)
+    val seenTiers = mutableMapOf<String, Int>()
     var index = 0
     while (index < streams.size) {
       var end = index
       while (end < streams.size && labels[end] == labels[index]) end++
-      if (tiers > 1) out += StreamListItem.Tier(labels[index], end - index)
-      for (i in index until end) out += StreamListItem.Release(i, streams[i], parsed[i])
+      if (tiers > 1) {
+        val label = labels[index]
+        out += StreamListItem.Tier(
+          key = occurrenceKey("tier", label, seenTiers),
+          label = label,
+          count = end - index,
+        )
+      }
+      for (i in index until end) {
+        val rated = streams[i]
+        out += StreamListItem.Release(
+          key = "row:${rated.occurrence}\n${rated.stream.url ?: rated.stream.label}",
+          index = i,
+          stream = rated.stream,
+          quality = rated.quality,
+        )
+      }
       index = end
     }
     return out
+  }
+
+  /** `"<kind>:<name>"`, suffixed only where the same name has already been handed out. */
+  private fun occurrenceKey(kind: String, name: String, seen: MutableMap<String, Int>): String {
+    val occurrence = seen[name] ?: 0
+    seen[name] = occurrence + 1
+    return if (occurrence == 0) "$kind:$name" else "$kind:$name#$occurrence"
   }
 
   /** A filename as a line of words: no container, no scene punctuation, no double spaces. */

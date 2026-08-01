@@ -1,9 +1,34 @@
 package com.stremioshell.host.tv.ui
 
+import androidx.compose.runtime.Immutable
 import com.stremioshell.host.tv.data.addon.AddonStream
 import com.stremioshell.host.tv.data.addon.StreamQuality
 
 private const val FILTER_GIB = 1024L * 1024L * 1024L
+
+/**
+ * One release and what its own text says about it, read once.
+ *
+ * The parse is regex work over four free-text fields, and everything the picker does needs the
+ * answer: three of the six filters, the recommended preset's two narrowing passes, the tier
+ * headings and the row's own badges. Read at each of those points it ran eight or nine times per
+ * stream for every press of a filter chip, on the main thread, inside composition. Read once here
+ * it runs exactly as many times as there are streams, and only when the list itself changes.
+ */
+@Immutable
+data class RatedStream(
+  val stream: AddonStream,
+  val quality: StreamQuality,
+  /**
+   * Which repeat of its identity (URL, or label when there is none) this row is, counted over the
+   * *unfiltered* list. It exists for the lazy-list key: debrid addons hand back the same resolved
+   * URL under several labels, so the URL alone collides. Counted here rather than over the
+   * filtered rows because a filter that removes the first duplicate must not renumber the
+   * survivors - a renumbered key means the list reuses a node for a different stream and focus
+   * tracks position instead of identity.
+   */
+  val occurrence: Int = 0,
+)
 
 enum class StreamViewMode(val label: String) {
   Recommended("Recommended"),
@@ -70,14 +95,29 @@ data class StreamFilters(
 object StreamFilterPolicy {
   private const val RECOMMENDED_MAX_BYTES = 30L * 1024L * 1024L * 1024L
 
-  fun apply(streams: List<AddonStream>, filters: StreamFilters): List<AddonStream> {
+  /** The whole list, read once. Everything below filters over the result rather than the raw rows. */
+  fun rate(streams: List<AddonStream>): List<RatedStream> {
+    val seen = mutableMapOf<String, Int>()
+    return streams.map { stream ->
+      val identity = stream.url ?: stream.label
+      val occurrence = seen[identity] ?: 0
+      seen[identity] = occurrence + 1
+      RatedStream(stream, StreamQuality.parse(stream), occurrence)
+    }
+  }
+
+  /** Filters a raw list end to end, reading it once on the way through. */
+  fun apply(streams: List<AddonStream>, filters: StreamFilters): List<AddonStream> =
+    applyRated(rate(streams), filters).map(RatedStream::stream)
+
+  /** The same policy over rows already read, which is what the picker holds. */
+  fun applyRated(streams: List<RatedStream>, filters: StreamFilters): List<RatedStream> {
     var candidates = streams
     if (filters.availability == StreamAvailability.Instant) {
-      candidates = candidates.filter(StreamPresentation::isCached)
+      candidates = candidates.filter { StreamPresentation.isCached(it.stream) }
     }
     if (filters.dynamicRange != StreamDynamicRange.Any) {
-      candidates = candidates.filter { stream ->
-        val quality = StreamQuality.parse(stream)
+      candidates = candidates.filter { (_, quality) ->
         when (filters.dynamicRange) {
           StreamDynamicRange.Any -> true
           StreamDynamicRange.Sdr -> !quality.hdr && !quality.dolbyVision
@@ -87,15 +127,17 @@ object StreamFilterPolicy {
       }
     }
     if (filters.resolution != StreamResolution.Any) {
-      candidates = candidates.filter { stream ->
-        resolutionOf(StreamQuality.parse(stream).resolutionHeight) == filters.resolution
+      candidates = candidates.filter { (_, quality) ->
+        resolutionOf(quality.resolutionHeight) == filters.resolution
       }
     }
     filters.source?.let { source ->
-      candidates = candidates.filter { it.source == source }
+      candidates = candidates.filter { it.stream.source == source }
     }
     filters.sizeLimit.maxBytes?.let { limit ->
-      candidates = candidates.filter { (StreamQuality.parse(it).sizeBytes ?: Long.MAX_VALUE) <= limit }
+      candidates = candidates.filter { (_, quality) ->
+        (quality.sizeBytes ?: Long.MAX_VALUE) <= limit
+      }
     }
     // Apply the soft preset last. An explicit "DV" or source selection must not be emptied because
     // a different class/source happened to look friendlier before the viewer narrowed the list.
@@ -109,13 +151,13 @@ object StreamFilterPolicy {
   fun sources(streams: List<AddonStream>): List<String> =
     streams.mapNotNull(AddonStream::source).distinct()
 
-  private fun recommended(streams: List<AddonStream>): List<AddonStream> {
+  private fun recommended(streams: List<RatedStream>): List<RatedStream> {
     if (streams.isEmpty()) return streams
     var candidates = streams
-    candidates.prefer { StreamPresentation.isCached(it) }?.let { candidates = it }
-    candidates.prefer { !StreamQuality.parse(it).dolbyVision }?.let { candidates = it }
+    candidates.prefer { StreamPresentation.isCached(it.stream) }?.let { candidates = it }
+    candidates.prefer { !it.quality.dolbyVision }?.let { candidates = it }
     candidates.prefer {
-      val bytes = StreamQuality.parse(it).sizeBytes
+      val bytes = it.quality.sizeBytes
       bytes == null || bytes <= RECOMMENDED_MAX_BYTES
     }?.let { candidates = it }
     return candidates
@@ -130,7 +172,7 @@ object StreamFilterPolicy {
   }
 
   /** A preference narrows only when at least one row survives it. */
-  private fun List<AddonStream>.prefer(
-    predicate: (AddonStream) -> Boolean,
-  ): List<AddonStream>? = filter(predicate).takeIf(List<AddonStream>::isNotEmpty)
+  private fun List<RatedStream>.prefer(
+    predicate: (RatedStream) -> Boolean,
+  ): List<RatedStream>? = filter(predicate).takeIf(List<RatedStream>::isNotEmpty)
 }

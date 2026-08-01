@@ -303,6 +303,25 @@ class HttpCachePolicyTest {
   }
 
   @Test
+  fun `an eagerly buffered body is decoded from the bytes it already holds`() {
+    val chain = FakeChain(cacheableRequest) { request ->
+      response(request, 200).newBuilder().body("""{"ok":true}""".toResponseBody(null)).build()
+    }
+
+    val body = requireNotNull(StaleOnNetworkFailureInterceptor(log = {}).intercept(chain).body)
+
+    // The interceptor has to hold the whole body anyway so that it can still retry against cache.
+    // Streaming those bytes back out through an Okio buffer to build the String left a response
+    // that is allowed to reach 5MB existing three times over.
+    assertTrue(body is BufferedBytesResponseBody)
+    assertEquals("""{"ok":true}""", body.readUtf8Limited(MAX_JSON_RESPONSE_BYTES))
+    // Re-readable, unlike a streamed body: the cache and OkHttp's own logging may look at it too.
+    assertEquals("""{"ok":true}""", body.readUtf8Limited(MAX_JSON_RESPONSE_BYTES))
+    // The ceiling still applies; skipping the stream must not mean skipping the check.
+    assertThrows(HttpResponseTooLargeException::class.java) { body.readUtf8Limited(2) }
+  }
+
+  @Test
   fun `json response reads are bounded even when length is unknown`() {
     assertEquals("12345", "12345".toResponseBody(null).readUtf8Limited(5))
     assertThrows(HttpResponseTooLargeException::class.java) {

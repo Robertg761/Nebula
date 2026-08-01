@@ -80,6 +80,51 @@ class StreamCatalogTest {
   }
 
   @Test
+  fun `a throttled fetch keeps its fan-out under the limit and still asks everyone`() = runBlocking {
+    // The player's next-episode resolver runs while the current episode is streaming over the same
+    // Wi-Fi, so it caps how many addons it interrogates at once. Every addon is still asked.
+    val inFlight = AtomicInteger()
+    val peak = AtomicInteger()
+    val requests = mutableListOf<String>()
+    val catalog = catalog(requests = requests) { _ ->
+      val concurrent = inFlight.incrementAndGet()
+      peak.getAndUpdate { maxOf(it, concurrent) }
+      delay(30)
+      inFlight.decrementAndGet()
+      streamsJson("1080p")
+    }
+
+    val fetch = catalog.fetch(
+      listOf(comet, torrentio, mediafusion, "https://orion.example/manifest.json"),
+      "tt0111161",
+      maxConcurrent = 2,
+    )
+
+    assertEquals(2, peak.get())
+    assertEquals(4, requests.size)
+    assertTrue(fetch.failures.isEmpty())
+  }
+
+  @Test
+  fun `an addon queued behind the limit is not blamed for the time it spent waiting`() = runBlocking {
+    // Its budget starts when it is actually asked. Charging it for our own queue would put
+    // "Couldn't reach X" on screen for an addon that answered the moment it got a turn.
+    val catalog = catalog(timeoutMillis = 200) { url ->
+      if (url.contains("comet")) delay(150)
+      streamsJson(url.substringAfter("https://").substringBefore('.'))
+    }
+
+    val fetch = catalog.fetch(
+      listOf(comet, torrentio, mediafusion),
+      "tt0111161",
+      maxConcurrent = 1,
+    )
+
+    assertTrue(fetch.failures.isEmpty())
+    assertEquals(3, fetch.streams.size)
+  }
+
+  @Test
   fun `an episode asks for the series id, a movie for the bare one`() = runBlocking {
     val requests = mutableListOf<String>()
     val catalog = catalog(requests = requests) { streamsJson("1080p") }

@@ -10,6 +10,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import java.util.Locale
 import kotlin.math.abs
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
@@ -63,7 +64,16 @@ class PlayerPrefsStore(private val context: Context) {
   private val store = context.playerPrefsDataStore
   private val data = store.recoveringData(PLAYER_STORE_NAME)
 
-  val prefs: Flow<PlayerPrefs> = data.map(::read)
+  /**
+   * DataStore emits on every committed edit, not on every changed value, and the Settings actions
+   * re-write what is already stored whenever a viewer cycles a ladder back around to where it
+   * started. Distinct on the assembled value keeps those out of Compose.
+   *
+   * No [kotlinx.coroutines.flow.flowOn] here on purpose, unlike the stores in `Stores.kt`: [read]
+   * is seven map lookups, so a dispatcher hop would cost more than the work it moved off the
+   * caller.
+   */
+  val prefs: Flow<PlayerPrefs> = data.map(::read).distinctUntilChanged()
 
   /**
    * One-shot read, for the player's startup: `alang`/`slang` have to be set

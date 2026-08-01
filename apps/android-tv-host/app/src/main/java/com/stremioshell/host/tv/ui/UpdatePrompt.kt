@@ -63,7 +63,9 @@ fun UpdatePromptHost(currentVersionName: String = BuildConfig.VERSION_NAME) {
   val settingsOpenFailed = stringResource(R.string.update_settings_open_failed)
 
   // Only re-checked when the app comes back to the foreground, so browsing the
-  // UI never re-raises the dialog.
+  // UI never re-raises the dialog. Returning from the player is a foreground
+  // return too, so this runs often; ApkUpdateManager remembers the archive
+  // verdict per file, which is what keeps it from re-reading ~117 MB each time.
   LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { refreshTick++ }
 
   LaunchedEffect(refreshTick, dismissedVersion) {

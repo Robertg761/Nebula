@@ -64,6 +64,24 @@ or vendor decoder behavior. Run the applicable cases below on both physical
 device classes in the device matrix and attach a short recording plus filtered
 logcat for every failure.
 
+## Physical navigation performance capture
+
+Run the same sustained D-pad path used by the macrobenchmark on the intended
+Streamer build:
+
+```bash
+export ANDROID_SERIAL="<device serial>"
+bash scripts/capture-tv-performance.sh
+```
+
+The capture records `gfxinfo`, `meminfo`, launch timing, and filtered `TvFocus`
+and `NebulaDiagnostics` logs beneath
+`apps/android-tv-host/app/build/outputs/tv-performance/`. Run it once without
+the baseline profile and once with the accepted profile, keeping display mode,
+network route, app data, and background workloads unchanged. Compare frame
+counts/slow frames, longest frames, memory, GC pressure, and focus warnings;
+do not treat emulator numbers as Streamer evidence.
+
 1. Display cadence and surface lifecycle:
    - Play known 23.976, 24, 25, 50, and 59.94 fps samples on a display that
      exposes matching modes. Confirm one mode change, even cadence, correct

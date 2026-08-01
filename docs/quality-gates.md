@@ -58,6 +58,9 @@ APK built from `apps/android-tv-host`.
   or critical navigation/playback paths, following `docs/baseline-profile.md`.
   Never hand-edit or claim a regenerated profile without the recorded device
   evidence required there.
+- The shipping `release` build runs R8 with resource shrinking and narrow
+  JNI/serialization keep rules. Any keep-rule change must pass the
+  JNI/serialization and playback smoke on the physical TV benchmark device.
 - The published release contains exactly one
   `StremioShell-tv-<version>.apk` plus the reviewed Gradle SBOM, native SBOM,
   and corresponding-source archive. The updater matches the APK by its exact

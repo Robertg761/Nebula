@@ -54,6 +54,7 @@
   <string name="player_subtitles_added">%1$s subtitles added</string>
   <string name="player_passthrough_unavailable">Passthrough unavailable on the connected audio device</string>
   <string name="player_audio_route_decode">Audio route changed \u2014 switched to Decode</string>
+  <string name="player_software_decoding">This device can\u2019t decode this stream in hardware \u2014 try a lower-resolution release</string>
   <string name="player_key_ok" translatable="false">OK</string>
   <string name="player_key_back" translatable="false">BACK</string>
   <string name="player_key_left_right" translatable="false">LEFT/RIGHT</string>

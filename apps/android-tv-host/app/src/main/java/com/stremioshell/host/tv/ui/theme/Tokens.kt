@@ -183,14 +183,23 @@ object NebulaDimens {
   val FocusGlowCompact = NebulaSpace.sm
 }
 
+/*
+ * The gradients below are plain vals, not `get()` accessors.
+ *
+ * A getter rebuilds its Brush - and the colour-stop list inside it - on every read, and these are
+ * read from the draw path of things there are many of: the scrim under every Continue Watching
+ * card, the accent tick on every episode row. One instance per gradient, allocated once, is
+ * exactly what a token is for.
+ */
+
 /**
  * The accent gradient, violet into cyan.
  *
  * Reserved for surfaces that mean "act now" - the primary Play button, the focused nav item, the
  * playback progress fill. Used anywhere else it stops meaning anything.
  */
-val NebulaAccentBrush: Brush
-  get() = Brush.horizontalGradient(listOf(NebulaPalette.Violet, NebulaPalette.Cyan))
+val NebulaAccentBrush: Brush =
+  Brush.horizontalGradient(listOf(NebulaPalette.Violet, NebulaPalette.Cyan))
 
 /**
  * The same ramp down its short axis, for the accent ticks beside headings.
@@ -200,8 +209,8 @@ val NebulaAccentBrush: Brush
  * documented as "violet-to-cyan" shipped with its cyan effectively invisible. Run along the long
  * axis it is actually a gradient.
  */
-val NebulaAccentBrushVertical: Brush
-  get() = Brush.verticalGradient(listOf(NebulaPalette.Violet, NebulaPalette.Cyan))
+val NebulaAccentBrushVertical: Brush =
+  Brush.verticalGradient(listOf(NebulaPalette.Violet, NebulaPalette.Cyan))
 
 /**
  * Left-to-right scrim for a billboard: opaque over the copy, clear over the artwork.
@@ -210,30 +219,27 @@ val NebulaAccentBrushVertical: Brush
  * manufactured. Three stops rather than two - a linear fade leaves a visible diagonal edge across
  * a flat sky, and the extra stop hides it.
  */
-val NebulaHeroScrim: Brush
-  get() = Brush.horizontalGradient(
-    0.00f to NebulaPalette.Void,
-    0.35f to NebulaPalette.Void.copy(alpha = 0.92f),
-    0.72f to NebulaPalette.Void.copy(alpha = 0.35f),
-    1.00f to Color.Transparent,
-  )
+val NebulaHeroScrim: Brush = Brush.horizontalGradient(
+  0.00f to NebulaPalette.Void,
+  0.35f to NebulaPalette.Void.copy(alpha = 0.92f),
+  0.72f to NebulaPalette.Void.copy(alpha = 0.35f),
+  1.00f to Color.Transparent,
+)
 
 /** Mirrored form of [NebulaHeroScrim] for right-to-left layouts, where copy sits on the right. */
-val NebulaHeroScrimRtl: Brush
-  get() = Brush.horizontalGradient(
-    0.00f to Color.Transparent,
-    0.28f to NebulaPalette.Void.copy(alpha = 0.35f),
-    0.65f to NebulaPalette.Void.copy(alpha = 0.92f),
-    1.00f to NebulaPalette.Void,
-  )
+val NebulaHeroScrimRtl: Brush = Brush.horizontalGradient(
+  0.00f to Color.Transparent,
+  0.28f to NebulaPalette.Void.copy(alpha = 0.35f),
+  0.65f to NebulaPalette.Void.copy(alpha = 0.92f),
+  1.00f to NebulaPalette.Void,
+)
 
 /** Bottom-up scrim, so a billboard or backdrop dissolves into the page rather than ending at a line. */
-val NebulaBottomScrim: Brush
-  get() = Brush.verticalGradient(
-    0.00f to Color.Transparent,
-    0.55f to NebulaPalette.Void.copy(alpha = 0.65f),
-    1.00f to NebulaPalette.Void,
-  )
+val NebulaBottomScrim: Brush = Brush.verticalGradient(
+  0.00f to Color.Transparent,
+  0.55f to NebulaPalette.Void.copy(alpha = 0.65f),
+  1.00f to NebulaPalette.Void,
+)
 
 /**
  * The scrim under the player OSD.
@@ -242,20 +248,18 @@ val NebulaBottomScrim: Brush
  * is the page. Here the thing under it is live video, and taking it to fully opaque black means the
  * bottom fifth of the picture is deleted whenever the panel is up. Stops at 0.88.
  */
-val NebulaOsdScrim: Brush
-  get() = Brush.verticalGradient(
-    0.00f to Color.Transparent,
-    0.45f to NebulaPalette.Void.copy(alpha = 0.55f),
-    1.00f to NebulaPalette.Void.copy(alpha = 0.88f),
-  )
+val NebulaOsdScrim: Brush = Brush.verticalGradient(
+  0.00f to Color.Transparent,
+  0.45f to NebulaPalette.Void.copy(alpha = 0.55f),
+  1.00f to NebulaPalette.Void.copy(alpha = 0.88f),
+)
 
 /** Full-bleed backdrop wash on Details: keeps the art present without letting it fight the copy. */
-val NebulaBackdropScrim: Brush
-  get() = Brush.verticalGradient(
-    0.00f to NebulaPalette.Void.copy(alpha = 0.55f),
-    0.45f to NebulaPalette.Void.copy(alpha = 0.88f),
-    1.00f to NebulaPalette.Void,
-  )
+val NebulaBackdropScrim: Brush = Brush.verticalGradient(
+  0.00f to NebulaPalette.Void.copy(alpha = 0.55f),
+  0.45f to NebulaPalette.Void.copy(alpha = 0.88f),
+  1.00f to NebulaPalette.Void,
+)
 
 /**
  * The focus ring, as one definition.
@@ -264,8 +268,13 @@ val NebulaBackdropScrim: Brush
  * hugs the artwork instead of overlapping it - on a poster, a ring drawn inside the bounds reads as
  * a frame printed on the image rather than as a highlight.
  */
-@Composable
-fun nebulaFocusBorder(shape: androidx.compose.ui.graphics.Shape = NebulaDimens.PosterShape) = Border(
+fun nebulaFocusBorder(shape: androidx.compose.ui.graphics.Shape = NebulaDimens.PosterShape): Border =
+  if (shape === NebulaDimens.PosterShape) PosterFocusBorder else focusBorder(shape)
+
+/** The ring at the default corner, which is the one every poster and card in the app asks for. */
+private val PosterFocusBorder = focusBorder(NebulaDimens.PosterShape)
+
+private fun focusBorder(shape: androidx.compose.ui.graphics.Shape) = Border(
   border = BorderStroke(3.dp, NebulaPalette.VioletBright),
   inset = (-2).dp,
   shape = shape,
@@ -282,8 +291,13 @@ fun nebulaCardBorder(shape: androidx.compose.ui.graphics.Shape = NebulaDimens.Po
  * tv-material3 renders this as a coloured elevation shadow, so a focused card genuinely spills
  * violet onto the background instead of just gaining an outline. Cheap - it is the platform
  * shadow renderer - which matters on this hardware.
+ *
+ * Built once and handed back, rather than rebuilt per call: every card in every rail asks for this
+ * on every composition of the row, and the value it gets is the same one every time.
  */
-fun nebulaCardGlow() = CardDefaults.glow(
+fun nebulaCardGlow() = CardGlow
+
+private val CardGlow = CardDefaults.glow(
   focusedGlow = Glow(
     elevationColor = NebulaPalette.Violet,
     elevation = NebulaDimens.FocusGlow,
@@ -307,7 +321,10 @@ fun nebulaButtonBorder(shape: androidx.compose.ui.graphics.Shape = NebulaShapes.
     ),
   )
 
-fun nebulaButtonGlow() = ButtonDefaults.glow(
+/** The button's bloom, hoisted for the same reason [nebulaCardGlow] is. */
+fun nebulaButtonGlow() = ButtonGlow
+
+private val ButtonGlow = ButtonDefaults.glow(
   focusedGlow = Glow(
     elevationColor = NebulaPalette.Violet,
     elevation = NebulaDimens.FocusGlowCompact,

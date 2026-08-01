@@ -32,11 +32,18 @@ class BaselineProfileGenerator {
     pressHome()
     startActivityAndWait()
     waitForText("Home")
+    waitForText("Trending Movies")
 
-    // Exercise home rail focus/scroll work before leaving the route.
-    repeat(3) { device.pressDPadRight() }
-    repeat(2) { device.pressDPadDown() }
-    device.pressDPadLeft()
+    // Exercise sustained home rail focus/scroll work before leaving the route. The repeat count is
+    // intentional: three presses only prove that the first card can move, while the reported
+    // regression appears when several lazy rows have been composed and artwork is being replaced.
+    repeat(12) { device.pressDPadRight() }
+    repeat(5) {
+      device.pressDPadDown()
+      repeat(6) { device.pressDPadRight() }
+    }
+    repeat(4) { device.pressDPadLeft() }
+    repeat(3) { device.pressDPadUp() }
 
     device.pressKeyCode(KeyEvent.KEYCODE_SEARCH)
     waitForText("Search")

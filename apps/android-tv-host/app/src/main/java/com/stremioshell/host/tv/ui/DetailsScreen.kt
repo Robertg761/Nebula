@@ -4,7 +4,6 @@ import android.graphics.Bitmap
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
@@ -39,10 +38,10 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -50,10 +49,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawOutline
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.inset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -76,10 +80,13 @@ import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.R
+import com.stremioshell.host.tv.DetailsRequestKey
+import com.stremioshell.host.tv.SeasonRequestKey
 import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.WatchlistEntry
@@ -185,6 +192,10 @@ private data class HeaderPlay(
   val spoken: String?,
 )
 
+/** [WatchEntry.key] for one episode, stated once rather than rebuilt at each of its three readers. */
+private fun episodeWatchKey(tmdbId: Int, season: Int, episode: Int): String =
+  "episode:$tmdbId:$season:$episode"
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DetailsScreen(
@@ -195,12 +206,14 @@ fun DetailsScreen(
 ) {
   val type = screen.type
   val tmdbId = screen.tmdbId
-  val detailsState by viewModel.details.collectAsState()
-  val episodesState by viewModel.episodes.collectAsState()
+  val detailsState by viewModel.details.collectAsStateWithLifecycle()
+  val detailsRequest by viewModel.detailsRequest.collectAsStateWithLifecycle()
+  val episodesState by viewModel.episodes.collectAsStateWithLifecycle()
+  val seasonRequest by viewModel.seasonRequest.collectAsStateWithLifecycle()
   // Every record, watched ones included: this screen marks finished episodes as well as
   // part-watched ones, so it cannot use the Continue Watching projection.
-  val watching by viewModel.watchEntries.collectAsState()
-  val watchlistKeys by viewModel.watchlistKeys.collectAsState()
+  val watching by viewModel.watchEntries.collectAsStateWithLifecycle()
+  val watchlistKeys by viewModel.watchlistKeys.collectAsStateWithLifecycle()
   val context = LocalContext.current
   var trailerFeedback by rememberSaveable(type, tmdbId) { mutableStateOf<String?>(null) }
   // Recomputed only when the calendar can actually change. Refreshing on resume covers a TV that
@@ -223,10 +236,20 @@ fun DetailsScreen(
   // only runs from the effect above, one composition later. Rendering that Ready value would flash
   // the wrong title and, worse, seed the season selection from the wrong season list - so anything
   // that is not this screen's title counts as still loading.
-  val details: LoadState<MediaDetails> = when (val state = detailsState) {
-    is LoadState.Ready ->
-      if (state.value.item.tmdbId == tmdbId && state.value.item.type == type) state else LoadState.Loading
-    else -> state
+  val details: LoadState<MediaDetails> = if (
+    detailsRequest == DetailsRequestKey(type, tmdbId)
+  ) {
+    when (val state = detailsState) {
+      is LoadState.Ready ->
+        if (state.value.item.tmdbId == tmdbId && state.value.item.type == type) {
+          state
+        } else {
+          LoadState.Loading
+        }
+      else -> state
+    }
+  } else {
+    LoadState.Loading
   }
 
   LoadStateContent(
@@ -259,22 +282,39 @@ fun DetailsScreen(
 
     // Same staleness trap one level down: the episode list can still be the previously selected
     // season's until loadSeason's effect has run.
-    val episodes: LoadState<List<EpisodeItem>> = when (val state = episodesState) {
-      is LoadState.Ready ->
-        if (state.value.all { it.seasonNumber == selectedSeason }) state else LoadState.Loading
-      else -> state
+    val episodes: LoadState<List<EpisodeItem>> = if (
+      seasonRequest == SeasonRequestKey(tmdbId, selectedSeason)
+    ) {
+      when (val state = episodesState) {
+        is LoadState.Ready ->
+          if (state.value.all { it.seasonNumber == selectedSeason }) state else LoadState.Loading
+        else -> state
+      }
+    } else {
+      LoadState.Loading
     }
 
+    // Every record this page asks about, by the key it asks with. The header, the play decision and
+    // all 24 episode rows used to scan the whole store instead - the rows from inside their own item
+    // lambdas, which also subscribed each visible row to the entire list, so one position write
+    // recomposed every one of them.
+    val watchByKey = remember(watching) { watching.associateBy(WatchEntry::key) }
+
     // Newest saved position for this show, preferring the exact episode the user clicked in
-    // Continue Watching. Shows get the same Resume affordance movies always had.
-    val showResume = if (media.item.type == MediaType.Show && media.imdbId != null) {
-      val forShow = watching.filter {
-        it.tmdbId == media.item.tmdbId && it.season != null && it.episode != null && !it.watched
+    // Continue Watching. Shows get the same Resume affordance movies always had. Remembered: this
+    // header recomposes on every watch-state write and every season switch, and unremembered the
+    // filter allocated a fresh list on each of them.
+    val showResume = remember(watching, media, screen.initialSeason, screen.initialEpisode) {
+      if (media.item.type == MediaType.Show && media.imdbId != null) {
+        val forShow = watching.filter {
+          it.tmdbId == media.item.tmdbId && it.season != null && it.episode != null && !it.watched
+        }
+        forShow.firstOrNull {
+          it.season == screen.initialSeason && it.episode == screen.initialEpisode
+        } ?: forShow.firstOrNull()
+      } else {
+        null
       }
-      forShow.firstOrNull { it.season == screen.initialSeason && it.episode == screen.initialEpisode }
-        ?: forShow.firstOrNull()
-    } else {
-      null
     }
 
     val hasSeasonRow = media.item.type == MediaType.Show && media.seasons.isNotEmpty()
@@ -283,18 +323,15 @@ fun DetailsScreen(
     // season nobody has finished, skipping anything that has not aired, and falling back to the
     // season's first episode once the whole thing is watched. One scan of a list that is already
     // in memory, and only when it or the watch records change.
-    val firstUnplayed = remember(episodes, watching, media.item.tmdbId, today) {
+    val firstUnplayed = remember(episodes, watchByKey, media.item.tmdbId, today) {
       val list = when (val state = episodes) {
         is LoadState.Ready -> state.value
         else -> emptyList()
       }
       val aired = list.filterNot { AirDate.isUpcoming(it.airDate, today) }
       aired.firstOrNull { episode ->
-        !AirDate.isUpcoming(episode.airDate, today) &&
-          watching.none {
-            it.key == "episode:${media.item.tmdbId}:${episode.seasonNumber}:${episode.episodeNumber}" &&
-              it.watched
-          }
+        val key = episodeWatchKey(media.item.tmdbId, episode.seasonNumber, episode.episodeNumber)
+        !AirDate.isUpcoming(episode.airDate, today) && watchByKey[key]?.watched != true
       } ?: aired.firstOrNull()
     }
 
@@ -302,7 +339,7 @@ fun DetailsScreen(
     val headerPlay: HeaderPlay? = when {
       media.imdbId == null -> null
       media.item.type == MediaType.Movie -> {
-        val entry = watching.firstOrNull { it.key == "movie:${media.item.tmdbId}" }
+        val entry = watchByKey["movie:${media.item.tmdbId}"]
         // Only a real resume point has something to start over from; a watched record already
         // plays from 0:00, so it needs no second button.
         val resume = entry?.takeIf { !it.watched && it.positionMs > 0 }
@@ -443,6 +480,9 @@ fun DetailsScreen(
     }
 
     val railSpec = rememberDetailsRailSpec()
+    // Wrapped once per title so the two rails below can skip; see [StableList].
+    val cast = remember(media.cast) { StableList(media.cast) }
+    val similar = remember(media.similar) { StableList(media.similar) }
 
     Box(modifier = Modifier.fillMaxSize()) {
       if (media.item.backdropUrl != null) {
@@ -482,20 +522,21 @@ fun DetailsScreen(
         // The scrim is fixed to the viewport, so on its own it only made that claim true for the
         // bottom of the screen: however far the page scrolled, the top 45% stayed the title's
         // backdrop, and the cast headshots and "More like this" posters ended up sitting on an
-        // unrelated still with a bright sky behind them. Reading the scroll inside the layer block
-        // is a draw-phase read - no recomposition, no relayout, one extra solid quad on a GPU that
-        // is already compositing two.
+        // unrelated still with a bright sky behind them. The scroll is read in the draw phase - no
+        // recomposition, no relayout - and painted straight into the quad's own paint rather than
+        // through a graphicsLayer, which would have put a whole-screen RenderNode on the frame to
+        // fade one flat colour.
         Box(
           modifier = Modifier
             .fillMaxSize()
-            .graphicsLayer {
-              alpha = if (listState.firstVisibleItemIndex > 0) {
+            .drawBehind {
+              val settled = if (listState.firstVisibleItemIndex > 0) {
                 1f
               } else {
                 (listState.firstVisibleItemScrollOffset / BACKDROP_SETTLE.toPx()).coerceIn(0f, 1f)
               }
-            }
-            .background(NebulaPalette.Void),
+              if (settled > 0f) drawRect(NebulaPalette.Void, alpha = settled)
+            },
         )
       }
 
@@ -516,7 +557,10 @@ fun DetailsScreen(
             // this group, and there is nothing saved here to restore.
             .restoreColumnFocus(),
         ) {
-          item(key = "header") {
+          // contentType on every item kind, as on Home: without it Compose treats a ~450dp header,
+          // an episode row and a cast rail as interchangeable subcomposition slots and recomposes
+          // one into the other as the page scrolls.
+          item(key = "header", contentType = "header") {
             // No uniform `spacedBy` on this Column. One gap for all four kinds of block gave the
             // header no vertical hierarchy at all - the distance from a 40sp title to its metadata
             // was the distance from the synopsis to the Play button - so each block states its own
@@ -602,7 +646,7 @@ fun DetailsScreen(
           }
 
           if (hasSeasonRow) {
-            item(key = "seasons") {
+            item(key = "seasons", contentType = "seasons") {
               // The bottom padding is what stops the selector reading as the first item of the
               // list rather than as the control for it: at the list's own 16dp it was closer to
               // the first episode than the episodes are to each other.
@@ -642,9 +686,10 @@ fun DetailsScreen(
               is LoadState.Loading -> items(
                 EPISODE_SKELETON_ROWS,
                 key = { "episode-skeleton-$it" },
+                contentType = { "episode-skeleton" },
               ) { EpisodeSkeleton() }
               // A bare error message would be unreachable by the D-pad, so failures offer Retry.
-              is LoadState.Failed -> item(key = "episodes-status") {
+              is LoadState.Failed -> item(key = "episodes-status", contentType = "episodes-status") {
                 Column(
                   verticalArrangement = Arrangement.spacedBy(NebulaSpace.sm),
                   modifier = Modifier.padding(horizontal = NebulaDimens.ScreenEdge),
@@ -664,13 +709,17 @@ fun DetailsScreen(
               is LoadState.Ready -> items(
                 loaded.value.size,
                 key = { "episode:${loaded.value[it].seasonNumber}:${loaded.value[it].episodeNumber}" },
+                contentType = { "episode" },
               ) { index ->
                 val episode = loaded.value[index]
+                val watchKey = episodeWatchKey(
+                  media.item.tmdbId,
+                  episode.seasonNumber,
+                  episode.episodeNumber,
+                )
                 EpisodeRow(
                   episode = episode,
-                  entry = watching.firstOrNull {
-                    it.key == "episode:${media.item.tmdbId}:${episode.seasonNumber}:${episode.episodeNumber}"
-                  },
+                  entry = watchByKey[watchKey],
                   isResumeTarget = episode.episodeNumber == resumeEpisode,
                   // Nothing has been released for an episode that has not aired, so its streams
                   // would come back empty. It stays focusable with a no-op OK rather than being
@@ -689,17 +738,17 @@ fun DetailsScreen(
           // Below the episode list, in the order a viewer asks the questions: who is in this, then
           // what else is like it.
           if (media.cast.isNotEmpty()) {
-            item(key = "cast") { CastRow(media.cast, railSpec) }
+            item(key = "cast", contentType = "cast") { CastRow(cast, railSpec) }
           }
           if (media.similar.isNotEmpty()) {
             // The Home rail as-is, so recommendations are browsed with exactly the card, spacing
             // and focus restoration the viewer already learned one screen back. It brings its own
             // bring-into-view spec, so the column's vertical rule does not reach it.
-            item(key = "similar") {
+            item(key = "similar", contentType = "similar") {
               Box(modifier = Modifier.padding(top = SECTION_GAP)) {
                 MediaRow(
                   title = stringResource(R.string.details_more_like_this),
-                  items = media.similar,
+                  items = similar,
                   onItemClick = { onItemClick(it.type, it.tmdbId) },
                 )
               }
@@ -753,24 +802,29 @@ private val DetailsFocusLineSpec = object : BringIntoViewSpec {
  * MediaRow owns the identical rail rule, but privately inside Components.kt, so the season row and
  * the cast row re-provide their own copy: scroll the minimum needed to keep the focused item, its
  * ring and its glow clear of both edges, and nothing at all when it is already comfortably in view.
+ *
+ * A named [Stable] class rather than an anonymous object: [BringIntoViewSpec] is an interface, so a
+ * composable taking one as a parameter is never skippable - which was enough on its own to keep
+ * [CastRow] recomposing on every watch-state write.
  */
 @OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun rememberDetailsRailSpec(): BringIntoViewSpec {
-  val margin = with(LocalDensity.current) { (NebulaDimens.ScreenEdge + 10.dp).toPx() }
-  return remember(margin) {
-    object : BringIntoViewSpec {
-      override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
-        val leadingGap = offset - margin
-        val trailingGap = offset + size - (containerSize - margin)
-        return when {
-          leadingGap < 0f -> leadingGap
-          trailingGap > 0f -> trailingGap
-          else -> 0f
-        }
-      }
+@Stable
+private class DetailsRailSpec(private val margin: Float) : BringIntoViewSpec {
+  override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
+    val leadingGap = offset - margin
+    val trailingGap = offset + size - (containerSize - margin)
+    return when {
+      leadingGap < 0f -> leadingGap
+      trailingGap > 0f -> trailingGap
+      else -> 0f
     }
   }
+}
+
+@Composable
+private fun rememberDetailsRailSpec(): DetailsRailSpec {
+  val margin = with(LocalDensity.current) { (NebulaDimens.ScreenEdge + 10.dp).toPx() }
+  return remember(margin) { DetailsRailSpec(margin) }
 }
 
 /**
@@ -1317,6 +1371,13 @@ private fun ExpandableOverview(text: String, stateKey: String) {
  * TV Material's Card requires an onClick and therefore exposes a click action to accessibility
  * even when that callback is empty. Upcoming episodes and cast portraits need traversal and a
  * strong focus affordance, but no fake action.
+ *
+ * The fill and the ring are painted rather than declared. `background`/`border` take their colours
+ * as arguments, so reading `focused` for them was a *composition* read: every D-pad step down the
+ * episode list recomposed this whole subtree twice - the row that lost focus and the row that
+ * gained it, each of them re-running the still, the badges and all four Text nodes inside it. Read
+ * in the draw scope, the same change costs one redraw of one node, which is the rule the rest of
+ * the app already follows.
  */
 @Composable
 private fun FocusableInfoSurface(
@@ -1336,21 +1397,39 @@ private fun FocusableInfoSurface(
         shadowElevation = if (focused) 12.dp.toPx() else 0f
         this.shape = shape
       }
-      .background(
-        color = if (focused) NebulaPalette.SurfaceRaised else NebulaPalette.Surface,
-        shape = shape,
-      )
-      .border(
-        width = if (focused) 3.dp else 1.dp,
-        color = if (focused) NebulaPalette.VioletBright else NebulaPalette.Outline,
-        shape = shape,
-      )
+      .drawBehind {
+        drawOutline(
+          shape.createOutline(size, layoutDirection, this),
+          color = if (focused) NebulaPalette.SurfaceRaised else NebulaPalette.Surface,
+        )
+      }
+      // The ring must paint over the content, the way Modifier.border did: a cast
+      // portrait fills this surface edge to edge with an opaque image, and a ring
+      // drawn behind it is a ring nobody sees. Still a draw-phase read of
+      // `focused`, so a D-pad step redraws without recomposing the content.
+      .drawWithContent {
+        drawContent()
+        // Inset by half the stroke, which is where Modifier.border puts it: a ring centred on the
+        // bounds would hang 1.5dp outside them and the focused row would grow.
+        val stroke = if (focused) FOCUSED_STROKE.toPx() else RESTING_STROKE.toPx()
+        inset(stroke / 2f) {
+          drawOutline(
+            shape.createOutline(size, layoutDirection, this),
+            color = if (focused) NebulaPalette.VioletBright else NebulaPalette.Outline,
+            style = Stroke(stroke),
+          )
+        }
+      }
       .onFocusChanged { focused = it.isFocused }
       .focusable()
       .semantics(mergeDescendants = true) { contentDescription = description },
     content = content,
   )
 }
+
+/** [FocusableInfoSurface]'s two ring weights, unchanged from the borders they replaced. */
+private val FOCUSED_STROKE = 3.dp
+private val RESTING_STROKE = 1.dp
 
 /**
  * The billed cast, headshot first.
@@ -1364,7 +1443,8 @@ private fun FocusableInfoSurface(
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun CastRow(cast: List<CastMember>, railSpec: BringIntoViewSpec) {
+private fun CastRow(members: StableList<CastMember>, railSpec: DetailsRailSpec) {
+  val cast = members.items
   Column(modifier = Modifier.padding(top = SECTION_GAP)) {
     RailHeading(stringResource(R.string.details_cast_heading))
     CompositionLocalProvider(LocalBringIntoViewSpec provides railSpec) {

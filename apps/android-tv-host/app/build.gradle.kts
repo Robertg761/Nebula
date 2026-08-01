@@ -67,21 +67,27 @@ android {
     debug {
       // Android's API 26/34 TV system images are x86, while local generic
       // emulators are commonly x86_64. libmpv 0.4.1 ships both, so debug keeps
-      // both emulator ABIs on top of the two shipping ABIs.
+      // both emulator ABIs on top of the ABIs a physical device can sideload.
+      // Debug is never shipped, so its size does not matter the way release's does.
       ndk {
         abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
       }
       manifestPlaceholders["usesCleartextTraffic"] = "true"
     }
     release {
-      // No Android TV device is x86; shipping those ABIs doubled the APK for
-      // nothing. Single universal APK on purpose - the release workflow picks
-      // one file out of outputs/apk/release and the in-app updater matches a
-      // single "-tv-" named asset, both of which ABI splits would break.
+      // Both ARM ABIs, neither x86. Dropping armeabi-v7a was tried and reverted:
+      // the Google TV Streamer itself (kirkwood, this app's primary target)
+      // reports ro.product.cpu.abilist=armeabi-v7a,armeabi - a 32-bit userspace -
+      // and an arm64-only APK fails there with INSTALL_FAILED_NO_MATCHING_ABIS.
+      // The arm64 slice stays for the boxes that do run 64-bit. Single universal
+      // APK on purpose - the release workflow picks one file out of
+      // outputs/apk/release and the in-app updater matches a single "-tv-" named
+      // asset, both of which ABI splits would break.
       ndk {
         abiFilters += listOf("arm64-v8a", "armeabi-v7a")
       }
-      isMinifyEnabled = false
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(
         getDefaultProguardFile("proguard-android-optimize.txt"),
         "proguard-rules.pro"
@@ -100,6 +106,39 @@ android {
 
   kotlinOptions {
     jvmTarget = "17"
+    // AGP applies the Compose compiler through composeOptions, which exposes no
+    // stability-config property; the plugin only reads the file off its own -P
+    // argument. The path has to be absolute because the compiler resolves it
+    // against the daemon's working directory, not the project directory.
+    freeCompilerArgs += listOf(
+      "-P",
+      "plugin:androidx.compose.compiler.plugins.kotlin:stabilityConfigurationPath=" +
+        project.layout.projectDirectory.file("stability_config.conf").asFile.absolutePath
+    )
+
+    // Opt-in: the reports are rewritten by every compilation and are only of use while someone
+    // is reading them, so they stay off the ordinary build.
+    //
+    //   ./gradlew :app:assembleRelease -PcomposeMetrics
+    //
+    // leaves app-module.json (skippable/restartable composable counts) and *-composables.txt
+    // (the unstable parameter that made each one recompose) under app/build/compose-metrics.
+    // Any variant produces them - they come out of the Kotlin compilation, not out of R8 - but
+    // release is the variant the shipped app is built from. Toggling the property changes the
+    // compile task's inputs, so the first build after adding or dropping it is a full one.
+    //
+    // Absolute paths for the same reason as the stability config above - the compiler resolves
+    // them against the daemon's working directory.
+    if (project.hasProperty("composeMetrics")) {
+      val composeMetricsDir =
+        project.layout.buildDirectory.dir("compose-metrics").get().asFile.absolutePath
+      freeCompilerArgs += listOf(
+        "-P",
+        "plugin:androidx.compose.compiler.plugins.kotlin:metricsDestination=$composeMetricsDir",
+        "-P",
+        "plugin:androidx.compose.compiler.plugins.kotlin:reportsDestination=$composeMetricsDir",
+      )
+    }
   }
 
   buildFeatures {

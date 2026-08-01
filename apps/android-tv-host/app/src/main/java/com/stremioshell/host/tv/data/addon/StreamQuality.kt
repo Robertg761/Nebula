@@ -99,7 +99,18 @@ data class StreamQuality(
      * tier.
      */
     private fun String.containsToken(vararg tokens: String): Boolean =
-      tokens.any { token -> Regex("(?<![a-z0-9])$token(?![a-z0-9])").containsMatchIn(this) }
+      tokens.any { token -> TOKENS.getValue(token).containsMatchIn(this) }
+
+    /**
+     * Every word-boundary marker this file asks about, compiled once.
+     *
+     * Built per call, these were the most expensive thing on the stream picker by a wide margin:
+     * a parse runs seven of them, the filter parsed each row several times over, and eighty rows
+     * meant thousands of fresh Regex compilations on the main thread for one press of a filter
+     * chip. Same discipline as StreamPresentation's own token table.
+     */
+    private val TOKENS = listOf("pq", "hlg", "dv", "4k", "fhd", "hd", "sd")
+      .associateWith { Regex("(?<![a-z0-9])$it(?![a-z0-9])") }
 
     private val PIXEL_HEIGHT = Regex("(?<!\\d)(\\d{3,4})p(?![a-z0-9])")
     private val SIZE = Regex("(\\d+(?:[.,]\\d+)?)\\s*(gib|gb|mib|mb)(?![a-z])")

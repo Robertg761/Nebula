@@ -33,7 +33,6 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -76,6 +75,7 @@ import androidx.tv.material3.Glow
 import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stremioshell.host.R
 import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.tv.TvAppViewModel
@@ -127,14 +127,14 @@ fun SearchScreen(
   onOpenSettings: () -> Unit = {},
   focusQueryRequest: Int = 0,
 ) {
-  val results by viewModel.searchResults.collectAsState()
-  val requested by viewModel.searchQuery.collectAsState()
-  val paging by viewModel.searchPaging.collectAsState()
-  val apiKey by viewModel.tmdbApiKey.collectAsState()
-  val voiceQuery by viewModel.voiceQuery.collectAsState()
+  val results by viewModel.searchResults.collectAsStateWithLifecycle()
+  val requested by viewModel.searchQuery.collectAsStateWithLifecycle()
+  val paging by viewModel.searchPaging.collectAsStateWithLifecycle()
+  val apiKey by viewModel.tmdbApiKey.collectAsStateWithLifecycle()
+  val voiceQuery by viewModel.voiceQuery.collectAsStateWithLifecycle()
   // Membership only, the same flow the Details toggle reads: saving from here and saving from
   // there have to be the same act, or a title could be in My List twice over.
-  val watchlistKeys by viewModel.watchlistKeys.collectAsState()
+  val watchlistKeys by viewModel.watchlistKeys.collectAsStateWithLifecycle()
 
   // The card a long press opened the options for. Unlike Home's rows, toggling here never removes
   // the card the viewer is standing on, so there is no focus to re-aim afterwards.
@@ -174,6 +174,10 @@ fun SearchScreen(
   val gridState = rememberLazyGridState()
   val keyboard = LocalSoftwareKeyboardController.current
   val loadingMoreDescription = stringResource(R.string.search_loading_more_description)
+  // Read once for the whole grid: a stringResource call inside the item lambda is a composition-local
+  // read on every card, on the screen's hottest path.
+  val seriesLabel = stringResource(R.string.media_type_series)
+  val movieLabel = stringResource(R.string.media_type_movie)
 
   // A bare search-key launch is an explicit request to type, including when Search is already the
   // current destination. The monotonically increasing request from TvApp makes repeated presses
@@ -471,7 +475,13 @@ fun SearchScreen(
           ),
           modifier = Modifier.focusRequester(resultsFocus).restoreRowFocus(),
         ) {
-          items(ui.items.size, key = { ui.items[it].key }) { index ->
+          items(
+            ui.items.size,
+            key = { ui.items[it].key },
+            // Two full-span footers share this grid, so the cards have to say they are cards or
+            // Compose is free to recycle a spinner's slot into a poster.
+            contentType = { "card" },
+          ) { index ->
             val item = ui.items[index]
             // Adaptive cells run a few dp wider than the 144dp card inside them, and a
             // start-aligned card banks all of that slack at the right-hand margin: five across, the
@@ -483,15 +493,15 @@ fun SearchScreen(
                 item = item,
                 onClick = { onItemClick(item.type, item.tmdbId) },
                 // Two same-named remakes are one of the things search is for, so the year and the
-                // kind of title ride under every card.
-                subtitle = listOfNotNull(
-                  item.year?.trim()?.ifBlank { null },
-                  if (item.type == MediaType.Show) {
-                    stringResource(R.string.media_type_series)
-                  } else {
-                    stringResource(R.string.media_type_movie)
-                  },
-                ).joinToString(" • "),
+                // kind of title ride under every card. Built once per result rather than per
+                // recomposition: a focus move across the grid recomposes every card it passes, and
+                // this was a list, a filter and a join on each of them.
+                subtitle = remember(item, seriesLabel, movieLabel) {
+                  listOfNotNull(
+                    item.year?.trim()?.ifBlank { null },
+                    if (item.type == MediaType.Show) seriesLabel else movieLabel,
+                  ).joinToString(" • ")
+                },
                 // Same held-OK affordance the managed Home rows have: a result the viewer is not
                 // ready to watch is exactly the thing My List is for, and making them open Details
                 // to save it costs two screens and a load.
@@ -503,7 +513,11 @@ fun SearchScreen(
             }
           }
           if (paging.loading) {
-            item(key = "search-page-loading", span = { GridItemSpan(maxLineSpan) }) {
+            item(
+              key = "search-page-loading",
+              span = { GridItemSpan(maxLineSpan) },
+              contentType = "page-loading",
+            ) {
               Box(
                 modifier = Modifier.fillMaxWidth().padding(NebulaSpace.xl),
                 contentAlignment = Alignment.Center,
@@ -518,7 +532,11 @@ fun SearchScreen(
               }
             }
           } else if (paging.error != null) {
-            item(key = "search-page-error", span = { GridItemSpan(maxLineSpan) }) {
+            item(
+              key = "search-page-error",
+              span = { GridItemSpan(maxLineSpan) },
+              contentType = "page-error",
+            ) {
               Column(
                 modifier = Modifier.fillMaxWidth().padding(NebulaSpace.xl),
                 horizontalAlignment = Alignment.CenterHorizontally,

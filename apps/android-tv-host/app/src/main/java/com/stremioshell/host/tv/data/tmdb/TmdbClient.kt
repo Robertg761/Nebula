@@ -3,6 +3,7 @@ package com.stremioshell.host.tv.data.tmdb
 import com.stremioshell.host.tv.data.HttpFetcher
 import com.stremioshell.host.tv.data.OkHttpFetcher
 import com.stremioshell.host.tv.data.decodeJsonOffMain
+import com.stremioshell.host.tv.diagnostics.PerformanceTrace
 import java.net.URLEncoder
 import java.util.Locale
 import kotlinx.serialization.json.Json
@@ -10,9 +11,10 @@ import kotlinx.serialization.json.Json
 /**
  * TMDB read-only client.
  *
- * Every GET goes through [HttpFetcher.getAllowingStale]: catalogs and metadata stay useful when
- * they are a little old, so a cold start with no network paints the last known Home instead of an
- * error screen.
+ * Catalog and metadata GETs go through [HttpFetcher.getAllowingStale]: they stay useful when they
+ * are a little old, so a cold start with no network paints the last known Home instead of an error
+ * screen. [searchPage] and [probeCredentials] are the two deliberate exceptions, each for its own
+ * reason.
  */
 class TmdbClient(
   private val apiKey: String,
@@ -20,8 +22,6 @@ class TmdbClient(
   private val baseUrl: String = "https://api.themoviedb.org/3",
   private val locale: Locale = Locale.getDefault(),
 ) {
-  private val json = Json { ignoreUnknownKeys = true }
-
   /**
    * Requires a live authenticated response for Settings and phone-pairing validation.
    *
@@ -64,11 +64,19 @@ class TmdbClient(
   /** First-page compatibility API used by existing callers. */
   suspend fun search(query: String): List<MediaItem> = searchPage(query).items
 
-  /** One page of mixed movie/show search results, with TMDB's paging counters preserved. */
+  /**
+   * One page of mixed movie/show search results, with TMDB's paging counters preserved.
+   *
+   * The one read that deliberately does not go through [HttpFetcher.getAllowingStale]. A query is
+   * typed once and never asked for again, so caching it only spends the shared 20MB disk budget on
+   * bodies nothing will re-read - evicting the details and catalog payloads that a viewer does come
+   * back to. Search is also the one screen where an old answer is worth least: it is answering what
+   * the viewer is typing right now.
+   */
   suspend fun searchPage(query: String, page: Int = 1): MediaPage {
     val encoded = URLEncoder.encode(query, Charsets.UTF_8.name())
     val requestedPage = page.coerceAtLeast(1)
-    val body = fetcher.getAllowingStale(
+    val body = fetcher.get(
       url("search/multi", "query=$encoded&include_adult=false&page=$requestedPage"),
     )
     val decoded = decode<TmdbPagedResults>(body)
@@ -100,14 +108,18 @@ class TmdbClient(
     // `include_image_language` is what makes the appended images block useful: without it TMDB
     // filters artwork to `language`, i.e. en-US only, and drops the textless files it stores under
     // no language at all - which for logos is a large share of them.
-    val body = fetcher.getAllowingStale(
-      url(
-        path,
-        "append_to_response=$appends&include_image_language=" +
-          TmdbLocale.imageLanguages(locale).joinToString(",") { it ?: "null" },
-      ),
-    )
-    val details = decode<TmdbDetailsResponse>(body)
+    val body = PerformanceTrace.suspendSection("tmdb.details.fetch") {
+      fetcher.getAllowingStale(
+        url(
+          path,
+          "append_to_response=$appends&include_image_language=" +
+            TmdbLocale.imageLanguages(locale).joinToString(",") { it ?: "null" },
+        ),
+      )
+    }
+    val details = PerformanceTrace.suspendSection("tmdb.details.decode") {
+      decode<TmdbDetailsResponse>(body)
+    }
     // Certifications live under a different key per media type, and in a different shape: shows
     // carry one rating per country, movies carry a list of releases per country.
     val certifications = if (isMovie) {
@@ -182,7 +194,7 @@ class TmdbClient(
         episodeNumber = episode.episodeNumber,
         name = episode.name,
         overview = episode.overview,
-        stillUrl = episode.stillPath?.let { IMAGE_BASE_BACKDROP + it },
+        stillUrl = episode.stillPath?.let { IMAGE_BASE_STILL + it },
         airDate = episode.airDate,
       )
     }
@@ -212,7 +224,7 @@ class TmdbClient(
   }
 
   private suspend inline fun <reified T> decode(body: String): T =
-    decodeJsonOffMain { json.decodeFromString<T>(body) }
+    decodeJsonOffMain { JSON.decodeFromString<T>(body) }
 
   private fun TmdbEntry.toItem(type: MediaType): MediaItem {
     return MediaItem(
@@ -228,11 +240,27 @@ class TmdbClient(
   }
 
   companion object {
+    /**
+     * Shared rather than per-instance: a [TmdbClient] is built per request, and a [Json] carries a
+     * serializer cache worth keeping instead of rebuilding nine times on a cold Home. The
+     * configuration is immutable and [Json] is safe to use from several threads.
+     */
+    private val JSON = Json { ignoreUnknownKeys = true }
+
     private const val IMAGE_BASE_POSTER = "https://image.tmdb.org/t/p/w342"
     private const val IMAGE_BASE_BACKDROP = "https://image.tmdb.org/t/p/w1280"
 
     /** Headshots are card-sized; w342 would be four times the bytes for no visible gain. */
     private const val IMAGE_BASE_PROFILE = "https://image.tmdb.org/t/p/w185"
+
+    /**
+     * Episode stills, on the same reasoning as the headshots above but with more at stake: they
+     * arrive a whole season at a time, into a 268x151dp slot. At backdrop width a 24-episode season
+     * was 4-6MB down the wire and two dozen 1280px JPEGs to decode, which on a 4GB box is felt as a
+     * stutter while scrolling the episode list. w300 is the largest size TMDB documents for a
+     * still.
+     */
+    private const val IMAGE_BASE_STILL = "https://image.tmdb.org/t/p/w300"
 
     /**
      * Logos render at roughly 300dp wide on the two surfaces that use them, i.e. ~600px on this

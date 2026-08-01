@@ -30,6 +30,7 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.toMutableStateList
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -41,6 +42,9 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.tv.material3.DrawerValue
 import androidx.tv.material3.Glow
@@ -57,6 +61,7 @@ import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.addon.AddonStream
 import com.stremioshell.host.tv.data.tmdb.MediaType
+import com.stremioshell.host.tv.diagnostics.PerformanceTrace
 import com.stremioshell.host.tv.search.SearchLaunch
 import com.stremioshell.host.tv.ui.theme.NebulaAccentBrush
 import com.stremioshell.host.tv.ui.theme.NebulaDimens
@@ -121,6 +126,12 @@ fun TvApp(
   // of the bare `when` disposing it on every navigation.
   val stateHolder = rememberSaveableStateHolder()
   val current = backstack.last()
+
+  LaunchedEffect(current) {
+    PerformanceTrace.suspendUntilNextFrame("route.${current.javaClass.simpleName}") {
+      withFrameNanos { }
+    }
+  }
   var searchFocusRequest by remember { mutableIntStateOf(0) }
   var settingsDirty by remember { mutableStateOf(false) }
   var pendingSettingsExit by remember { mutableStateOf<SettingsExit?>(null) }
@@ -138,6 +149,11 @@ fun TvApp(
       val index = backstack.lastIndex
       val screen = backstack.removeAt(index)
       stateHolder.removeState(stateKeyFor(index, screen))
+      // The stream list lives on the ViewModel rather than in the screen's saved state, so unlike
+      // everything above it survived the screen it was fetched for. This is every way out of the
+      // picker - BACK, the rail, the next episode replacing it - and none of them can return to
+      // that list: streams are refetched on entry because a debrid URL does not keep.
+      if (screen is Screen.Streams) viewModel.clearStreams()
     }
   }
 
@@ -249,19 +265,7 @@ fun TvApp(
     push(Screen.Details(type, entry.tmdbId, entry.season, entry.episode))
   }
   val layoutDirection = LocalLayoutDirection.current
-  val drawerScrim = if (layoutDirection == LayoutDirection.Rtl) {
-    Brush.horizontalGradient(
-      0.0f to Color.Transparent,
-      0.5f to NebulaPalette.Void.copy(alpha = 0.60f),
-      1.0f to NebulaPalette.Void.copy(alpha = 0.94f),
-    )
-  } else {
-    Brush.horizontalGradient(
-      0.0f to NebulaPalette.Void.copy(alpha = 0.94f),
-      0.5f to NebulaPalette.Void.copy(alpha = 0.60f),
-      1.0f to Color.Transparent,
-    )
-  }
+  val drawerScrim = if (layoutDirection == LayoutDirection.Rtl) DrawerScrimRtl else DrawerScrimLtr
 
   // Void rather than the scheme's surface: this Surface is what shows through everywhere a screen
   // does not paint its own background, and the rail beside it is the surface tone. Two different
@@ -337,8 +341,11 @@ fun TvApp(
           // (checked against tv-material 1.0.0: the content lambda is invoked with no padding of
           // its own), so the collapsed rail's strip is reserved here instead. A constant, which is
           // the entire point: expanding the rail no longer re-measures a single node of the page.
-          .padding(start = NebulaDimens.NavRailWidth)
-          .background(NebulaPalette.Void),
+          //
+          // No fill of its own: the Surface above already paints Void across the whole window, and
+          // a second full-screen quad under every screen was a whole viewport of overdraw on a GPU
+          // that is also compositing the drawer scrim and a full-bleed backdrop.
+          .padding(start = NebulaDimens.NavRailWidth),
       ) {
         stateHolder.SaveableStateProvider(stateKeyFor(backstack.lastIndex, current)) {
           when (val screen = current) {
@@ -460,6 +467,22 @@ fun TvApp(
     )
   }
 }
+
+/**
+ * The drawer's dimming ramp, densest where the sheet lands. Plain vals rather than built where
+ * they are read: [TvApp] recomposes on every navigation and dialog flip, and each build allocated
+ * a gradient plus its stop lists for colours that never change.
+ */
+private val DrawerScrimLtr = Brush.horizontalGradient(
+  0.0f to NebulaPalette.Void.copy(alpha = 0.94f),
+  0.5f to NebulaPalette.Void.copy(alpha = 0.60f),
+  1.0f to Color.Transparent,
+)
+private val DrawerScrimRtl = Brush.horizontalGradient(
+  0.0f to Color.Transparent,
+  0.5f to NebulaPalette.Void.copy(alpha = 0.60f),
+  1.0f to NebulaPalette.Void.copy(alpha = 0.94f),
+)
 
 /**
  * Padding that lands the collapsed rail on [NebulaDimens.NavRailWidth].
@@ -591,10 +614,16 @@ private fun RailClock() {
     )
   }
   var now by remember { mutableStateOf(Date()) }
-  LaunchedEffect(Unit) {
-    while (true) {
-      now = Date()
-      delay(60_000L - System.currentTimeMillis() % 60_000L)
+  // Lifecycle-gated so the loop parks while the player (or another app) has the screen: a clock
+  // nobody can see does not need the minute tick, and restarting on STARTED also snaps it to the
+  // real time the moment the rail is visible again instead of one stale minute later.
+  val lifecycleOwner = LocalLifecycleOwner.current
+  LaunchedEffect(lifecycleOwner) {
+    lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+      while (true) {
+        now = Date()
+        delay(60_000L - System.currentTimeMillis() % 60_000L)
+      }
     }
   }
   Text(

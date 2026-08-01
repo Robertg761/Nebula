@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest
+  xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:tools="http://schemas.android.com/tools">
 
   <uses-permission android:name="android.permission.INTERNET" />
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -27,6 +29,11 @@
     android:supportsRtl="true"
     android:theme="@style/Theme.Nebula"
     android:usesCleartextTraffic="${usesCleartextTraffic}">
+    <!-- Allows physical Macrobenchmark/Perfetto runs to inspect release-like UI work without
+         making the shipped application debuggable. -->
+    <profileable
+      android:shell="true"
+      tools:targetApi="29" />
     <!-- Handles its own config changes for the same reason MpvPlayerActivity
          does: the player's refresh-rate matching can switch display mode
          mid-playback, and a compatible HDR pipeline may switch the panel's
@@ -112,6 +119,23 @@
       <meta-data
         android:name="android.support.FILE_PROVIDER_PATHS"
         android:resource="@xml/file_paths" />
+    </provider>
+
+    <!-- WorkManager's auto-initializer runs from a ContentProvider, which the system
+         creates before Application.onCreate. That opens the Room WorkDatabase on the
+         main thread on the cold-start critical path, for work this app only ever needs
+         later. Removing just that initializer leaves androidx.startup itself intact for
+         any other library that registers one. StremioTvApplication implements
+         androidx.work.Configuration.Provider, so WorkManager initializes on first
+         getInstance() instead - dropping this without that provider would make every
+         WorkManager call throw. -->
+    <provider
+      android:name="androidx.startup.InitializationProvider"
+      android:authorities="${applicationId}.androidx-startup"
+      tools:node="merge">
+      <meta-data
+        android:name="androidx.work.WorkManagerInitializer"
+        tools:node="remove" />
     </provider>
   </application>
 

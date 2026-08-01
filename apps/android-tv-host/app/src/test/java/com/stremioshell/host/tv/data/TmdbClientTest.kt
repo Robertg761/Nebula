@@ -245,9 +245,11 @@ class TmdbClientTest {
   }
 
   @Test
-  fun `catalog gets take the cache-tolerant path`() = runBlocking {
+  fun `catalog gets take the cache-tolerant path, and search deliberately does not`() = runBlocking {
     // Metadata stays useful when it is a little old, and that is what lets a cold start with no
-    // network paint the last known Home instead of an error screen.
+    // network paint the last known Home instead of an error screen. A typed-once search query is
+    // the opposite: caching it spends the shared disk budget on a body nothing will ever re-read,
+    // evicting the details payloads that a viewer does come back to.
     var stale = 0
     var plain = 0
     val fetcher = object : HttpFetcher {
@@ -266,10 +268,15 @@ class TmdbClientTest {
     client.trending(MediaType.Movie)
     client.popular(MediaType.Show)
     client.discover(MediaType.Movie, genreId = 28)
-    client.search("q")
 
-    assertEquals(4, stale)
+    assertEquals(3, stale)
     assertEquals(0, plain)
+
+    client.search("q")
+    client.searchPage("q", page = 2)
+
+    assertEquals(3, stale)
+    assertEquals(2, plain)
   }
 
   @Test
@@ -303,7 +310,7 @@ class TmdbClientTest {
   }
 
   @Test
-  fun `season parses episodes with stills`() = runBlocking {
+  fun `season parses episodes with stills sized for the slot they render in`() = runBlocking {
     val episodes = client(
       """
       {"episodes":[{"season_number":1,"episode_number":2,"name":"Ep2",
@@ -313,6 +320,8 @@ class TmdbClientTest {
 
     assertEquals(1, episodes.size)
     assertEquals(2, episodes.first().episodeNumber)
-    assertEquals("https://image.tmdb.org/t/p/w1280/s.jpg", episodes.first().stillUrl)
+    // Backdrop width here meant a 24-episode season downloaded several megabytes of artwork for a
+    // 268x151dp thumbnail, and decoded two dozen 1280px JPEGs to draw it.
+    assertEquals("https://image.tmdb.org/t/p/w300/s.jpg", episodes.first().stillUrl)
   }
 }

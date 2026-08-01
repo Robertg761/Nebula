@@ -81,6 +81,48 @@ class StreamFilterPolicyTest {
     assertTrue(sources.none { it.contains("://") })
   }
 
+  /**
+   * The lazy-list keys exist for the debrid case: one resolved URL under several labels. A filter
+   * that removes the first duplicate must not renumber the survivors - a renumbered key makes the
+   * list reuse a node for a different stream and moves focus by position instead of identity.
+   */
+  @Test
+  fun `duplicate-URL row keys survive filtering unrenumbered`() {
+    val sharedUrl = "https://stream/resolved"
+    val uncachedDv = stream("2160p DV", 20, "Comet").copy(url = sharedUrl)
+    val cachedHdr = stream("[RD+] 1080p HDR 4 GB", 4, "Comet").copy(url = sharedUrl)
+    val cachedSdr = stream("[RD+] 1080p 4 GB", 4, "Comet").copy(url = sharedUrl)
+    val rated = StreamFilterPolicy.rate(listOf(uncachedDv, cachedHdr, cachedSdr))
+
+    val keysBefore = releaseKeysByName(rated)
+    val filtered = StreamFilterPolicy.applyRated(
+      rated,
+      StreamFilters.SHOW_ALL.copy(availability = StreamAvailability.Instant),
+    )
+    val keysAfter = releaseKeysByName(filtered)
+
+    assertEquals(listOf(cachedHdr, cachedSdr), filtered.map(RatedStream::stream))
+    assertEquals(keysBefore.getValue(cachedHdr.name!!), keysAfter.getValue(cachedHdr.name!!))
+    assertEquals(keysBefore.getValue(cachedSdr.name!!), keysAfter.getValue(cachedSdr.name!!))
+    assertEquals(keysBefore.size, keysBefore.values.distinct().size)
+  }
+
+  @Test
+  fun `a URL that ends in a hash suffix cannot forge a duplicate's key`() {
+    val duplicated = "https://stream/resolved"
+    val forged = stream("1080p", 4, "Comet").copy(url = "$duplicated#1")
+    val first = stream("2160p", 20, "Comet").copy(url = duplicated)
+    val second = stream("720p", 1, "Comet").copy(url = duplicated)
+    val keys = releaseKeysByName(StreamFilterPolicy.rate(listOf(first, second, forged)))
+
+    assertEquals(keys.size, keys.values.distinct().size)
+  }
+
+  private fun releaseKeysByName(rated: List<RatedStream>): Map<String, String> =
+    StreamPresentation.rows(rated)
+      .filterIsInstance<StreamListItem.Release>()
+      .associate { it.stream.name!! to it.key }
+
   private fun stream(label: String, sizeGb: Long, source: String) = AddonStream(
     name = label,
     behaviorHints = AddonBehaviorHints(videoSize = sizeGb * 1024L * 1024L * 1024L),

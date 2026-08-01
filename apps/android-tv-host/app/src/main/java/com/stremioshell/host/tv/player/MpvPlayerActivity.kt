@@ -122,6 +122,7 @@ import com.stremioshell.host.tv.data.tmdb.EpisodeItem
 import com.stremioshell.host.tv.data.tmdb.MediaType
 import com.stremioshell.host.tv.data.tmdb.TmdbClient
 import com.stremioshell.host.tv.diagnostics.NebulaDiagnostics
+import com.stremioshell.host.tv.diagnostics.PerformanceTrace
 import com.stremioshell.host.tv.ui.BadgeTone
 import com.stremioshell.host.tv.ui.EmptyState
 import com.stremioshell.host.tv.ui.InitialFocusTarget
@@ -220,6 +221,16 @@ class MpvPlayerActivity : ComponentActivity() {
   private var playbackSurface: Surface? = null
 
   /**
+   * The demuxer caps this device is entitled to while the player is in front of the viewer, kept
+   * so [onStop] can trade them away and [onStart] can put them back. Zero until
+   * [applyNetworkOptions] has run, which is the signal that there is nothing to restore yet.
+   */
+  private var foregroundDemuxerCache = DemuxerCacheBytes(0L, 0L)
+
+  /** Whether the caps are currently at their background size; see [applyBackgroundDemuxerCache]. */
+  private var demuxerCacheShrunk = false
+
+  /**
    * Written on the main thread. Compose state rather than a plain field because the
    * OSD shows it as a chip: it is read back from the display-mode match, which
    * lands a beat after the track list the chip beside it comes from.
@@ -248,6 +259,7 @@ class MpvPlayerActivity : ComponentActivity() {
    */
   @Volatile
   private var loadGeneration = 0L
+  private val sessionGuard = PlaybackSessionGuard()
 
   /** False between issuing `loadfile` and mpv acknowledging the new file with START_FILE. */
   @Volatile
@@ -613,8 +625,11 @@ class MpvPlayerActivity : ComponentActivity() {
 
   /**
    * Drives the up-next countdown, and starts the next episode when it runs out.
-   * Ticks faster than once a second so the number on screen is never a whole
-   * second stale, which reads as a stuck countdown.
+   *
+   * Ticks once a second, which is how often the number on the card changes; see [UP_NEXT_TICK_MS]
+   * for why it is no longer faster. Elapsed time is measured from
+   * [upNextCountdownStartMs] on every tick rather than counted down, so a tick the main thread was
+   * too busy to deliver on time costs nothing but a skipped number.
    */
   private val upNextTickRunnable = object : Runnable {
     override fun run() {
@@ -627,7 +642,15 @@ class MpvPlayerActivity : ComponentActivity() {
       upNextCard.value =
         state.copy(
           secondsLeft = UpNextPolicy.secondsLeft(elapsedMs, upNextCountdownTotalMs),
-          progress = PlaybackFrameRate.progressRemaining(elapsedMs, upNextCountdownTotalMs),
+          // Led by one tick: the card tweens toward each published fraction over
+          // the tick interval, so the value to publish is where the countdown
+          // will be when the next tick lands - the bar then tracks the true
+          // remainder continuously and arrives at empty exactly as the final
+          // tick starts the episode, instead of trailing a second behind.
+          progress = PlaybackFrameRate.progressRemaining(
+            elapsedMs + UP_NEXT_TICK_MS,
+            upNextCountdownTotalMs,
+          ),
         )
       mainHandler.postDelayed(this, UP_NEXT_TICK_MS)
     }
@@ -657,9 +680,13 @@ class MpvPlayerActivity : ComponentActivity() {
   private val seekPreviewSec = mutableDoubleStateOf(NO_SEEK)
 
   /**
-   * Last whole second pushed to [timePosSec]. mpv reports `time-pos` on every
-   * video frame; the OSD renders whole seconds, so anything finer is pure
-   * recomposition churn during playback.
+   * Last whole second pushed to [timePosSec]. Both this and its cache twin are
+   * now a second line of defence rather than the main one: `time-pos` and
+   * `demuxer-cache-time` are observed as MPV_FORMAT_INT64, so mpv's core already
+   * withholds the sub-second changes that used to arrive at the video frame rate.
+   * What still gets through is the repeat mpv emits around a seek or a speed
+   * change, and the OSD renders whole seconds, so that repeat is pure
+   * recomposition churn.
    */
   @Volatile
   private var lastPostedSecond = Long.MIN_VALUE
@@ -681,10 +708,46 @@ class MpvPlayerActivity : ComponentActivity() {
 
   private val observer = object : MPVLib.EventObserver {
     override fun eventProperty(property: String) {}
+    /**
+     * The whole-second properties. `volume` is not one of them and is handled
+     * first: it belongs to the activity rather than to a file, so it must not be
+     * gated on [acceptingFileProperties].
+     *
+     * The main-thread throttles below survive the switch to INT64 as a second
+     * guard. mpv still emits an event per observed property on a seek or a speed
+     * change even when the whole-second value is unchanged, and posting those to
+     * the main thread would recompose the scrub row for nothing.
+     */
     override fun eventProperty(property: String, value: Long) {
       if (destroying) return
       if (property == "volume") {
         postMpvEvent { observedVolume = value.toInt().coerceIn(0, 100) }
+        return
+      }
+      if (!acceptingFileProperties) return
+      val generation = loadGeneration
+      when (property) {
+        "time-pos" -> {
+          if (value == lastPostedSecond) return
+          lastPostedSecond = value
+          postMpvEvent {
+            if (generation == loadGeneration && acceptingFileProperties) {
+              timePosSec.doubleValue = value.toDouble()
+            }
+          }
+        }
+        "demuxer-cache-time" -> {
+          if (value == lastPostedCacheSecond) return
+          lastPostedCacheSecond = value
+          postMpvEvent {
+            if (generation == loadGeneration && acceptingFileProperties) {
+              cacheAheadSec.value = value.toDouble().takeIf { it >= 0.0 }
+              // A buffering stream whose demuxer frontier is still advancing is slow, not dead.
+              // Restart the no-progress window on every whole second received.
+              if (buffering.value && !paused.value) armStallWatchdog()
+            }
+          }
+        }
       }
     }
     override fun eventProperty(property: String, value: Double) {
@@ -692,16 +755,6 @@ class MpvPlayerActivity : ComponentActivity() {
       if (!acceptingFileProperties) return
       val generation = loadGeneration
       when (property) {
-        "time-pos" -> {
-          val whole = value.toLong()
-          if (whole == lastPostedSecond) return
-          lastPostedSecond = whole
-          postMpvEvent {
-            if (generation == loadGeneration && acceptingFileProperties) {
-              timePosSec.doubleValue = value
-            }
-          }
-        }
         "duration" -> postMpvEvent {
           if (generation == loadGeneration && acceptingFileProperties) {
             durationSec.doubleValue = value
@@ -713,22 +766,6 @@ class MpvPlayerActivity : ComponentActivity() {
             playbackSpeed.doubleValue = value
             publishPlaybackState()
             if (!paused.value) applyDisplayFrameRateVote()
-          }
-        }
-        // Throttled to whole seconds like time-pos above: mpv reports this as the demuxer fills,
-        // which on a healthy debrid stream is many times a second, and every one of those would
-        // otherwise recompose the scrub row.
-        "demuxer-cache-time" -> {
-          val whole = value.toLong()
-          if (whole == lastPostedCacheSecond) return
-          lastPostedCacheSecond = whole
-          postMpvEvent {
-            if (generation == loadGeneration && acceptingFileProperties) {
-              cacheAheadSec.value = value.takeIf { it.isFinite() && it >= 0.0 }
-              // A buffering stream whose demuxer frontier is still advancing is slow, not dead.
-              // Restart the no-progress window on every whole second received.
-              if (buffering.value && !paused.value) armStallWatchdog()
-            }
           }
         }
       }
@@ -806,11 +843,15 @@ class MpvPlayerActivity : ComponentActivity() {
           cancelStallWatchdog()
           refreshTracks()
           matchDisplayToContentFrameRate()
+          scheduleHardwareDecodeCheck(generation)
           // Every file is opened paused. Only a visible player whose viewer did not explicitly
           // pause is allowed to acquire focus and expose its first sample.
           if (activityStarted && !pauseRequested) playPlayback() else {
             paused.value = true
-            MPVLib.setPropertyBoolean("pause", true)
+            // Same worker as the `loadfile` that produced this event and as
+            // [playPlayback]'s own write, so the pause cannot overtake the load
+            // or race the branch above.
+            runMpvMutationOffMain { MPVLib.setPropertyBoolean("pause", true) }
           }
           // A backgrounded activity must not remain the platform's media-button
           // target. onStart reactivates the session when the viewer returns.
@@ -995,9 +1036,37 @@ class MpvPlayerActivity : ComponentActivity() {
       // Direct-surface mediacodec first, then copy-back, then software; without a
       // fallback chain a codec the device cannot hwdec fails hard.
       MPVLib.setOptionString("hwdec", "mediacodec,mediacodec-copy,no")
-      // mpeg2/mpeg4 are unreliable in direct-surface mode on TV SoCs and are
-      // cheap to decode in software, so leave them off the hwdec list.
-      MPVLib.setOptionString("hwdec-codecs", "h264,hevc,vp8,vp9,av1")
+      // mpv 0.39's own default is h264,vc1,hevc,vp8,vp9,av1,prores. This is that
+      // list minus prores, which nothing a streaming addon serves is encoded in
+      // and no TV SoC accelerates. mpeg2/mpeg4 are absent from the default and
+      // stay absent — they are unreliable in direct-surface mode on TV SoCs and
+      // cheap to decode in software. vc1 is on it because dropping it sent every
+      // old Blu-ray remux to the software decoder, which on four A55 cores is the
+      // one outcome this whole chain exists to avoid.
+      MPVLib.setOptionString("hwdec-codecs", "h264,vc1,hevc,vp8,vp9,av1")
+      // mpv 0.39 defaults to a render path written for a desktop GPU: correct
+      // (linear-light) downscaling, sigmoid upscaling, error-diffusion dithering
+      // and `hdr-compute-peak=auto` are all on, and each is another full-frame
+      // pass every time a 4K stream is scaled into this box's 1080p output plane.
+      // Mali-G57 advertises GLES 3.2 compute, so `hdr-compute-peak` in particular
+      // is taken up: an extra whole-frame compute dispatch on every HDR10 frame,
+      // to tone-map with a peak the panel is about to re-derive anyway.
+      //
+      // These are the same settings mpv's built-in `fast` profile applies. They
+      // are written out one at a time rather than as `profile=fast` because a
+      // profile is opaque at the point where someone is reading a bug report, and
+      // its membership is free to change between mpv releases; this list is a
+      // statement about this hardware and should only change when the hardware
+      // does. Quality cost on a 1080p output plane: bilinear downscaling of 4K is
+      // visually indistinguishable at viewing distance, and dithering matters to
+      // an 8-bit desktop panel rather than to a TV that dithers in its own scaler.
+      MPVLib.setOptionString("scale", "bilinear")
+      MPVLib.setOptionString("dscale", "bilinear")
+      MPVLib.setOptionString("dither", "no")
+      MPVLib.setOptionString("correct-downscaling", "no")
+      MPVLib.setOptionString("linear-downscaling", "no")
+      MPVLib.setOptionString("sigmoid-upscaling", "no")
+      MPVLib.setOptionString("hdr-compute-peak", "no")
       MPVLib.setOptionString("ao", "audiotrack")
       // This build is mpv 0.39 with vo=gpu. `target-colorspace-hint` only applies to gpu-next in
       // that version, so setting it would be a false HDR guarantee. Android HDR output remains an
@@ -1012,14 +1081,25 @@ class MpvPlayerActivity : ComponentActivity() {
       MPVLib.init()
       MPVLib.addObserver(observer)
       MPVLib.addLogObserver(logObserver)
-      MPVLib.observeProperty("time-pos", MPVLib.MPV_FORMAT_DOUBLE)
+      // INT64, not DOUBLE, and the two that matter are the two that move: mpv
+      // compares an observed property in the format the observer asked for, so a
+      // whole-second observer is notified about once a second instead of once per
+      // decoded frame. As DOUBLE, `time-pos` alone cost sixty JNI callbacks and
+      // sixty jstring allocations a second on a 4K60 stream, every one of them
+      // handed to a listener whose first act was to truncate it to whole seconds.
+      // The precision given up is a fraction of a second on a saved resume
+      // position, which is below what the viewer can perceive on return.
+      MPVLib.observeProperty("time-pos", MPVLib.MPV_FORMAT_INT64)
       MPVLib.observeProperty("duration", MPVLib.MPV_FORMAT_DOUBLE)
       MPVLib.observeProperty("pause", MPVLib.MPV_FORMAT_FLAG)
       MPVLib.observeProperty("paused-for-cache", MPVLib.MPV_FORMAT_FLAG)
       MPVLib.observeProperty("seeking", MPVLib.MPV_FORMAT_FLAG)
       MPVLib.observeProperty("eof-reached", MPVLib.MPV_FORMAT_FLAG)
       MPVLib.observeProperty("speed", MPVLib.MPV_FORMAT_DOUBLE)
-      MPVLib.observeProperty("demuxer-cache-time", MPVLib.MPV_FORMAT_DOUBLE)
+      // Whole seconds for the same reason as `time-pos`: the demuxer frontier
+      // advances many times a second on a healthy stream and the scrub row shows
+      // it rounded down anyway.
+      MPVLib.observeProperty("demuxer-cache-time", MPVLib.MPV_FORMAT_INT64)
       MPVLib.observeProperty("volume", MPVLib.MPV_FORMAT_INT64)
       NebulaDiagnostics.record("player", "native core initialized")
     } catch (error: Throwable) {
@@ -1225,6 +1305,11 @@ class MpvPlayerActivity : ComponentActivity() {
       audioDelaySec.doubleValue = 0.0
       subtitleDelaySec.doubleValue = 0.0
       if (mpvCreated) {
+        // The one pair of delay writes that stays on the main thread, unlike [stepAudioDelay] and
+        // [stepSubtitleDelay]. This runs from [onNewIntent] before [loadCurrentFile] has begun the
+        // replacement's session, so the generation a worker hop would be guarded by is the one
+        // about to be retired — the reset would be dropped and the previous episode's delays would
+        // survive into the next one. Both writes are cheap and neither waits on the demuxer.
         MPVLib.setPropertyDouble("audio-delay", 0.0)
         MPVLib.setPropertyDouble("sub-delay", 0.0)
       }
@@ -1242,7 +1327,9 @@ class MpvPlayerActivity : ComponentActivity() {
    * Streams come from debrid/torrent resolvers, where a stalled or dropped connection is routine.
    * Without reconnect options a single hiccup ends playback for good, and a thin cache turns every
    * wobble into a stall. TLS verification is explicit because older libavformat builds can have a
-   * weaker default; addon-provided playback URLs are HTTPS-only.
+   * weaker default; addon-provided playback URLs are HTTPS-only. Verification only works with a CA
+   * bundle to verify against - see [MpvTlsCertificates] for why mbedtls cannot use the system store
+   * directly and what happened when a debrid host rotated to an issuer it did not know.
    */
   private fun applyNetworkOptions() {
     MPVLib.setOptionString("cache", "yes")
@@ -1252,14 +1339,48 @@ class MpvPlayerActivity : ComponentActivity() {
     // except on high-bitrate remuxes where the cap is what actually binds — see
     // [DemuxerCacheSizing] for why it has to follow the device's RAM.
     val cache = DemuxerCacheSizing.forDeviceRam(totalDeviceRamBytes())
+    foregroundDemuxerCache = cache
     MPVLib.setOptionString("demuxer-max-bytes", cache.forwardBytes.toString())
     MPVLib.setOptionString("demuxer-max-back-bytes", cache.backBytes.toString())
     MPVLib.setOptionString("network-timeout", "30")
     MPVLib.setOptionString("tls-verify", "yes")
+    MpvTlsCertificates.ensureBundle(this)?.let {
+      MPVLib.setOptionString("tls-ca-file", it.absolutePath)
+    } ?: NebulaDiagnostics.record("player", "tls-ca-bundle unavailable; stream TLS may fail")
     MPVLib.setOptionString(
       "stream-lavf-o",
       "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=10",
     )
+  }
+
+  /**
+   * Hands the demuxer back most of its native memory while the player is not on screen.
+   *
+   * The manifest declares no picture-in-picture, so a stopped player has no legitimate reason to be
+   * playing — and [onStop] pauses it. What it was still holding was up to a couple of hundred
+   * megabytes of native demuxer cache, outside the Java heap and invisible to every heap trimming
+   * signal, for as long as the viewer stayed in another app. On a 3.7 GiB TV box that is the
+   * difference between coming back to the film and coming back to a relaunch after the low-memory
+   * killer took the process.
+   *
+   * Deliberately not `finish()`, and deliberately not a `stop`: resuming in place, on the same
+   * frame, is the behaviour of the player and must survive this. The cost is that the readahead has
+   * to refill on return, which is a second or two of buffering against a session that would
+   * otherwise not have existed at all.
+   *
+   * [runGlobalMpvMutationOffMain] rather than the generation-guarded form: a replacement stream
+   * arriving between the shrink and the restore would drop the restore and leave the player at a
+   * background-sized cache for the rest of the evening.
+   */
+  private fun applyBackgroundDemuxerCache(background: Boolean) {
+    if (!mpvCreated || foregroundDemuxerCache.forwardBytes <= 0L) return
+    if (background == demuxerCacheShrunk) return
+    demuxerCacheShrunk = background
+    val cache = if (background) BACKGROUND_DEMUXER_CACHE else foregroundDemuxerCache
+    runGlobalMpvMutationOffMain {
+      MPVLib.setPropertyString("demuxer-max-bytes", cache.forwardBytes.toString())
+      MPVLib.setPropertyString("demuxer-max-back-bytes", cache.backBytes.toString())
+    }
   }
 
   /**
@@ -1346,8 +1467,9 @@ class MpvPlayerActivity : ComponentActivity() {
    */
   private fun loadCurrentFile(replace: Boolean, startMs: Long) {
     if (!mpvCreated || finishing || url.isBlank()) return
-    loadGeneration += 1
-    val generation = loadGeneration
+    val session = sessionGuard.begin(url)
+    loadGeneration = session.generation
+    val generation = session.generation
     val command = PlaybackLoadCommand.build(url, replace = replace, resumeMs = startMs)
     val audioLanguage = playerPrefs.audioLanguage
     val subtitleLanguage = playerPrefs.subtitleLanguage
@@ -1373,12 +1495,14 @@ class MpvPlayerActivity : ComponentActivity() {
     // running, it finishes before this queued replacement; if it has not started, the generation
     // check drops it. Native work never blocks the main thread.
     runMpvMutationOffMain(generation) {
-      // This has to precede loadfile. A global pause is intentional; unlike `start` it is an
-      // invariant of every load and is explicitly released only after focus is granted.
-      MPVLib.setPropertyBoolean("pause", true)
-      applyTrackPreferencesForNextFile(audioLanguage, subtitleLanguage)
-      applyStreamRequestHeaders(headerSnapshot)
-      MPVLib.command(command)
+      PerformanceTrace.section("player.loadfile") {
+        // This has to precede loadfile. A global pause is intentional; unlike `start` it is an
+        // invariant of every load and is explicitly released only after focus is granted.
+        MPVLib.setPropertyBoolean("pause", true)
+        applyTrackPreferencesForNextFile(audioLanguage, subtitleLanguage)
+        applyStreamRequestHeaders(headerSnapshot)
+        MPVLib.command(command)
+      }
     }
     // START_FILE normally re-arms this. Keeping the first arm covers a native command failure or
     // worker handoff that produces no event at all.
@@ -1486,7 +1610,10 @@ class MpvPlayerActivity : ComponentActivity() {
     seeking.value = false
     paused.value = true
     pauseRequested = true
-    MPVLib.setPropertyBoolean("pause", true)
+    // The last frame is already on screen and `keep-open` is holding it there; nothing the up-next
+    // card does needs this write to have landed first, so it takes the worker like every other
+    // pause and cannot delay the card behind a busy core.
+    runMpvMutationOffMain { MPVLib.setPropertyBoolean("pause", true) }
     abandonAudioFocus()
     clearDisplayFrameRateVote()
     saveWatchState(SaveReason.Finished)
@@ -1570,10 +1697,14 @@ class MpvPlayerActivity : ComponentActivity() {
     clearDisplayFrameRateVote()
     restoreDuckedVolume()
     abandonAudioFocus()
-    MPVLib.setPropertyBoolean("pause", true)
     // A late FILE_LOADED is ignored by the generation/error guards, and stop releases the socket
-    // and decoder resources rather than letting a dead request continue behind the panel.
-    runMpvMutationOffMain(loadGeneration) { MPVLib.command(arrayOf("stop")) }
+    // and decoder resources rather than letting a dead request continue behind the panel. Both in
+    // one mutation: the pause has to precede the stop, and this is a path reached from a watchdog
+    // firing against a core that is by definition not responding, so neither may run here.
+    runMpvMutationOffMain(loadGeneration) {
+      MPVLib.setPropertyBoolean("pause", true)
+      MPVLib.command(arrayOf("stop"))
+    }
     // keep-open leaves mpv paused on a dead stream, which would otherwise be
     // published as a pause a client could offer to resume.
     publishPlaybackState()
@@ -1900,6 +2031,11 @@ class MpvPlayerActivity : ComponentActivity() {
       ?: return UpNextStreamResolution.NeedsPicker
     val addons = settingsStore.addonManifestUrls.first()
     if (addons.isEmpty()) return UpNextStreamResolution.NeedsPicker
+    // Unthrottled on purpose: this only runs from playNextEpisode, after
+    // playback has paused and the card shows a spinner - the viewer is waiting
+    // on it exactly like the picker, and a concurrency cap here multiplies the
+    // per-addon timeout into the wait. StreamCatalog.fetch's maxConcurrent is
+    // for a true ahead-of-time prefetch, which this is not.
     val fetch = streamCatalog.fetch(addons, imdb, target.season, target.episode)
     val picked = StreamAutoPick.pick(fetch.streams, bingeGroup, streamPickStore.get(imdb))
     return UpNextStreamPolicy.classify(fetch, picked)
@@ -2714,6 +2850,21 @@ class MpvPlayerActivity : ComponentActivity() {
     return format.format(Date(epochMs))
   }
 
+  /**
+   * The one group of mpv calls that must stay synchronous on the calling thread.
+   *
+   * `SurfaceHolder.Callback` is a contract about lifetime, not a notification: the buffer behind
+   * `holder.surface` is valid only between `surfaceCreated` and the return of `surfaceDestroyed`.
+   * Posting `attachSurface`/`detachSurface` and the `vo` switches to the worker would let
+   * `surfaceDestroyed` return while mpv's render thread was still drawing into a buffer the
+   * compositor is entitled to free — a native crash, and an intermittent one. The ordering here is
+   * also load-bearing in itself (`vo=null` before `detachSurface`, `attachSurface` before
+   * `vo=gpu`), and it has to interleave correctly with callbacks this activity does not control.
+   *
+   * These calls are cheap in the case that matters — mpv's surface handling does not wait on the
+   * demuxer — so the main-thread rule in this class's own KDoc is suspended here on purpose rather
+   * than by omission.
+   */
   private fun createSurfaceView(context: Context): SurfaceView {
     val view = SurfaceView(context)
     view.holder.addCallback(object : SurfaceHolder.Callback {
@@ -3015,14 +3166,23 @@ class MpvPlayerActivity : ComponentActivity() {
 
   private fun flushSeek() {
     if (!mpvCreated) return
-    val request = seeker.consumePendingRequest() ?: return
+    // The burst has already been coalesced, so a short step commits to the position the OSD
+    // promised rather than to the nearest earlier keyframe in a long GOP. A long jump does the
+    // opposite, for the reasons in [SeekCoalescer.pendingPrecision].
+    val request = seeker.consumePendingRequest(
+      seeker.pendingPrecision(timePosSec.doubleValue),
+    ) ?: return
     seeking.value = true
     lastPostedSecond = Long.MIN_VALUE
-    // The burst has already been coalesced, so its one committed target should be the position the
-    // OSD promised rather than the nearest earlier keyframe in a long GOP.
-    MPVLib.command(
-      arrayOf("seek", request.targetSec.toString(), request.precision.mpvMode),
-    )
+    // Off the main thread: this command is issued while mpv is mid-demux, so it waits on the core
+    // lock behind whatever the demuxer is doing — on a stalled stream, for as long as the stall.
+    // Everything the OSD needs is already set above, and the coalescer holds the preview until
+    // PLAYBACK_RESTART settles it, so the display does not depend on when the command lands.
+    runMpvMutationOffMain {
+      MPVLib.command(
+        arrayOf("seek", request.targetSec.toString(), request.precision.mpvMode),
+      )
+    }
     mainHandler.removeCallbacks(seekSettleTimeoutRunnable)
     mainHandler.postDelayed(seekSettleTimeoutRunnable, SEEK_SETTLE_TIMEOUT_MS)
     publishPlaybackState()
@@ -3062,7 +3222,11 @@ class MpvPlayerActivity : ComponentActivity() {
     // the initial-load call, where mpv starts unpaused on its own.
     val granted = requestAudioFocus()
     pauseRequested = !granted
-    MPVLib.setPropertyBoolean("pause", !granted)
+    // Off the main thread: this is the far end of every OK press, and a synchronous property write
+    // blocks on mpv's core lock — which on a stalled debrid stream is held for as long as the stall
+    // lasts. The state the UI shows is set here regardless, so the OSD flips with the press whether
+    // or not the core is busy, and the `pause` observer corrects it if mpv disagrees.
+    runMpvMutationOffMain { MPVLib.setPropertyBoolean("pause", !granted) }
     if (granted) {
       paused.value = false
       applyDisplayFrameRateVote()
@@ -3078,7 +3242,9 @@ class MpvPlayerActivity : ComponentActivity() {
     if (!mpvCreated) return
     pausedForFocusLoss = forFocusLoss
     pauseRequested = true
-    MPVLib.setPropertyBoolean("pause", true)
+    // Off the main thread for the reason given in [playPlayback]; the two share one worker, so a
+    // play and a pause issued in quick succession still reach mpv in the order they were pressed.
+    runMpvMutationOffMain { MPVLib.setPropertyBoolean("pause", true) }
     paused.value = true
     clearDisplayFrameRateVote()
     if (!forFocusLoss) {
@@ -3129,14 +3295,17 @@ class MpvPlayerActivity : ComponentActivity() {
     volumeBeforeDuck = current
     val ducked = (current * DUCK_VOLUME_FRACTION).toInt()
     observedVolume = ducked
-    MPVLib.setPropertyInt("volume", ducked)
+    // A duck is a response to a notification chirp: it is worth nothing if getting it to mpv holds
+    // the UI thread. The global form because the restore below must never be dropped by a file
+    // replacement — see [runGlobalMpvMutationOffMain].
+    runGlobalMpvMutationOffMain { MPVLib.setPropertyInt("volume", ducked) }
   }
 
   private fun restoreDuckedVolume() {
     val previous = volumeBeforeDuck ?: return
     volumeBeforeDuck = null
     observedVolume = previous
-    if (mpvCreated) MPVLib.setPropertyInt("volume", previous)
+    if (mpvCreated) runGlobalMpvMutationOffMain { MPVLib.setPropertyInt("volume", previous) }
   }
 
   /**
@@ -3335,8 +3504,32 @@ class MpvPlayerActivity : ComponentActivity() {
     worker.post {
       mpvLock.lock()
       try {
-        if (!mpvAlive || generation != loadGeneration) return@post
+        if (!mpvAlive || !sessionGuard.isCurrent(generation)) return@post
         runCatching(action)
+      } finally {
+        mpvLock.unlock()
+      }
+    }
+  }
+
+  /**
+   * The same hop for a write that belongs to the activity rather than to one file: the mpv volume
+   * and the demuxer caps, both of which follow the lifecycle and outlive any single stream.
+   *
+   * Deliberately without [runMpvMutationOffMain]'s generation guard, and it must stay that way.
+   * These writes come in pairs that have to complete — duck then restore, shrink then restore — and
+   * a replacement landing between the two halves would drop the second one, leaving mpv permanently
+   * ducked or permanently reduced to a background-sized cache with nothing left to put it back.
+   *
+   * Ordering is still exact: one worker thread, so these interleave with [runMpvMutationOffMain] in
+   * the order they were posted from the main thread.
+   */
+  private fun runGlobalMpvMutationOffMain(action: () -> Unit) {
+    val worker = mpvWorkerHandler ?: return
+    worker.post {
+      mpvLock.lock()
+      try {
+        if (mpvAlive) runCatching(action)
       } finally {
         mpvLock.unlock()
       }
@@ -3438,7 +3631,9 @@ class MpvPlayerActivity : ComponentActivity() {
   /** The quick audio cycle, for remotes with a dedicated audio-track key. */
   private fun cycleAudioTrack() {
     if (!mpvCreated) return
-    MPVLib.command(arrayOf("cycle", "audio"))
+    // Off-main for the reason in [selectAudioTrack]: a dedicated audio-track key can be pressed
+    // repeatedly, and each press rebuilds the audio chain under the core lock.
+    runMpvMutationOffMain { MPVLib.command(arrayOf("cycle", "audio")) }
     // The chosen track is only known once the list has been read back, and the
     // choice is as explicit as one made from the menu, so it carries the same way.
     audioCyclePending = true
@@ -3491,7 +3686,10 @@ class MpvPlayerActivity : ComponentActivity() {
 
   private fun selectAudioTrack(trackId: Int) {
     if (!mpvCreated) return
-    MPVLib.setPropertyString("aid", trackId.toString())
+    // A track switch makes mpv rebuild the audio chain, so this is one of the longest property
+    // writes there is; the debounced [refreshTracks] read that follows sits behind it on the same
+    // worker, which is exactly the order it needs.
+    runMpvMutationOffMain { MPVLib.setPropertyString("aid", trackId.toString()) }
     val picked = tracks.value.firstOrNull { it.kind == TrackKind.Audio && it.id == trackId }
     // Optimistic, so the menu's marker moves with the press rather than with the
     // debounced read that follows it.
@@ -3504,7 +3702,7 @@ class MpvPlayerActivity : ComponentActivity() {
   /** [trackId] null is the "Off" row, which is `sid=no`. */
   private fun selectSubtitleTrack(trackId: Int?) {
     if (!mpvCreated) return
-    MPVLib.setPropertyString("sid", trackId?.toString() ?: "no")
+    runMpvMutationOffMain { MPVLib.setPropertyString("sid", trackId?.toString() ?: "no") }
     val picked = trackId?.let { id ->
       tracks.value.firstOrNull { it.kind == TrackKind.Subtitle && it.id == id }
     }
@@ -3814,7 +4012,9 @@ class MpvPlayerActivity : ComponentActivity() {
     val next = PlaybackSpeeds.stepped(playbackSpeed.doubleValue, steps)
     // Not persisted on purpose: a speed set for one film is rarely wanted for the
     // next. mpv's `speed` observer is what moves the OSD and the menu's label.
-    MPVLib.setPropertyDouble("speed", next)
+    // Off-main like the other menu writes: this is a held-arrow-key control, and a
+    // write that blocks on the core lock would stall the whole menu mid-press.
+    runMpvMutationOffMain { MPVLib.setPropertyDouble("speed", next) }
     playbackSpeed.doubleValue = next
     showOsd()
   }
@@ -3824,7 +4024,7 @@ class MpvPlayerActivity : ComponentActivity() {
     val next = SubtitleSize.stepped(subtitleSize.value, steps)
     if (next == subtitleSize.value) return
     subtitleSize.value = next
-    MPVLib.setPropertyString("sub-font-size", next.fontSize.toString())
+    runMpvMutationOffMain { MPVLib.setPropertyString("sub-font-size", next.fontSize.toString()) }
     playerPrefs = playerPrefs.copy(subtitleSize = next.storageName)
     val store = playerPrefsStore
     persistenceScope.launch { runCatching { store.setSubtitleSize(next.storageName) } }
@@ -3856,6 +4056,12 @@ class MpvPlayerActivity : ComponentActivity() {
     showOsdMessage(next.osdMessage)
   }
 
+  /**
+   * On the main thread on purpose, unlike the rest of the menu's writes. This is also called from
+   * [applyPlayerPrefs], which runs before the first `loadfile` has opened a session for a worker
+   * hop's generation guard to match — the write would be dropped, and mpv would build the audio
+   * chain for the file without it. It is a single option write with no demuxer involvement.
+   */
   private fun applyAudioOutput(mode: AudioOutputMode) {
     val codecs = if (mode == AudioOutputMode.Passthrough) supportedSpdifCodecs() else ""
     MPVLib.setPropertyString("audio-spdif", codecs)
@@ -3942,22 +4148,28 @@ class MpvPlayerActivity : ComponentActivity() {
    */
   private fun reselectAudioTrack() {
     val aid = MpvTracks.selected(tracks.value, TrackKind.Audio)?.id ?: return
-    MPVLib.setPropertyString("aid", "no")
-    MPVLib.setPropertyString("aid", aid.toString())
+    // Both writes in one mutation, off the main thread: tearing the audio chain down and building
+    // it again is the longest thing this activity asks of mpv, and the pair must not be split by
+    // anything else reaching the core between them or the track would be left switched off.
+    // Reachable only once a track list exists, which is after the session this is guarded by began.
+    runMpvMutationOffMain {
+      MPVLib.setPropertyString("aid", "no")
+      MPVLib.setPropertyString("aid", aid.toString())
+    }
   }
 
   private fun stepAudioDelay(steps: Int) {
     if (!mpvCreated) return
     val next = DelaySteps.stepped(audioDelaySec.doubleValue, steps)
     audioDelaySec.doubleValue = next
-    MPVLib.setPropertyDouble("audio-delay", next)
+    runMpvMutationOffMain { MPVLib.setPropertyDouble("audio-delay", next) }
   }
 
   private fun stepSubtitleDelay(steps: Int) {
     if (!mpvCreated) return
     val next = DelaySteps.stepped(subtitleDelaySec.doubleValue, steps)
     subtitleDelaySec.doubleValue = next
-    MPVLib.setPropertyDouble("sub-delay", next)
+    runMpvMutationOffMain { MPVLib.setPropertyDouble("sub-delay", next) }
   }
 
   /**
@@ -3991,6 +4203,56 @@ class MpvPlayerActivity : ComponentActivity() {
     }
   }
 
+  /**
+   * Arms the decoder check for [generation], once mpv has had time to open a decoder.
+   *
+   * Not stored for cancellation, unlike the load and stall watchdogs: it holds no UI state, the
+   * [generation] check drops it after a replacement, and [readOffMain] checks the generation again
+   * on the way back. onDestroy's `removeCallbacksAndMessages` covers teardown.
+   */
+  private fun scheduleHardwareDecodeCheck(generation: Long) {
+    mainHandler.postDelayed({
+      if (generation == loadGeneration && playbackStarted && !finishing) checkHardwareDecoding()
+    }, HWDEC_CHECK_DELAY_MS)
+  }
+
+  /**
+   * What the decoder actually ended up being, and how large a picture it was handed.
+   *
+   * The `hwdec` chain ends in `no` on purpose — a codec this SoC cannot accelerate must still
+   * play — but that fallback is silent, and the startup diagnostics that would have explained it
+   * (the codec errors mpv logged while probing) are deliberately reset at FILE_LOADED so they
+   * cannot be misreported later as the cause of a mid-stream failure. Which leaves a 4K HEVC or
+   * AV1 release on four A55 cores playing as a slideshow with nothing on screen or in a support
+   * report to say why, and no action for the viewer to take.
+   *
+   * Below [SOFTWARE_DECODE_WARN_WIDTH] this says nothing: software decoding of an ordinary 1080p
+   * release is what the fallback is for, and it works.
+   */
+  private fun checkHardwareDecoding() {
+    if (!mpvCreated) return
+    readOffMain({ readDecoderState() }) { state ->
+      val accelerated = state.hwdec.isNotBlank() && state.hwdec != "no"
+      if (accelerated || state.widthPx < SOFTWARE_DECODE_WARN_WIDTH) return@readOffMain
+      val reported = state.hwdec.ifBlank { "none" }
+      NebulaDiagnostics.record(
+        "player",
+        "software decoding ${state.widthPx}px video (hwdec-current=$reported)",
+      )
+      showOsdMessage(getString(R.string.player_software_decoding))
+    }
+  }
+
+  /** Both halves of the verdict in one worker hop; see [checkHardwareDecoding]. */
+  private data class DecoderState(val hwdec: String, val widthPx: Int)
+
+  /** Called on the worker thread. */
+  private fun readDecoderState(): DecoderState = DecoderState(
+    hwdec = MPVLib.getPropertyString("hwdec-current").orEmpty().trim(),
+    // Decoded width, not the surface's: the cost being diagnosed is the one the decoder pays.
+    widthPx = MPVLib.getPropertyInt("width") ?: 0,
+  )
+
   /** Called on the worker thread. */
   private fun readContentFps(): Float {
     val measured = MPVLib.getPropertyString("estimated-vf-fps")?.toFloatOrNull()
@@ -3999,9 +4261,20 @@ class MpvPlayerActivity : ComponentActivity() {
   }
 
   /**
-   * Votes through the Surface only. The previous code then unconditionally forced a display mode,
-   * overriding both this vote and the viewer's system match-content preference and allowing a
-   * multi-second black screen. On Android 12+ only seamless changes are requested.
+   * Votes through the Surface only, never by forcing a `preferredDisplayModeId`: doing that
+   * overrode both this vote and the viewer's system "Match content frame rate" preference, and
+   * allowed a multi-second black screen nobody had agreed to.
+   *
+   * [Surface.CHANGE_FRAME_RATE_ALWAYS] rather than `ONLY_IF_SEAMLESS` on Android 12+. A change of
+   * HDMI output mode is never seamless — the link has to retrain — so on a TV box the
+   * seamless-only form is a vote the platform can never act on: it returns quietly and 23.976p film
+   * keeps playing at 60Hz with 3:2 pulldown judder, which is the exact defect this method exists to
+   * remove. `ALWAYS` is also the only form the platform weighs the viewer's match-content setting
+   * against, so it is what actually respects the preference: with the setting off nothing changes,
+   * with it on the viewer gets the mode switch, and the brief HDMI re-sync, they asked for.
+   *
+   * [clearDisplayFrameRateVote] on pause, stop and teardown is what stops the vote pinning the
+   * panel to a film rate once playback is not using it.
    */
   private fun applyDisplayFrameRateVote() {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || paused.value || !playbackStarted) return
@@ -4013,7 +4286,7 @@ class MpvPlayerActivity : ComponentActivity() {
           surface.setFrameRate(
             fps,
             Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
-            Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS,
+            Surface.CHANGE_FRAME_RATE_ALWAYS,
           )
         } else {
           surface.setFrameRate(fps, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
@@ -4022,6 +4295,16 @@ class MpvPlayerActivity : ComponentActivity() {
     }
   }
 
+  /**
+   * Withdraws the vote, so nothing this activity said keeps the panel at a film rate.
+   *
+   * Deliberately asymmetric with [applyDisplayFrameRateVote]: the vote goes in with
+   * [Surface.CHANGE_FRAME_RATE_ALWAYS] because it has to be able to change a non-seamless HDMI
+   * mode, and comes out with `ONLY_IF_SEAMLESS` because it does not. Withdrawing is what every
+   * pause does, and forcing the mode back each time would put an HDMI re-sync black screen on both
+   * sides of every pause; leaving the panel where it is costs nothing while paused, and the pin is
+   * released for real when the surface goes at stop or teardown.
+   */
   private fun clearDisplayFrameRateVote() {
     frameRateRetryRunnable?.let(mainHandler::removeCallbacks)
     frameRateRetryRunnable = null
@@ -4313,12 +4596,17 @@ class MpvPlayerActivity : ComponentActivity() {
     pausePlayback()
     clearDisplayFrameRateVote()
     abandonAudioFocus()
+    // After the pause, so the demuxer is not still being filled as its ceiling comes down.
+    applyBackgroundDemuxerCache(background = true)
     super.onStop()
   }
 
   override fun onStart() {
     super.onStart()
     activityStarted = true
+    // Before anything that could resume: the readahead needs its ceiling back before it starts
+    // refilling, or the first minute of the returning session runs on a background-sized cache.
+    applyBackgroundDemuxerCache(background = false)
     syncAudioDeviceCallback(register = true)
     mediaSession?.isActive = playbackStarted
     publishPlaybackState()
@@ -4336,6 +4624,7 @@ class MpvPlayerActivity : ComponentActivity() {
     // save paths (finishPlayback and onPause) run before this point.
     if (!finishing && seeker.hasPendingPress) saveWatchState(SaveReason.Paused)
     destroying = true
+    sessionGuard.invalidate()
     mainHandler.removeCallbacksAndMessages(null)
     syncAudioDeviceCallback(register = false)
     // Before mpvCreated goes false, which is what [syncPlayingState] reads.
@@ -4451,12 +4740,48 @@ class MpvPlayerActivity : ComponentActivity() {
      */
     private const val END_GUARD_SEC = WatchedThreshold.END_GUARD_SEC
 
-    /** How often the up-next countdown redraws; see [upNextTickRunnable]. */
-    private const val UP_NEXT_TICK_MS = 250L
+    /**
+     * How often the up-next countdown redraws; see [upNextTickRunnable]. One second, which is the
+     * rate at which the only number on the card actually changes.
+     *
+     * It used to tick four times a second so the countdown bar drained continuously rather than
+     * stepping. That is a real improvement to the bar and a poor trade for it: every tick copies
+     * the card state and recomposes the whole card, and the card is on screen at exactly the moment
+     * the player is starting the next episode's stream — resolving addons, opening a new file,
+     * building a decoder. Three of every four of those recompositions existed only to move a bar a
+     * fifteenth of its width. A bar that wants to drain smoothly should animate between the
+     * whole-second values it is given rather than be re-fed four times a second.
+     */
+    private const val UP_NEXT_TICK_MS = 1_000L
     private const val UP_NEXT_LOOKUP_ATTEMPTS = 3
     private const val UP_NEXT_LOOKUP_RETRY_MS = 30_000L
     private const val FRAME_RATE_READ_ATTEMPTS = 3
     private const val FRAME_RATE_READ_RETRY_MS = 1_000L
+
+    /**
+     * What the demuxer may hold while the activity is stopped; see
+     * [applyBackgroundDemuxerCache]. Small rather than zero: mpv needs somewhere to keep the
+     * packets around the paused position so that returning resumes rather than re-seeks, and a
+     * cap of zero is read as "no limit" rather than as "nothing".
+     */
+    private val BACKGROUND_DEMUXER_CACHE = DemuxerCacheBytes(
+      forwardBytes = 16L * 1024 * 1024,
+      backBytes = 4L * 1024 * 1024,
+    )
+
+    /**
+     * The width above which software decoding is worth telling the viewer about. 2560 rather than
+     * 3840 so that 1440p and DCI-widths are covered too: four A55 cores manage 1080p in software
+     * and nothing above it.
+     */
+    private const val SOFTWARE_DECODE_WARN_WIDTH = 2560
+
+    /**
+     * How long after FILE_LOADED [checkHardwareDecoding] reads. mpv opens the decoder immediately
+     * after that event, so `hwdec-current` sampled at the event itself is still "no" on a stream
+     * that is about to be accelerated perfectly well.
+     */
+    private const val HWDEC_CHECK_DELAY_MS = 3_000L
 
     /** Below this, there is nothing worth remembering as a resume point. */
     private const val MIN_SAVE_MS = 10_000L

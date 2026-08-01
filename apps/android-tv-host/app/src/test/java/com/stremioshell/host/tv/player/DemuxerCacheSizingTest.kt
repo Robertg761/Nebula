@@ -20,20 +20,28 @@ class DemuxerCacheSizingTest {
   fun `a nominal 2 GB device lands in the middle band despite kernel reservation`() {
     val cache = DemuxerCacheSizing.forDeviceRam(1_890 * mib)
 
-    assertEquals(192 * mib, cache.forwardBytes)
+    assertEquals(128 * mib, cache.forwardBytes)
+    assertEquals(40 * mib, cache.backBytes)
   }
 
+  /**
+   * A Google TV Streamer reports about this much, and it is also running the
+   * launcher and the system UI: the top band trades readahead it does not need
+   * for headroom against the low-memory killer.
+   */
   @Test
-  fun `a nominal 4 GB device gets the largest caps`() {
+  fun `a nominal 4 GB TV box is capped for headroom, not for arithmetic`() {
     val cache = DemuxerCacheSizing.forDeviceRam(3_700 * mib)
 
-    assertEquals(256 * mib, cache.forwardBytes)
+    assertEquals(192 * mib, cache.forwardBytes)
+    assertEquals(48 * mib, cache.backBytes)
+    assertTrue("total native demuxer state", cache.forwardBytes + cache.backBytes <= 240 * mib)
   }
 
   @Test
   fun `the thresholds are inclusive at their lower edge`() {
     assertEquals(
-      192 * mib,
+      128 * mib,
       DemuxerCacheSizing.forDeviceRam(DemuxerCacheSizing.MEDIUM_RAM_BYTES).forwardBytes,
     )
     assertEquals(
@@ -41,11 +49,11 @@ class DemuxerCacheSizingTest {
       DemuxerCacheSizing.forDeviceRam(DemuxerCacheSizing.MEDIUM_RAM_BYTES - 1).forwardBytes,
     )
     assertEquals(
-      256 * mib,
+      192 * mib,
       DemuxerCacheSizing.forDeviceRam(DemuxerCacheSizing.LARGE_RAM_BYTES).forwardBytes,
     )
     assertEquals(
-      192 * mib,
+      128 * mib,
       DemuxerCacheSizing.forDeviceRam(DemuxerCacheSizing.LARGE_RAM_BYTES - 1).forwardBytes,
     )
   }
@@ -78,8 +86,10 @@ class DemuxerCacheSizingTest {
   }
 
   /**
-   * The whole point of the change: at UHD remux bitrates the byte cap, not
-   * `cache-secs`, is what decides how much readahead there is.
+   * The whole point of the sizing: at UHD remux bitrates the byte cap, not
+   * `cache-secs`, is what decides how much readahead there is. The top band's
+   * trim is only sound while it still buys enough seconds to ride out an ordinary
+   * debrid wobble, which is what this pins.
    */
   @Test
   fun `a mid-range box buffers meaningfully more of a 70 Mbps remux`() {
@@ -89,6 +99,6 @@ class DemuxerCacheSizingTest {
     val large = DemuxerCacheSizing.forDeviceRam(3_700 * mib).forwardBytes / bytesPerSec
 
     assertEquals(11L, small)
-    assertTrue("$large", large >= 30L)
+    assertTrue("$large", large >= 20L)
   }
 }

@@ -324,6 +324,68 @@ class SeekCoalescerTest {
   }
 
   @Test
+  fun `a short step stays exact so it lands where the OSD promised`() {
+    val seeker = coalescer()
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3_600.0, isRepeat = false, nowMs = 0L)
+
+    assertEquals(SeekPrecision.Exact, seeker.pendingPrecision(100.0))
+  }
+
+  @Test
+  fun `a long jump gives up frame accuracy rather than decode a GOP to reach it`() {
+    val seeker = coalescer()
+    // Six 30-second presses coalesced: the viewer is skipping a recap, not
+    // correcting a missed line, and cannot see which frame of the GOP they land on.
+    seeker.press(180.0, positionSec = 100.0, durationSec = 3_600.0, isRepeat = false, nowMs = 0L)
+
+    assertEquals(SeekPrecision.Keyframe, seeker.pendingPrecision(100.0))
+  }
+
+  @Test
+  fun `a long rewind is navigation too`() {
+    val seeker = coalescer()
+    seeker.press(-300.0, positionSec = 1_000.0, durationSec = 3_600.0, isRepeat = false, nowMs = 0L)
+
+    assertEquals(SeekPrecision.Keyframe, seeker.pendingPrecision(1_000.0))
+  }
+
+  @Test
+  fun `the threshold is exclusive, so a step exactly on it stays exact`() {
+    val seeker = SeekCoalescer(
+      endGuardSec = 5.0,
+      repeatMinIntervalMs = 120L,
+      keyframeSeekThresholdSec = 30.0,
+    )
+    seeker.press(30.0, positionSec = 100.0, durationSec = 3_600.0, isRepeat = false, nowMs = 0L)
+
+    assertEquals(SeekPrecision.Exact, seeker.pendingPrecision(100.0))
+  }
+
+  @Test
+  fun `precision falls back to exact when the distance cannot be established`() {
+    val seeker = coalescer()
+
+    // Nothing outstanding: there is no target to measure to.
+    assertEquals(SeekPrecision.Exact, seeker.pendingPrecision(100.0))
+
+    seeker.press(600.0, positionSec = 100.0, durationSec = 3_600.0, isRepeat = false, nowMs = 0L)
+    // A native timeline that reports NaN must not be read as a ten-minute jump.
+    assertEquals(SeekPrecision.Exact, seeker.pendingPrecision(Double.NaN))
+  }
+
+  @Test
+  fun `the chosen precision is what reaches the issued request`() {
+    val seeker = coalescer()
+    seeker.press(600.0, positionSec = 100.0, durationSec = 3_600.0, isRepeat = false, nowMs = 0L)
+
+    val request = seeker.consumePendingRequest(seeker.pendingPrecision(100.0))!!
+
+    assertEquals(SeekPrecision.Keyframe, request.precision)
+    assertEquals("absolute+keyframes", request.precision.mpvMode)
+    assertEquals(700.0, request.targetSec, 0.001)
+  }
+
+  @Test
   fun `a spurious settle with nothing outstanding changes nothing`() {
     val seeker = coalescer()
 

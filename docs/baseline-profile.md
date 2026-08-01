@@ -4,8 +4,9 @@ The committed `apps/android-tv-host/app/src/main/baseline-prof.txt` is a
 device-generated performance artifact, not a rule list to edit by hand. The
 repository now has a `:baselineprofile` producer that records cold startup,
 Home navigation, Search, Settings, one fixed movie's Details and Streams, and a
-15-second playback sample. Generation is explicit and does not run during a
-normal build.
+15-second playback sample. The producer now drives a sustained multi-rail
+D-pad path; `NavigationBenchmark` measures the same path with and without the
+profile. Generation is explicit and does not run during a normal build.
 
 The generator intentionally fails before producing an acceptable candidate if
 the fixture cannot reach Details, a non-empty stream list, and playback. This
@@ -25,6 +26,10 @@ come from the physical TV class being optimized.
    cd apps/android-tv-host
    ./gradlew :app:installNonMinifiedRelease
    ```
+
+   The shipping `release` build type runs R8 with resource shrinking, so the
+   minified path is exercised by the standard release smoke rather than a
+   separate trial variant.
 
 3. On that installed build, configure a non-production TMDB key and an HTTPS
    stream addon backed by a dedicated test account. Never put either credential
@@ -81,8 +86,9 @@ cd apps/android-tv-host
 ```
 
 The `StartupBenchmark` runs ten cold starts with no compilation and ten with
-`BaselineProfileMode.Require`, recording startup and frame metrics. A candidate
-is acceptable only when:
+`BaselineProfileMode.Require`, recording startup and frame metrics.
+`NavigationBenchmark` runs five sustained Home D-pad iterations in both modes.
+A candidate is acceptable only when:
 
 - the baseline-profile benchmark actually runs (the `Require` mode must not
   fall back silently);

@@ -1,11 +1,14 @@
 package com.stremioshell.host.tv
 
+import android.content.ComponentCallbacks2
 import android.content.Intent
 import android.os.Bundle
+import android.os.Looper
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.lifecycleScope
@@ -28,6 +31,7 @@ import com.stremioshell.host.tv.ui.UpdatePromptHost
 import com.stremioshell.host.tv.ui.theme.NebulaTheme
 import com.stremioshell.host.update.UpdateWorkScheduler
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 /**
@@ -43,6 +47,23 @@ class TvAppActivity : ComponentActivity() {
    * read, so a second press cannot slip through while that read is in flight.
    */
   private val launchInFlight = AtomicBoolean(false)
+
+  /**
+   * The same instance TvApp composes with: `viewModels()` resolves against this activity's
+   * ViewModelStore, which is the owner the composition's `viewModel()` uses too.
+   *
+   * Read only from [onTrimMemory], and only at levels the system cannot dispatch before the first
+   * composition has already created it - so this never brings the ViewModel (and its eager
+   * DataStore collectors) into existence ahead of the launch.
+   */
+  private val viewModel: TvAppViewModel by viewModels()
+
+  /**
+   * Keeps [scheduleBackgroundUpdateChecks] to one enqueue per activity instance: onResume also
+   * fires on every return from the player, and re-registering the same periodic work each time is
+   * a database write for no change.
+   */
+  private val updateSchedulingRequested = AtomicBoolean(false)
 
   /**
    * Set when the player ends an episode, finds a next one, and cannot decide which
@@ -96,9 +117,6 @@ class TvAppActivity : ComponentActivity() {
     super.onCreate(savedInstanceState)
     val watchStore = WatchStateStore(applicationContext)
     route(intent)
-    // The native app is the launcher target, so it owns update scheduling now;
-    // the WebView shell may never be opened again on a fresh install.
-    UpdateWorkScheduler.ensureScheduled(this)
 
     if (BuildConfig.DEBUG) {
       // Debug-only: allow test automation to inject settings via intent extras.
@@ -214,6 +232,53 @@ class TvAppActivity : ComponentActivity() {
     super.onResume()
     // Back from the player (or never left): launching is allowed again.
     launchInFlight.set(false)
+    scheduleBackgroundUpdateChecks()
+  }
+
+  /**
+   * Registers the periodic update check, once per activity instance and never on the launch path.
+   *
+   * The first `WorkManager.getInstance` loads the library, builds its configuration and opens the
+   * work database, and enqueueing then writes to it. That used to sit in onCreate directly in
+   * front of setContent, so a launch paid for it before anything was drawn. The idle handler runs
+   * when the main thread first has nothing left to do - after the first frame - and the enqueue
+   * itself goes to an IO thread from there. Nothing user-visible waits on this: the install prompt
+   * is driven separately by UpdatePromptHost on ON_RESUME.
+   */
+  private fun scheduleBackgroundUpdateChecks() {
+    if (!updateSchedulingRequested.compareAndSet(false, true)) return
+    Looper.myQueue().addIdleHandler {
+      // The native app is the launcher target, so it owns update scheduling now;
+      // the WebView shell may never be opened again on a fresh install.
+      lifecycleScope.launch(Dispatchers.IO) {
+        UpdateWorkScheduler.ensureScheduled(applicationContext)
+      }
+      false
+    }
+  }
+
+  /**
+   * Gives the browsing caches back when the system asks for memory.
+   *
+   * UI_HIDDEN gets its own branch because it is a lifecycle signal, not a pressure one: Android
+   * delivers it every time the player covers this activity, pressure or none. The metadata caches
+   * are safe to drop there - they are read-through, so losing them costs a silent refetch on some
+   * later navigation - but the stream list is not: the picker is usually the screen waiting right
+   * behind the player, and clearing its list on every playback start turned every BACK out of the
+   * player into a full all-addons refetch where the list used to be standing ready. That ~half a
+   * megabyte is not what saves a 4K decode from the low-memory killer; the caches are.
+   *
+   * The full trim runs only on the levels that mean the system is actually short: RUNNING_LOW and
+   * RUNNING_CRITICAL while on screen, and every background level from TRIM_MEMORY_BACKGROUND up.
+   * The constants are not monotone in pressure (RUNNING_LOW=10 < UI_HIDDEN=20 < BACKGROUND=40),
+   * which is why this cannot be one comparison.
+   */
+  override fun onTrimMemory(level: Int) {
+    super.onTrimMemory(level)
+    when {
+      level == ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN -> viewModel.releaseMetadataCaches()
+      level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> viewModel.onTrimMemory()
+    }
   }
 
   override fun onStop() {

@@ -1,9 +1,9 @@
 package com.stremioshell.host.update
 
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.net.HttpURLConnection
-import java.net.URL
+import com.stremioshell.host.tv.data.MAX_JSON_RESPONSE_BYTES
+import com.stremioshell.host.tv.data.SharedHttpClient
+import com.stremioshell.host.tv.data.readUtf8Limited
+import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -21,26 +21,33 @@ internal data class GitHubLatestReleaseDto(
   val assets: List<GitHubAssetDto>
 )
 
+/**
+ * The GitHub releases endpoint, over the app's shared OkHttp client.
+ *
+ * Blocking on purpose: its one caller is a WorkManager worker. Going through the shared client
+ * buys three things a bare HttpURLConnection did not have - the app's connection pool, a response
+ * that is always closed, and the disk cache. The last one matters most: `releases/latest` carries
+ * an ETag, so a repeat check revalidates and comes back 304 without spending one of the sixty
+ * anonymous API calls an hour this app is allowed.
+ */
 class GitHubReleaseApi {
   internal fun fetchLatestRelease(owner: String, repo: String): GitHubLatestReleaseDto {
-    val url = URL("https://api.github.com/repos/$owner/$repo/releases/latest")
-    val conn = (url.openConnection() as HttpURLConnection).apply {
-      requestMethod = "GET"
-      connectTimeout = 10_000
-      readTimeout = 10_000
-      setRequestProperty("User-Agent", "StremioShell")
-      setRequestProperty("Accept", "application/vnd.github+json")
-    }
+    val request = Request.Builder()
+      .url("https://api.github.com/repos/$owner/$repo/releases/latest")
+      // GitHub rejects anonymous API requests that do not identify themselves.
+      .header("User-Agent", "StremioShell")
+      .header("Accept", "application/vnd.github+json")
+      .build()
 
-    val code = conn.responseCode
-    val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-    val body = if (stream != null) {
-      BufferedReader(InputStreamReader(stream)).use { it.readText() }
-    } else {
-      ""
-    }
-    if (code !in 200..299) {
-      throw IllegalStateException("GitHub API error $code: $body")
+    val body = SharedHttpClient.client.newCall(request).execute().use { response ->
+      // Read before the status check so a failure can still quote what the service said; the
+      // limit applies either way, since an error page is not a size we control.
+      val text = response.body?.readUtf8Limited(MAX_JSON_RESPONSE_BYTES).orEmpty()
+      if (!response.isSuccessful) {
+        // BackgroundUpdateWorker.isRetryable reads the status back out of this message.
+        throw IllegalStateException("GitHub API error ${response.code}: $text")
+      }
+      text
     }
 
     val json = JSONObject(body)

@@ -59,6 +59,9 @@ class ApkUpdateManager(
       .putString(KEY_APK_PATH, file.absolutePath)
       .putString(KEY_DOWNLOADED_VERSION_NAME, normalizeVersionName(info.latestVersionName))
       .putLong(KEY_EXPECTED_SIZE_BYTES, info.apkSizeBytes ?: 0L)
+      // Nothing that was verified before this download describes the file that is about to
+      // land at that path.
+      .remove(KEY_VERIFIED_ARCHIVE)
       .apply()
 
     return downloadId
@@ -249,6 +252,7 @@ class ApkUpdateManager(
       .remove(KEY_APK_PATH)
       .remove(KEY_DOWNLOADED_VERSION_NAME)
       .remove(KEY_EXPECTED_SIZE_BYTES)
+      .remove(KEY_VERIFIED_ARCHIVE)
       .apply()
   }
 
@@ -260,9 +264,10 @@ class ApkUpdateManager(
     if (needsUnknownSourcesPermission(context)) {
       return null
     }
-    if (!isDownloadedApkInstallable(context)) {
+    if (!isDownloadedApkInstallable(context, revalidate = true)) {
       // Last gate before the installer. Re-parse the exact archive in case it
-      // was removed or replaced after the prompt was first evaluated.
+      // was removed or replaced after the prompt was first evaluated - this is
+      // the one caller that must not answer from the remembered verdict.
       clearDownloadedState(context, deleteApk = true)
       return null
     }
@@ -276,10 +281,46 @@ class ApkUpdateManager(
     }
   }
 
-  private fun isDownloadedApkInstallable(context: Context): Boolean {
-    return DownloadIntegrityPolicy.isInstallable(verifyDownloadedApk(context)) &&
+  /**
+   * Whether the file on disk may be handed to the package installer.
+   *
+   * The archive check makes the platform read and signature-verify all ~117 MB of the APK, and
+   * the callers are frequent: every return to the app re-evaluates the update prompt, and the
+   * periodic worker asks as well. The verdict is therefore remembered against the exact file it
+   * was reached for, so a repeat question about an unchanged file costs a stat instead of a full
+   * read. [revalidate] forces the read for the caller that is about to install.
+   */
+  private fun isDownloadedApkInstallable(context: Context, revalidate: Boolean = false): Boolean {
+    val fingerprint = getDownloadedApkFile(context)?.let { archiveFingerprint(it) }
+    if (!revalidate && fingerprint != null && isRememberedVerifiedArchive(context, fingerprint)) {
+      return true
+    }
+
+    val installable = DownloadIntegrityPolicy.isInstallable(verifyDownloadedApk(context)) &&
       verifyDownloadedArchive(context) == ApkArchivePolicy.Verdict.VERIFIED
+    if (installable && fingerprint != null) {
+      prefs(context).edit().putString(KEY_VERIFIED_ARCHIVE, fingerprint).apply()
+    }
+    // A rejection is never remembered: every caller deletes the file on one, so there would be
+    // nothing left for a remembered "no" to describe.
+    return installable
   }
+
+  /**
+   * Identity of the archive a verdict belongs to. Null when the file is missing or empty, which
+   * is a state the full check has to see rather than answer from a stored string.
+   */
+  private fun archiveFingerprint(file: File): String? {
+    val lengthBytes = file.length()
+    val lastModifiedMs = file.lastModified()
+    if (lengthBytes <= 0L || lastModifiedMs <= 0L) {
+      return null
+    }
+    return verificationFingerprint(file.absolutePath, lengthBytes, lastModifiedMs)
+  }
+
+  private fun isRememberedVerifiedArchive(context: Context, fingerprint: String): Boolean =
+    prefs(context).getString(KEY_VERIFIED_ARCHIVE, null) == fingerprint
 
   @Suppress("DEPRECATION")
   private fun PackageManager.getInstalledPackageInfo(
@@ -366,7 +407,23 @@ class ApkUpdateManager(
     private const val KEY_APK_PATH = "apk_path"
     private const val KEY_DOWNLOADED_VERSION_NAME = "downloaded_version_name"
     private const val KEY_EXPECTED_SIZE_BYTES = "expected_size_bytes"
+
+    /** The [verificationFingerprint] of the archive that last passed the installability check. */
+    private const val KEY_VERIFIED_ARCHIVE = "verified_archive"
     private const val HEX_DIGITS = "0123456789ABCDEF"
+
+    /**
+     * Identifies a downloaded archive closely enough to reuse a verdict about it.
+     *
+     * Path, size and modification time are what DownloadManager changes when it writes a
+     * different file - including the resumed-and-completed case, where only the last two move.
+     * This is a cache key, not a security check: the caller that acts on the verdict re-verifies.
+     */
+    internal fun verificationFingerprint(
+      path: String,
+      lengthBytes: Long,
+      lastModifiedMs: Long,
+    ): String = "$path|$lengthBytes|$lastModifiedMs"
 
     private fun packageInfoFlags(): Int {
       return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {

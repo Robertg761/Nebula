@@ -35,7 +35,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -77,6 +76,7 @@ import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stremioshell.host.R
 import com.stremioshell.host.tv.HomeRail
 import com.stremioshell.host.tv.LoadState
@@ -100,7 +100,6 @@ import com.stremioshell.host.tv.ui.theme.nebulaCardGlow
 import com.stremioshell.host.tv.ui.theme.wordmark
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalFoundationApi::class, ExperimentalComposeUiApi::class)
 @Composable
 fun HomeScreen(
   viewModel: TvAppViewModel,
@@ -109,14 +108,57 @@ fun HomeScreen(
   onPairWithPhone: () -> Unit,
   onOpenSettings: () -> Unit,
 ) {
-  val rails by viewModel.homeRails.collectAsState()
-  val railsNotice by viewModel.railsNotice.collectAsState()
-  val railPaging by viewModel.railPaging.collectAsState()
-  val continueWatching by viewModel.continueWatching.collectAsState()
-  val watchlist by viewModel.watchlistEntries.collectAsState()
-  val apiKey by viewModel.tmdbApiKey.collectAsState()
-  val addonUrls by viewModel.addonManifestUrls.collectAsState()
-  val heroLogoUrl by viewModel.heroLogoUrl.collectAsState()
+  val apiKey by viewModel.tmdbApiKey.collectAsStateWithLifecycle()
+  val addonUrls by viewModel.addonManifestUrls.collectAsStateWithLifecycle()
+  val settingsLoaded = apiKey != null && addonUrls != null
+  val missingTmdbKey = settingsLoaded && apiKey!!.isBlank()
+  val missingAddon = settingsLoaded && addonUrls!!.isEmpty()
+
+  if (missingTmdbKey || missingAddon) {
+    HomeSetupBody(
+      missingTmdbKey = missingTmdbKey,
+      missingAddon = missingAddon,
+      onPairWithPhone = onPairWithPhone,
+      onOpenSettings = onOpenSettings,
+    )
+  } else {
+    HomeBrowseBody(
+      viewModel = viewModel,
+      apiKey = apiKey,
+      onItemClick = onItemClick,
+      onResumeClick = onResumeClick,
+      onOpenSettings = onOpenSettings,
+    )
+  }
+}
+
+/**
+ * Keeps fast-changing catalog, watch-state and artwork flows below the settings gate.
+ *
+ * A top-level composable and not a local one: a `@Composable fun` declared inside another has no
+ * restart scope of its own, so the six flow collections below invalidated the whole of
+ * [HomeScreen] instead - one rail page or one Continue Watching write re-ran the setup decision
+ * and every branch above it. Declared out here it is its own restartable scope, and the invalidation
+ * stops at the parameters. The saved state still belongs to the same Home composition, because the
+ * back stack keys that on the route rather than on this function.
+ *
+ * @param apiKey only the trigger for the first rail load; the setup decision it feeds is [HomeScreen]'s.
+ */
+@OptIn(ExperimentalFoundationApi::class, ExperimentalComposeUiApi::class)
+@Composable
+private fun HomeBrowseBody(
+  viewModel: TvAppViewModel,
+  apiKey: String?,
+  onItemClick: (MediaType, Int) -> Unit,
+  onResumeClick: (WatchEntry) -> Unit,
+  onOpenSettings: () -> Unit,
+) {
+  val rails by viewModel.homeRails.collectAsStateWithLifecycle()
+  val railsNotice by viewModel.railsNotice.collectAsStateWithLifecycle()
+  val railPaging by viewModel.railPaging.collectAsStateWithLifecycle()
+  val continueWatching by viewModel.continueWatching.collectAsStateWithLifecycle()
+  val watchlist by viewModel.watchlistEntries.collectAsStateWithLifecycle()
+  val heroLogoUrl by viewModel.heroLogoUrl.collectAsStateWithLifecycle()
   val loadingHomeDescription = stringResource(R.string.home_loading_description)
   val firstContentFocus = rememberInitialFocusTarget()
   // Own targets for the two managed rows, so a card removed by the options dialog hands focus back
@@ -160,16 +202,14 @@ fun HomeScreen(
   val scope = rememberCoroutineScope()
 
   LaunchedEffect(apiKey) { viewModel.loadHomeRails() }
-
-  val settingsLoaded = apiKey != null && addonUrls != null
-  val missingTmdbKey = settingsLoaded && apiKey!!.isBlank()
-  val missingAddon = settingsLoaded && addonUrls!!.isEmpty()
-  val needsSetup = missingTmdbKey || missingAddon
   // Continue Watching resolves asynchronously and takes over the first-card slot, so the
   // target is only known once both it and the rails have settled; re-aim when it appears.
   // My List reads from the same store and behaves the same way.
   val hasContinueWatching = continueWatching.isNotEmpty()
   val hasWatchlist = watchlist.isNotEmpty()
+  // Wrapped once per snapshot so the two managed rows are skippable; see [StableList].
+  val continueCards = remember(continueWatching) { StableList(continueWatching) }
+  val watchlistCards = remember(watchlist) { StableList(watchlist) }
 
   val railList = (rails as? LoadState.Ready)?.value.orEmpty()
   // Recomputed only when the rail list changes identity, which a page append does - but the pick
@@ -191,10 +231,8 @@ fun HomeScreen(
   // appending a page would then recompose all nine rows.
   val paginateRail = remember(viewModel) { viewModel::paginateRail }
 
-  // Only the rails need the one-shot treatment; the setup screen has no scroll position to
-  // protect, so it stays free to re-aim at its button on every visit.
-  LaunchedEffect(firstContentFocus.focused, needsSetup) {
-    if (firstContentFocus.focused && !needsSetup) landedFocus = true
+  LaunchedEffect(firstContentFocus.focused) {
+    if (firstContentFocus.focused) landedFocus = true
   }
 
   // Land focus on content (not the nav rail) once something focusable exists. Continue Watching
@@ -202,13 +240,11 @@ fun HomeScreen(
   // content there is.
   RequestInitialFocus(
     target = firstContentFocus,
-    key = if (needsSetup) "setup" else "content:$hasHero:$hasContinueWatching:$hasWatchlist",
+    key = "content:$hasHero:$hasContinueWatching:$hasWatchlist",
     label = "Home first content card",
     enabled = !userNavigated &&
-      (
-        needsSetup ||
-          (!landedFocus && (rails is LoadState.Ready || hasContinueWatching || hasWatchlist))
-        ),
+      !landedFocus &&
+      (rails is LoadState.Ready || hasContinueWatching || hasWatchlist),
   )
 
   // Separate request, because the one above is deliberately dead once the user has driven
@@ -227,69 +263,6 @@ fun HomeScreen(
     label = "Home focus after row edit",
     enabled = rowEditTick > 0 && options == null && watchlistOptions == null,
   )
-
-  if (needsSetup) {
-    Box(
-      modifier = Modifier.fillMaxSize().padding(horizontal = NebulaDimens.ScreenEdge),
-      contentAlignment = Alignment.Center,
-    ) {
-      Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        // The wordmark, set the way the launcher banner sets it - a first run is the one moment
-        // the app has to introduce itself, and it is also the only screen with room to do it.
-        Text(
-          text = stringResource(R.string.home_wordmark),
-          style = MaterialTheme.typography.displayLarge.wordmark(),
-          color = NebulaPalette.TextHigh,
-          // Tracking is added after the final A as well, so the text node is one whole space wider
-          // than the glyphs and a centred wordmark sits visibly left of the rule under it. An
-          // offset rather than padding, so nothing re-measures.
-          modifier = Modifier.offset(x = WORDMARK_TRACK_CORRECTION),
-        )
-        Box(
-          modifier = Modifier
-            .padding(top = NebulaSpace.md)
-            .size(width = 128.dp, height = 4.dp)
-            .background(NebulaAccentBrush, RoundedCornerShape(2.dp))
-            .clearAndSetSemantics {},
-        )
-        Text(
-          // Says the same thing without "TMDB key" or "stream addon", which are the app's
-          // vocabulary rather than the vocabulary of the person holding the remote.
-          text = when {
-            missingTmdbKey && missingAddon ->
-              stringResource(R.string.home_setup_missing_key_and_addon)
-            missingTmdbKey ->
-              stringResource(R.string.home_setup_missing_key)
-            else ->
-              stringResource(R.string.home_setup_missing_addon)
-          },
-          style = MaterialTheme.typography.bodyLarge,
-          color = NebulaPalette.TextMuted,
-          textAlign = TextAlign.Center,
-          // A measure, or this sets as one 700dp line across the middle of the panel - and a
-          // wrapped second line would be left-ragged inside a centred column.
-          modifier = Modifier
-            .padding(top = NebulaSpace.lg, bottom = NebulaSpace.xl)
-            .widthIn(max = 520.dp),
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
-          NebulaButton(
-            text = stringResource(R.string.home_action_setup_phone),
-            onClick = onPairWithPhone,
-            style = NebulaButtonStyle.Primary,
-            icon = Icons.Filled.Phone,
-            modifier = Modifier.initialFocusTarget(firstContentFocus),
-          )
-          NebulaButton(
-            text = stringResource(R.string.home_action_enter_manually),
-            onClick = onOpenSettings,
-            icon = Icons.Filled.Edit,
-          )
-        }
-      }
-    }
-    return
-  }
 
   // Continue Watching and My List come from local storage, so a TMDB outage must not take them
   // down with the rails. Only when there is nothing local to show does the rails' state own the
@@ -451,7 +424,7 @@ fun HomeScreen(
       if (hasContinueWatching) {
         item(key = "continue", contentType = "continue") {
           ContinueWatchingRow(
-            entries = continueWatching,
+            entries = continueCards,
             onResumeClick = onResumeClick,
             onOptions = { options = it },
             firstCardFocus = if (hasHero) null else firstContentFocus,
@@ -464,7 +437,7 @@ fun HomeScreen(
       if (hasWatchlist) {
         item(key = "watchlist", contentType = "watchlist") {
           WatchlistRow(
-            entries = watchlist,
+            entries = watchlistCards,
             onItemClick = { entry -> onItemClick(entry.type, entry.tmdbId) },
             onOptions = { watchlistOptions = it },
             firstCardFocus = if (hasHero || hasContinueWatching) null else firstContentFocus,
@@ -480,7 +453,9 @@ fun HomeScreen(
         val rail = railList[index]
         MediaRowFocusable(
           title = localizedHomeRailTitle(rail.title),
-          items = rail.items,
+          // The rail itself, not its list: [HomeRail] is @Immutable and a bare List is not, so
+          // passing the items made every row recompose whenever anything on this page changed.
+          rail = rail,
           firstCardFocus = if (index == 0 && !hasHero && !hasContinueWatching && !hasWatchlist) {
             firstContentFocus
           } else {
@@ -551,6 +526,81 @@ fun HomeScreen(
       ),
       onDismiss = { watchlistOptions = null },
     )
+  }
+}
+
+@Composable
+private fun HomeSetupBody(
+  missingTmdbKey: Boolean,
+  missingAddon: Boolean,
+  onPairWithPhone: () -> Unit,
+  onOpenSettings: () -> Unit,
+) {
+  val setupFocus = rememberInitialFocusTarget()
+  RequestInitialFocus(
+    target = setupFocus,
+    key = "setup",
+    label = "Home setup",
+    enabled = true,
+  )
+  Box(
+    modifier = Modifier.fillMaxSize().padding(horizontal = NebulaDimens.ScreenEdge),
+    contentAlignment = Alignment.Center,
+  ) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+      // The wordmark, set the way the launcher banner sets it - a first run is the one moment
+      // the app has to introduce itself, and it is also the only screen with room to do it.
+      Text(
+        text = stringResource(R.string.home_wordmark),
+        style = MaterialTheme.typography.displayLarge.wordmark(),
+        color = NebulaPalette.TextHigh,
+        // Tracking is added after the final A as well, so the text node is one whole space wider
+        // than the glyphs and a centred wordmark sits visibly left of the rule under it. An
+        // offset rather than padding, so nothing re-measures.
+        modifier = Modifier.offset(x = WORDMARK_TRACK_CORRECTION),
+      )
+      Box(
+        modifier = Modifier
+          .padding(top = NebulaSpace.md)
+          .size(width = 128.dp, height = 4.dp)
+          .background(NebulaAccentBrush, RoundedCornerShape(2.dp))
+          .clearAndSetSemantics {},
+      )
+      Text(
+        // Says the same thing without "TMDB key" or "stream addon", which are the app's
+        // vocabulary rather than the vocabulary of the person holding the remote.
+        text = when {
+          missingTmdbKey && missingAddon ->
+            stringResource(R.string.home_setup_missing_key_and_addon)
+          missingTmdbKey ->
+            stringResource(R.string.home_setup_missing_key)
+          else ->
+            stringResource(R.string.home_setup_missing_addon)
+        },
+        style = MaterialTheme.typography.bodyLarge,
+        color = NebulaPalette.TextMuted,
+        textAlign = TextAlign.Center,
+        // A measure, or this sets as one 700dp line across the middle of the panel - and a
+        // wrapped second line would be left-ragged inside a centred column.
+        modifier = Modifier
+          .padding(top = NebulaSpace.lg, bottom = NebulaSpace.xl)
+          .widthIn(max = 520.dp),
+      )
+      Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
+        NebulaButton(
+          text = stringResource(R.string.home_action_setup_phone),
+          onClick = onPairWithPhone,
+          style = NebulaButtonStyle.Primary,
+          icon = Icons.Filled.Phone,
+          modifier = Modifier.initialFocusTarget(setupFocus),
+        )
+        NebulaButton(
+          text = stringResource(R.string.home_action_enter_manually),
+          onClick = onOpenSettings,
+          icon = Icons.Filled.Edit,
+        )
+      }
+    }
   }
 }
 
@@ -728,12 +778,14 @@ private fun Key.isDirectional(): Boolean =
  * about
  * settling the banner into the page, which a card clipped to a rounded shape with 34dp of Void
  * under it cannot do. All it is for is holding the copy legible, so it now covers only the copy.
+ *
+ * A val, not a `get()`: a getter builds a fresh gradient on every read, and this one is read from
+ * the billboard's modifier chain on every recomposition of Home's first item.
  */
-private val HeroCopyScrim: Brush
-  get() = Brush.verticalGradient(
-    0.0f to Color.Transparent,
-    1.0f to NebulaPalette.Void.copy(alpha = 0.7f),
-  )
+private val HeroCopyScrim: Brush = Brush.verticalGradient(
+  0.0f to Color.Transparent,
+  1.0f to NebulaPalette.Void.copy(alpha = 0.7f),
+)
 
 /**
  * Home's billboard: the day's featured title, at the size a TV expects it.
@@ -933,12 +985,13 @@ private fun HeroBillboard(
 @Composable
 private fun MediaRowFocusable(
   title: String,
-  items: List<MediaItem>,
+  rail: HomeRail,
   firstCardFocus: InitialFocusTarget?,
   loadingMore: Boolean,
   onLastVisibleIndex: (Int) -> Unit,
   onItemClick: (MediaItem) -> Unit,
 ) {
+  val items = rail.items
   if (items.isEmpty()) return
   val listState = rememberLazyListState()
   // The callback closes over the rail title and the ViewModel, both of which outlive any single
@@ -1014,12 +1067,13 @@ private fun LoadingMoreCard() {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun WatchlistRow(
-  entries: List<WatchlistEntry>,
+  entries: StableList<WatchlistEntry>,
   onItemClick: (WatchlistEntry) -> Unit,
   onOptions: (WatchlistEntry) -> Unit,
   firstCardFocus: InitialFocusTarget?,
   rowFocus: InitialFocusTarget,
 ) {
+  val saved = entries.items
   Column(modifier = Modifier.fillMaxWidth()) {
     RailHeading(stringResource(R.string.home_rail_my_list))
     CompositionLocalProvider(LocalBringIntoViewSpec provides rememberHomeRailBringIntoViewSpec()) {
@@ -1028,8 +1082,8 @@ private fun WatchlistRow(
         contentPadding = PaddingValues(horizontal = NebulaDimens.ScreenEdge),
         horizontalArrangement = Arrangement.spacedBy(NebulaDimens.CardGap),
       ) {
-        items(entries.size, key = { entries[it].key }, contentType = { "card" }) { index ->
-          val entry = entries[index]
+        items(saved.size, key = { saved[it].key }, contentType = { "card" }) { index ->
+          val entry = saved[index]
           MediaCard(
             item = remember(entry) { entry.toMediaItem() },
             onClick = { onItemClick(entry) },
@@ -1059,12 +1113,13 @@ private fun WatchlistRow(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ContinueWatchingRow(
-  entries: List<WatchEntry>,
+  entries: StableList<WatchEntry>,
   onResumeClick: (WatchEntry) -> Unit,
   onOptions: (WatchEntry) -> Unit,
   firstCardFocus: InitialFocusTarget?,
   rowFocus: InitialFocusTarget,
 ) {
+  val records = entries.items
   Column(modifier = Modifier.fillMaxWidth()) {
     RailHeading(stringResource(R.string.home_rail_continue_watching))
     CompositionLocalProvider(LocalBringIntoViewSpec provides rememberHomeRailBringIntoViewSpec()) {
@@ -1073,8 +1128,8 @@ private fun ContinueWatchingRow(
         contentPadding = PaddingValues(horizontal = NebulaDimens.ScreenEdge),
         horizontalArrangement = Arrangement.spacedBy(NebulaDimens.CardGap),
       ) {
-        items(entries.size, key = { entries[it].key }, contentType = { "card" }) { index ->
-          val entry = entries[index]
+        items(records.size, key = { records[it].key }, contentType = { "card" }) { index ->
+          val entry = records[index]
           MediaCard(
             item = remember(entry) { entry.toMediaItem() },
             onClick = { onResumeClick(entry) },

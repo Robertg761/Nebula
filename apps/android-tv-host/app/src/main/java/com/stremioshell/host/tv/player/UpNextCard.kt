@@ -1,5 +1,8 @@
 package com.stremioshell.host.tv.player
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -17,6 +20,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
@@ -24,6 +31,7 @@ import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
@@ -31,7 +39,6 @@ import com.stremioshell.host.R
 import com.stremioshell.host.tv.ui.ArtworkImage
 import com.stremioshell.host.tv.ui.BadgeTone
 import com.stremioshell.host.tv.ui.NebulaBadge
-import com.stremioshell.host.tv.ui.NebulaProgressBar
 import com.stremioshell.host.tv.ui.PosterFallback
 import com.stremioshell.host.tv.ui.theme.NebulaDimens
 import com.stremioshell.host.tv.ui.theme.NebulaPalette
@@ -78,10 +85,10 @@ data class UpNextFailure(
  * leave a spinner or countdown visible over the error.
  *
  * [progress] is the countdown as a real fraction rather than as
- * `secondsLeft / total`: the tick runs four times a second precisely so the card
- * is never a whole second stale, and deriving the bar from the whole-second
- * number threw three of every four of those ticks away and made the bar lurch a
- * thirtieth of its width once a second instead of draining.
+ * `secondsLeft / total`: the tick runs once a second — recomposing a card this
+ * size any faster bought nothing over the credits it plays over — and the bar
+ * tweens between ticks inside the card, so it drains instead of stepping a
+ * fifteenth of its width at each update.
  */
 data class UpNextCardState(
   val seriesTitle: String,
@@ -152,8 +159,8 @@ object UpNextText {
   }
 
   /**
-   * A bounded announcement stream for a card whose progress itself updates four
-   * times a second. A live region on the whole merged card made every progress
+   * A bounded announcement stream for a card whose progress itself updates every
+   * second. A live region on the whole merged card made every progress
    * update eligible to interrupt TalkBack; these milestones announce the offer
    * and urgency without drowning out the episode title or the available actions.
    */
@@ -311,7 +318,7 @@ fun BoxScope.UpNextCard(
       // intentionally not focusable: ordinary D-pad routing stays in the
       // activity while TalkBack/Switch Access can invoke the custom actions.
       // Announcements are explicit milestones above; a live region here would
-      // be invalidated by every 250ms progress update.
+      // be invalidated by every once-a-second progress update.
       .semantics(mergeDescendants = true) {
         customActions = accessibilityActions
       },
@@ -386,10 +393,41 @@ fun BoxScope.UpNextCard(
       // is reserved either way so the card does not resize when it goes.
       Box(modifier = Modifier.fillMaxWidth().height(COUNTDOWN_SLOT).padding(top = NebulaSpace.xxs)) {
         if (state.secondsLeft != null && !state.resolving && state.failure == null) {
-          NebulaProgressBar(
-            progress = state.progress,
-            height = 6.dp,
-            modifier = Modifier.fillMaxWidth(),
+          // The state ticks once a second, publishing the fraction the countdown
+          // will have reached at the *next* tick; a linear tween of the tick
+          // interval then drains the bar continuously through the true remainder
+          // and lands on empty as the final tick fires. The animated value is
+          // only ever read inside the draw lambda below, so the per-frame
+          // invalidation is a redraw of this one node - composition never sees
+          // it and the rest of the card stays at 1 Hz. NebulaProgressBar is not
+          // reusable here for exactly that reason: its fill is a layout-phase
+          // fillMaxWidth(fraction), which would recompose per frame.
+          val drainedProgress = animateFloatAsState(
+            targetValue = state.progress,
+            animationSpec = tween(durationMillis = 1_000, easing = LinearEasing),
+            label = "upNextCountdown",
+          )
+          Box(
+            modifier = Modifier
+              .fillMaxWidth()
+              .height(6.dp)
+              .drawBehind {
+                // Track and fill match NebulaProgressBar's geometry exactly:
+                // full-height corner radius, TrackInactive under Violet.
+                val radius = CornerRadius(size.height / 2f)
+                drawRoundRect(NebulaPalette.TrackInactive, cornerRadius = radius)
+                val fraction = drainedProgress.value.coerceIn(0f, 1f)
+                if (fraction > 0f) {
+                  val width = size.width * fraction
+                  val left = if (layoutDirection == LayoutDirection.Rtl) size.width - width else 0f
+                  drawRoundRect(
+                    NebulaPalette.Violet,
+                    topLeft = Offset(left, 0f),
+                    size = Size(width, size.height),
+                    cornerRadius = radius,
+                  )
+                }
+              },
           )
         }
       }

@@ -185,16 +185,35 @@ object NebulaDiagnostics {
       .forEach { it.delete() }
   }
 
+  /**
+   * Appends one event, and only rewrites the file when it has actually outgrown its bound.
+   *
+   * Recording used to read every retained line back and rewrite the whole file per event, so the
+   * cost of an event grew with the log and every event was a full-file write to eMMC. An append
+   * is one write of one line; the rewrite below happens roughly once per [MAX_EVENT_BYTES] of
+   * events instead of once per event.
+   */
   private fun appendBounded(file: File, line: String) {
-    val lines = if (file.exists()) file.readLines().takeLast(RETAINED_EVENT_LINES) else emptyList()
-    val retained = (lines + line).toMutableList()
+    FileOutputStream(file, true).use { stream ->
+      stream.write((line + "\n").toByteArray(StandardCharsets.UTF_8))
+    }
+    if (file.length() > MAX_EVENT_BYTES) compact(file)
+  }
+
+  /**
+   * Cuts the log back to the newest [RETAINED_EVENT_LINES] lines.
+   *
+   * Rewriting whole lines - rather than truncating at a byte offset - is what keeps the file from
+   * being cut through the middle of a multibyte UTF-8 character. The byte loop below then covers
+   * the case where those lines are themselves oversized, which also recovers a legacy file.
+   */
+  private fun compact(file: File) {
+    val retained = file.readLines().takeLast(RETAINED_EVENT_LINES).toMutableList()
     var encoded = retained.joinToString(separator = "\n", postfix = "\n").encodeToByteArray()
     while (encoded.size > MAX_EVENT_BYTES && retained.size > 1) {
       retained.removeAt(0)
       encoded = retained.joinToString(separator = "\n", postfix = "\n").encodeToByteArray()
     }
-    // A single sanitized line is far below the limit. Writing the complete bounded ring also
-    // recovers an oversized legacy file without cutting through a multibyte UTF-8 character.
     file.writeBytes(encoded)
   }
 
@@ -225,7 +244,12 @@ object NebulaDiagnostics {
     }
     appendLine()
     appendLine("[Recent redacted events]")
-    val events = eventFile(context).takeIf(File::exists)?.readLines().orEmpty()
+    // The log is compacted lazily, so it can hold well over RETAINED_EVENT_LINES between
+    // compactions. The report shows the same window it always did.
+    val events = eventFile(context).takeIf(File::exists)
+      ?.readLines()
+      ?.takeLast(RETAINED_EVENT_LINES)
+      .orEmpty()
     if (events.isEmpty()) appendLine("None recorded") else events.forEach(::appendLine)
     appendLine()
     appendLine("This report is created locally and shared only through the Android app you choose.")
@@ -289,13 +313,17 @@ object NebulaDiagnostics {
     else -> "reason-$reason"
   }
 
+  /**
+   * Records the two lifecycle edges a support report is read for: which screens were opened, and
+   * whether one of them went away without the process going with it.
+   *
+   * Resume is deliberately not among them. It fires on every return from the player and every
+   * dismissed dialog, so it was the most frequent event the log carried and it told a reader
+   * nothing that create and destroy do not - while pushing those two out of the window faster.
+   */
   private object ActivityEvents : Application.ActivityLifecycleCallbacks {
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
       record("lifecycle", "${activity.javaClass.simpleName} created")
-    }
-
-    override fun onActivityResumed(activity: Activity) {
-      record("lifecycle", "${activity.javaClass.simpleName} resumed")
     }
 
     override fun onActivityDestroyed(activity: Activity) {
@@ -303,6 +331,7 @@ object NebulaDiagnostics {
     }
 
     override fun onActivityStarted(activity: Activity) = Unit
+    override fun onActivityResumed(activity: Activity) = Unit
     override fun onActivityPaused(activity: Activity) = Unit
     override fun onActivityStopped(activity: Activity) = Unit
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit

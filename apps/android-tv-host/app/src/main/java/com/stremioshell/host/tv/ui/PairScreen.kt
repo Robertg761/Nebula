@@ -21,7 +21,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
@@ -45,6 +44,7 @@ import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Surface
 import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stremioshell.host.R
 import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.pairing.PairingConnectionCheck
@@ -70,7 +70,7 @@ private val PairPanelSize = QrCodeSize + 48.dp
 
 @Composable
 fun PairScreen(viewModel: TvAppViewModel, onPaired: () -> Unit) {
-  val state by viewModel.pairing.collectAsState()
+  val state by viewModel.pairing.collectAsStateWithLifecycle()
 
   LaunchedEffect(Unit) { viewModel.startPairing() }
   DisposableEffect(Unit) { onDispose { viewModel.stopPairing() } }

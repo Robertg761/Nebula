@@ -1,12 +1,21 @@
 package com.stremioshell.host.tv.player
 
+import kotlin.math.abs
+
 /**
  * How mpv should land a coalesced seek.
  *
- * [Keyframe] is useful for a transient scrub preview. [Exact] is the right
- * default for the one command emitted after a D-pad burst: the target shown in
- * the OSD is then the position playback actually resumes from, even in a file
- * with a long GOP.
+ * [Exact] is right for a short step: the target shown in the OSD is then the
+ * position playback actually resumes from, even in a file with a long GOP, and
+ * over ten seconds the difference between the two is exactly what a viewer
+ * correcting a missed line of dialogue is looking for.
+ *
+ * [Keyframe] is right for a long jump, and for a transient scrub preview. An
+ * exact seek makes mpv decode and discard every frame between the preceding
+ * keyframe and the target; on a 4K HEVC release with a five-to-ten-second GOP,
+ * pulled over a debrid link onto four A55 cores, that is seconds of work spent
+ * landing on a frame nobody chose to that precision. See
+ * [SeekCoalescer.pendingPrecision] for where the line is drawn.
  */
 enum class SeekPrecision(val mpvMode: String) {
   Keyframe("absolute+keyframes"),
@@ -59,6 +68,15 @@ class SeekCoalescer(
   private val endGuardSec: Double = 5.0,
   /** Floor on the interval between accepted repeats, so held keys scrub at a sane rate. */
   private val repeatMinIntervalMs: Long = 120L,
+  /**
+   * How far a coalesced target must be from the reported position before
+   * [pendingPrecision] gives up frame accuracy for a keyframe. Thirty seconds is
+   * past every correction (a repeated line, a re-read subtitle) and inside every
+   * navigation (skipping a recap or an ad break): a viewer crossing it is looking
+   * for a place in the film rather than for a frame, and cannot tell that mpv
+   * landed a GOP early — but can very much tell how long the seek took.
+   */
+  private val keyframeSeekThresholdSec: Double = 30.0,
 ) {
   private var target = NO_TARGET
   private var pending = false
@@ -125,12 +143,39 @@ class SeekCoalescer(
   }
 
   /**
+   * How far the pending target is from [positionSec], and therefore which
+   * precision it should be committed with. Read before [consumePendingRequest],
+   * whose argument it is meant to be.
+   *
+   * [positionSec] is mpv's own reported position, so while an earlier seek is
+   * still in flight this measures from where mpv last said it was rather than
+   * from where it is heading — which is the right distance anyway, because that
+   * is the ground the decoder would have to cover.
+   *
+   * Falls back to [SeekPrecision.Exact] whenever the distance cannot be
+   * established: an unaccelerated exact seek is a slow correct answer, and a
+   * keyframe seek nobody asked for is a wrong one.
+   */
+  fun pendingPrecision(positionSec: Double): SeekPrecision {
+    val destination = previewSec ?: return SeekPrecision.Exact
+    val origin = positionSec.takeIf(Double::isFinite) ?: return SeekPrecision.Exact
+    val threshold = keyframeSeekThresholdSec.takeIf { it.isFinite() && it > 0.0 }
+      ?: return SeekPrecision.Exact
+    return if (abs(destination - origin) > threshold) {
+      SeekPrecision.Keyframe
+    } else {
+      SeekPrecision.Exact
+    }
+  }
+
+  /**
    * Builds the command to hand to mpv, or null if nothing is waiting. The
    * preview stays live until [settle]: the seek is in flight, not finished.
    *
-   * The final command after a coalesced burst defaults to [SeekPrecision.Exact].
-   * A caller intentionally rendering intermediate scrub previews can opt into
-   * [SeekPrecision.Keyframe].
+   * The default is [SeekPrecision.Exact], which is the safe answer for a caller
+   * that has not decided. The player passes [pendingPrecision] instead, and a
+   * caller intentionally rendering intermediate scrub previews can pass
+   * [SeekPrecision.Keyframe] outright.
    */
   fun consumePendingRequest(
     precision: SeekPrecision = SeekPrecision.Exact,
@@ -149,10 +194,11 @@ class SeekCoalescer(
   }
 
   /**
-   * Compatibility form for the activity's current command path.
+   * Compatibility form that discards the request's identity and always asks for keyframes.
    *
-   * It preserves the old keyframe behaviour until the activity switches to
-   * [consumePendingRequest] and uses each request's [SeekRequest.precision].
+   * No longer on the player's path: it issues [consumePendingRequest] with
+   * [pendingPrecision] and settles by identity. Kept for callers that only want a
+   * target, and for the tests that exercise the untagged [settle] against it.
    */
   fun consumePending(): Double? =
     consumePendingRequest(SeekPrecision.Keyframe)?.targetSec

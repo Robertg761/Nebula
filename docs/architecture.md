@@ -87,3 +87,10 @@ inert, but an old native event delivered only after a replacement begins is
 indistinguishable from a new-file event. Device stress coverage must continue
 to verify libmpv's event ordering until the player state machine has an
 identity-bearing native seam.
+
+Playback worker mutations now pass through a testable session guard, so a
+queued mutation for a replaced or destroyed file is dropped before JNI work.
+The native event limitation remains a physical-device validation item rather
+than something the Java generation counter can prove away. Route, focus,
+network, and player-load sections use `PerformanceTrace` so Perfetto captures
+can separate frame-time work from async latency.

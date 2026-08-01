@@ -13,14 +13,29 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 private const val TV_STORE_NAME = "tv_app"
 
+/**
+ * The one preferences file behind [SettingsStore], [WatchStateStore], [WatchlistStore] and
+ * [StreamPickStore].
+ *
+ * Because they share it, a 30-second playback progress save emits a new snapshot to all four. So
+ * every flow below narrows to the keys it actually reads and applies [distinctUntilChanged] to
+ * those *before* decoding them: an unrelated key's write then costs a string comparison instead of
+ * a JSON parse of somebody else's data. The decode itself runs on [Dispatchers.Default], because
+ * these flows are collected with `stateIn(viewModelScope, ...)`, which otherwise puts a ~60KB parse
+ * and a sort on the main thread on every emission. DataStore's own file read is unaffected by
+ * [flowOn] - it always runs in the store's own scope.
+ */
 private val Context.tvDataStore by preferencesDataStore(
   name = TV_STORE_NAME,
   corruptionHandler = preferencesCorruptionHandler(TV_STORE_NAME),
@@ -39,7 +54,9 @@ class SettingsStore(private val context: Context) {
   private val store = context.tvDataStore
   private val data = store.recoveringData(TV_STORE_NAME)
 
-  val tmdbApiKey: Flow<String> = data.map { it[KEY_TMDB].orEmpty() }
+  val tmdbApiKey: Flow<String> = data
+    .map { it[KEY_TMDB].orEmpty() }
+    .distinctUntilChanged()
 
   /**
    * Every stream addon, in the viewer's own order.
@@ -49,25 +66,25 @@ class SettingsStore(private val context: Context) {
    * with nothing to do and nothing to lose. The legacy key is left in place rather
    * than rewritten: nothing reads it once the list key exists, and leaving it makes
    * a downgrade survivable.
+   *
+   * Both keys are carried through the distinct check, because the migration reads both.
    */
-  val addonManifestUrls: Flow<List<String>> = data.map { prefs ->
-    AddonList.migrated(decodeUrls(prefs[KEY_ADDONS]), prefs[KEY_ADDON].orEmpty())
-  }
-
-  /**
-   * The first addon. For the callers that predate the list and still deal in
-   * exactly one: the phone pairing form and the player's next-episode resolver.
-   */
-  val addonManifestUrl: Flow<String> = addonManifestUrls.map { it.firstOrNull().orEmpty() }
+  val addonManifestUrls: Flow<List<String>> = data
+    .map { prefs -> prefs[KEY_ADDONS] to prefs[KEY_ADDON].orEmpty() }
+    .distinctUntilChanged()
+    .map { (stored, legacy) -> AddonList.migrated(decodeUrls(stored), legacy) }
+    .flowOn(Dispatchers.Default)
 
   /**
    * Where subtitles are fetched from. Configurable because the default is one
    * community server with no account behind it, and a viewer whose language it
    * covers badly has nowhere else to point.
    */
-  val subtitlesBaseUrl: Flow<String> = data.map { prefs ->
-    prefs[KEY_SUBTITLES]?.trim()?.ifBlank { null } ?: SubtitlesClient.OPENSUBTITLES_V3_BASE
-  }
+  val subtitlesBaseUrl: Flow<String> = data
+    .map { prefs ->
+      prefs[KEY_SUBTITLES]?.trim()?.ifBlank { null } ?: SubtitlesClient.OPENSUBTITLES_V3_BASE
+    }
+    .distinctUntilChanged()
 
   suspend fun setTmdbApiKey(value: String) {
     store.edit { it[KEY_TMDB] = value.trim() }
@@ -194,12 +211,20 @@ class WatchStateStore(private val context: Context) {
   private val store = context.tvDataStore
   private val data = store.recoveringData(TV_STORE_NAME)
 
-  val entries: Flow<List<WatchEntry>> = data.map { prefs ->
-    decode(prefs[KEY_WATCH]).sortedByDescending { it.updatedAtMs }
-  }
+  /**
+   * The heaviest flow in the app: several hundred entries, and the one the player rewrites every
+   * thirty seconds. Decoding and sorting it belong off the main thread by a wide margin.
+   */
+  val entries: Flow<List<WatchEntry>> = data
+    .map { it[KEY_WATCH] }
+    .distinctUntilChanged()
+    .map { raw -> decode(raw).sortedByDescending { it.updatedAtMs } }
+    .flowOn(Dispatchers.Default)
 
-  suspend fun get(key: String): WatchEntry? {
-    return decode(data.first()[KEY_WATCH]).firstOrNull { it.key == key }
+  // Off the caller's dispatcher for the decode: the Play press reads a resume position through
+  // here from the main thread, and the parse is the whole watch list, not one entry.
+  suspend fun get(key: String): WatchEntry? = withContext(Dispatchers.Default) {
+    decode(data.first()[KEY_WATCH]).firstOrNull { it.key == key }
   }
 
   suspend fun upsert(entry: WatchEntry) {
@@ -356,9 +381,11 @@ class WatchlistStore(private val context: Context) {
   private val store = context.tvDataStore
   private val data = store.recoveringData(TV_STORE_NAME)
 
-  val entries: Flow<List<WatchlistEntry>> = data.map { prefs ->
-    WatchlistRetention.ordered(decode(prefs[KEY_LIST]))
-  }
+  val entries: Flow<List<WatchlistEntry>> = data
+    .map { it[KEY_LIST] }
+    .distinctUntilChanged()
+    .map { raw -> WatchlistRetention.ordered(decode(raw)) }
+    .flowOn(Dispatchers.Default)
 
   /**
    * Saves or unsaves [entry] in one read-modify-write, so the button cannot act on a
@@ -400,9 +427,11 @@ class StreamPickStore(private val context: Context) {
   private val store = context.tvDataStore
   private val data = store.recoveringData(TV_STORE_NAME)
 
-  val selections: Flow<Map<String, StreamSelection>> = data.map { prefs ->
-    decode(prefs[KEY_PICKS]).associateBy { it.seriesId }
-  }
+  val selections: Flow<Map<String, StreamSelection>> = data
+    .map { it[KEY_PICKS] }
+    .distinctUntilChanged()
+    .map { raw -> decode(raw).associateBy { it.seriesId } }
+    .flowOn(Dispatchers.Default)
 
   suspend fun get(seriesId: String): StreamSelection? {
     return decode(data.first()[KEY_PICKS]).firstOrNull { it.seriesId == seriesId }

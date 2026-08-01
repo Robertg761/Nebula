@@ -21,6 +21,13 @@ class SettingsStoreInstrumentedTest {
     val fixtureAddon = "https://example.invalid/manifest.json"
     val fixtureSubtitles = "https://subtitles.example.invalid/manifest.json"
 
+    // Snapshot whatever the device already holds and put it back afterwards. This suite also runs
+    // on personal devices, and a finally that wrote blanks here once erased a configured box's
+    // TMDB key and addon list - cleanup must mean "as it was", not "empty".
+    val previousKey = first.tmdbApiKey.first()
+    val previousAddons = first.addonManifestUrls.first()
+    val previousSubtitles = first.subtitlesBaseUrl.first()
+
     try {
       first.setConfiguration(
         tmdbKey = "  $fixtureKey  ",
@@ -34,9 +41,9 @@ class SettingsStoreInstrumentedTest {
       assertEquals(fixtureSubtitles, reopened.subtitlesBaseUrl.first())
     } finally {
       first.setConfiguration(
-        tmdbKey = "",
-        addonUrls = emptyList(),
-        subtitlesBaseUrl = "",
+        tmdbKey = previousKey,
+        addonUrls = previousAddons,
+        subtitlesBaseUrl = previousSubtitles,
       )
     }
   }

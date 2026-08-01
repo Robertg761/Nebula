@@ -14,6 +14,7 @@ import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.UiObject2
 import androidx.test.uiautomator.Until
 import com.stremioshell.host.tv.data.SettingsStore
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertNotNull
@@ -31,11 +32,24 @@ class TvNavigationInstrumentedTest {
   private val context: Context = ApplicationProvider.getApplicationContext()
   private val settings = SettingsStore(context)
   private lateinit var device: UiDevice
+  private var previousKey = ""
+  private var previousAddons = emptyList<String>()
+  private var previousSubtitles = ""
 
   @Before
   fun resetConfiguration() {
     device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+    // A TV left alone long enough goes to sleep, and an activity launched into a dark display
+    // renders nothing for UiAutomator to find - every wait below then times out with the app
+    // working perfectly.
+    device.wakeUp()
     runBlocking {
+      // Snapshotted so the blank state these tests need is not what the device is left in: this
+      // suite also runs on personal boxes, and blanking here once erased a configured TMDB key
+      // and addon list for good.
+      previousKey = settings.tmdbApiKey.first()
+      previousAddons = settings.addonManifestUrls.first()
+      previousSubtitles = settings.subtitlesBaseUrl.first()
       settings.setConfiguration(
         tmdbKey = "",
         addonUrls = emptyList(),
@@ -45,12 +59,12 @@ class TvNavigationInstrumentedTest {
   }
 
   @After
-  fun clearConfiguration() {
+  fun restoreConfiguration() {
     runBlocking {
       settings.setConfiguration(
-        tmdbKey = "",
-        addonUrls = emptyList(),
-        subtitlesBaseUrl = "",
+        tmdbKey = previousKey,
+        addonUrls = previousAddons,
+        subtitlesBaseUrl = previousSubtitles,
       )
     }
   }

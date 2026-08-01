@@ -56,8 +56,8 @@ proof.
 - Update AndroidX/Kotlin/Compose in coherent, reviewable groups.
 - Treat libmpv major updates as player migrations with native license review and
   the full hardware matrix.
-- Trial R8/resource shrinking with explicit JNI/serialization keep rules;
-  retain it only when APK/startup measurements justify the risk.
+- R8/resource shrinking now ships in `release` with explicit JNI/serialization
+  keep rules; retain it only while APK/startup measurements justify the risk.
 - Automate the currently blocked, reviewed CycloneDX/SPDX release inventory only
   after its generator/schema and embedded native inputs are pinned and
   dependency-verified.

@@ -1,6 +1,7 @@
 package com.stremioshell.host.tv
 
 import android.app.Application
+import androidx.compose.runtime.Immutable
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.stremioshell.host.tv.channel.WatchNextSync
@@ -40,6 +41,7 @@ import com.stremioshell.host.tv.data.tmdb.RailPaging
 import com.stremioshell.host.tv.data.tmdb.SearchPageState
 import com.stremioshell.host.tv.data.tmdb.SearchPaging
 import com.stremioshell.host.tv.data.tmdb.TmdbClient
+import com.stremioshell.host.tv.diagnostics.PerformanceTrace
 import com.stremioshell.host.tv.pairing.ConfigMerge
 import com.stremioshell.host.tv.pairing.ConfigPairingServer
 import com.stremioshell.host.tv.pairing.PairingApplyResult
@@ -72,7 +74,16 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 
+/**
+ * Immutable snapshot of one Home row. Paging replaces the list with a new snapshot; it never
+ * mutates an existing row in place, which lets Compose skip unaffected keyed rails during a page
+ * append or a different rail's partial response.
+ */
+@Immutable
 data class HomeRail(val title: String, val items: List<MediaItem>)
+data class DetailsRequestKey(val type: MediaType, val tmdbId: Int)
+data class SeasonRequestKey(val tmdbId: Int, val seasonNumber: Int)
+data class StreamsRequestKey(val imdbId: String, val season: Int?, val episode: Int?)
 enum class SettingsMutationResult { Changed, Unchanged, Failed }
 data class PlayerPrefsMutationResult(
   val outcome: SettingsMutationResult,
@@ -156,10 +167,16 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   private val addonClient = AddonClient()
   private val streamCatalog = StreamCatalog(addonClient)
 
-  /** Null only until the player's separate DataStore has answered for the first time. */
+  /**
+   * Null only until the player's separate DataStore has answered for the first time.
+   *
+   * Settings is the only screen that reads this, and Settings is several presses away from the
+   * first frame, so it is collected only while something is looking. The last value survives the
+   * gap, so a return to Settings paints from it rather than from null.
+   */
   val playerPrefs: StateFlow<PlayerPrefs?> = playerPrefsStore.prefs
     .map<PlayerPrefs, PlayerPrefs?> { it }
-    .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(IDLE_UNSUBSCRIBE_MS), null)
 
   val tmdbApiKey: StateFlow<String?> = settings.tmdbApiKey
     .stateIn(viewModelScope, SharingStarted.Eagerly, null)
@@ -167,10 +184,10 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   /** Every configured stream addon, in the viewer's order. Null until DataStore answers. */
   val addonManifestUrls: StateFlow<List<String>?> = settings.addonManifestUrls
     .stateIn(viewModelScope, SharingStarted.Eagerly, null)
-  val addonManifestUrl: StateFlow<String?> = settings.addonManifestUrl
-    .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+  /** Settings-only, like [playerPrefs], and shared on the same terms. */
   val subtitlesBaseUrl: StateFlow<String?> = settings.subtitlesBaseUrl
-    .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(IDLE_UNSUBSCRIBE_MS), null)
 
   /** Everything ever played, watched records included: what episode lists mark from. */
   val watchEntries: StateFlow<List<WatchEntry>> = watchState.entries
@@ -180,8 +197,11 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    * The rail, which is resume points only. A finished video keeps its record now
    * instead of being deleted, so the rail has to filter rather than just render
    * whatever is stored.
+   *
+   * Filtered off [watchEntries] rather than off the store, so the 30-second progress save decodes
+   * and sorts several hundred entries once instead of once per collector.
    */
-  val continueWatching: StateFlow<List<WatchEntry>> = watchState.entries
+  val continueWatching: StateFlow<List<WatchEntry>> = watchEntries
     .map { entries -> entries.filterNot { it.watched } }
     .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
@@ -197,8 +217,13 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     .map { entries -> entries.mapTo(mutableSetOf()) { it.key } }
     .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
+  /**
+   * Read only by the stream picker, which is at least a full network round trip away from being
+   * able to use it: the DataStore read this starts on arrival has finished long before the addons
+   * have answered, so nothing renders against an empty map.
+   */
   val rememberedPicks: StateFlow<Map<String, StreamSelection>> = streamPicks.selections
-    .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(IDLE_UNSUBSCRIBE_MS), emptyMap())
 
   private val _homeRails = MutableStateFlow<LoadState<List<HomeRail>>>(LoadState.Loading)
   val homeRails: StateFlow<LoadState<List<HomeRail>>> = _homeRails
@@ -243,6 +268,8 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
 
   private val _details = MutableStateFlow<LoadState<MediaDetails>>(LoadState.Loading)
   val details: StateFlow<LoadState<MediaDetails>> = _details
+  private val _detailsRequest = MutableStateFlow<DetailsRequestKey?>(null)
+  val detailsRequest: StateFlow<DetailsRequestKey?> = _detailsRequest
 
   /** See [loadHeroArt]. Null whenever the featured title has no logo, which Home renders as type. */
   private val _heroLogoUrl = MutableStateFlow<String?>(null)
@@ -252,9 +279,13 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
 
   private val _episodes = MutableStateFlow<LoadState<List<EpisodeItem>>>(LoadState.Ready(emptyList()))
   val episodes: StateFlow<LoadState<List<EpisodeItem>>> = _episodes
+  private val _seasonRequest = MutableStateFlow<SeasonRequestKey?>(null)
+  val seasonRequest: StateFlow<SeasonRequestKey?> = _seasonRequest
 
   private val _streams = MutableStateFlow<LoadState<List<AddonStream>>>(LoadState.Loading)
   val streams: StateFlow<LoadState<List<AddonStream>>> = _streams
+  private val _streamsRequest = MutableStateFlow<StreamsRequestKey?>(null)
+  val streamsRequest: StateFlow<StreamsRequestKey?> = _streamsRequest
 
   /**
    * Set when some but not all addons answered. Like [railsNotice], it belongs
@@ -302,6 +333,10 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
 
   /** Which TMDB key the two caches above hold data for; see [metadataClient]. */
   private var metadataCacheKey: String? = null
+
+  /** See [clientFor]. */
+  private var cachedClientKey: String? = null
+  private var cachedClient: TmdbClient? = null
 
   // Phone pairing.
   sealed interface PairingState {
@@ -511,6 +546,30 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     _pairing.value = PairingState.Idle
   }
 
+  /**
+   * Hands back everything held only to make a revisit cheap, when the system says memory is
+   * genuinely short (see TvAppActivity.onTrimMemory for which levels ask).
+   *
+   * Nothing here is state a screen cannot rebuild: both metadata caches are read-through, and a
+   * picker whose list this drops re-issues its own load (see StreamsScreen). What is on screen is
+   * untouched - [details] and [episodes] hold their own copies of what they are drawing, so a trim
+   * behind the player does not blank the screen the viewer comes back to.
+   */
+  fun onTrimMemory() {
+    releaseMetadataCaches()
+    clearStreams()
+  }
+
+  /**
+   * The cheap half of [onTrimMemory], for UI_HIDDEN: dropping these costs a silent refetch on a
+   * later navigation, never a visible spinner on the screen the viewer returns to - which is why
+   * the stream list is deliberately not included here.
+   */
+  fun releaseMetadataCaches() {
+    detailsCache.clear()
+    seasonCache.clear()
+  }
+
   override fun onCleared() {
     shutdownPairing()
     super.onCleared()
@@ -535,9 +594,17 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     /** One shared HTTP call is capped at 40s; every source is probed in parallel. */
     const val PAIRING_APPLY_TIMEOUT_MS = 50_000L
     const val PAIRING_CLOSED_MESSAGE = "Pairing was closed before the settings could be saved."
+
+    /**
+     * How long a screen-scoped flow keeps collecting after its last reader leaves. Long enough to
+     * ride out a configuration change or a there-and-back through Details, short enough that
+     * leaving a screen for good releases the DataStore collector.
+     */
+    const val IDLE_UNSUBSCRIBE_MS = 5_000L
   }
 
-  private fun tmdb(): TmdbClient? = tmdbApiKey.value?.takeIf { it.isNotBlank() }?.let { TmdbClient(it) }
+  private fun tmdb(): TmdbClient? =
+    tmdbApiKey.value?.takeIf { it.isNotBlank() }?.let { clientFor(it) }
 
   /**
    * [tmdb], for the two callers that cache what they load. Cached metadata belongs to the key that
@@ -551,8 +618,22 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       detailsCache.clear()
       seasonCache.clear()
     }
-    return TmdbClient(key)
+    return clientFor(key)
   }
+
+  /**
+   * The one client per stored key.
+   *
+   * A [TmdbClient] is a key, a locale and the shared fetcher, and one was being built for every
+   * press: nine on a cold Home, one per rail page, one per Details arrival. Reached only from the
+   * main-scoped callers above, so the field needs no synchronisation. Deliberately not used by
+   * [probeConfiguration], which builds clients for candidate keys that are not stored yet.
+   */
+  private fun clientFor(key: String): TmdbClient =
+    cachedClient?.takeIf { cachedClientKey == key } ?: TmdbClient(key).also {
+      cachedClientKey = key
+      cachedClient = it
+    }
 
   private suspend fun TmdbClient.load(query: CatalogQuery, page: Int): MediaPage = when (query) {
     is CatalogQuery.Trending -> trending(query.type, page)
@@ -606,7 +687,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       _railPaging.value = emptyMap()
     }
     railsJob = viewModelScope.launch {
-      val client = TmdbClient(key)
+      val client = clientFor(key)
       // Snapshots: everything below publishes into _homeRails as it goes, so the fallback copy has
       // to be the one from before this load started.
       val previous = (_homeRails.value as? LoadState.Ready)?.value.orEmpty()
@@ -614,18 +695,44 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       val loaded = LinkedHashMap<String, HomeRail>()
       val failed = mutableSetOf<String>()
       val failures = mutableListOf<Throwable>()
+      // Every rail's paging state waits here until the emission that makes its row visible. The
+      // asyncs below all run on this coroutine's (main) dispatcher and only suspend inside the
+      // request, so these three collections are single-threaded despite the fan-out.
+      val pendingPaging = LinkedHashMap<String, RailPageState>()
+
+      fun commitPaging() {
+        if (pendingPaging.isEmpty()) return
+        // One replacement map per emission rather than one per rail: the old code rebuilt the whole
+        // map nine times on a cold load, and every rebuild is a new value for the screen to read.
+        _railPaging.value = _railPaging.value + pendingPaging
+        pendingPaging.clear()
+      }
 
       fun publishPartial() {
         val assembled = HomeRailAssembly.visible(CatalogRails.ORDER, loaded.values.toList(), failed, previous)
         // Mid-load emptiness is just "nothing has answered yet"; only the completed load below
         // may call a load failed.
-        if (assembled.rails.isNotEmpty()) _homeRails.value = LoadState.Ready(assembled.rails)
+        if (assembled.rails.isEmpty()) return
+        // Rails within a wave land moments apart, and one that arrives before the rails above it
+        // changes nothing on screen: HomeRailAssembly holds it back so rows only ever append. So
+        // "did this landing make a row visible?" is a real question, and it is the one that decides
+        // whether the paging above is due. (LoadState.Ready is a data class, so the StateFlow
+        // conflates an unchanged list either way; this is about the paging map, which does not
+        // conflate because every rail genuinely changes it.) The comparison is a handful of
+        // reference checks - an unchanged rail is the identical HomeRail instance.
+        if ((_homeRails.value as? LoadState.Ready)?.value == assembled.rails) return
+        commitPaging()
+        PerformanceTrace.section("home.rails.publish") {
+          _homeRails.value = LoadState.Ready(assembled.rails)
+        }
       }
 
       for (wave in CatalogRails.WAVES) {
         wave.map { spec ->
           async {
-            val result = catchingFailure { client.load(spec.query, page = 1) }
+            val result = PerformanceTrace.suspendSection("home.rail.${spec.title}") {
+              catchingFailure { client.load(spec.query, page = 1) }
+            }
             if (!isActive || railsLoadedForKey != key) return@async
             val page = result.getOrNull()
             if (page == null) {
@@ -634,10 +741,8 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
             } else {
               val items = RailPaging.merge(page.items, previous.itemsFor(spec.title))
               loaded[spec.title] = HomeRail(spec.title, items)
-              setRailPaging(
-                spec.title,
-                RailPaging.afterFirstPage(page, items.size, carriedPaging[spec.title]),
-              )
+              pendingPaging[spec.title] =
+                RailPaging.afterFirstPage(page, items.size, carriedPaging[spec.title])
             }
             publishPartial()
           }
@@ -654,6 +759,9 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
         _homeRails.value = LoadState.Failed(message ?: "Couldn't load catalogs from TMDB.")
         return@launch
       }
+      // A rail that answered but is still held back by one above it never got its paging committed;
+      // the completed load is where that stops being true.
+      commitPaging()
       _homeRails.value = LoadState.Ready(assembled.rails)
       // Only mention a failure that actually left a gap; a rail still covered by the copy already
       // on screen needs no notice, just a retry on the next visit.
@@ -681,7 +789,9 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     val spec = CatalogRails.specFor(title) ?: return
     setRailPaging(title, state.copy(loading = true))
     railPageJobs[title] = viewModelScope.launch {
-      val result = catchingFailure { TmdbClient(key).load(spec.query, state.nextPage) }
+      val result = PerformanceTrace.suspendSection("home.page.$title") {
+        catchingFailure { clientFor(key).load(spec.query, state.nextPage) }
+      }
       if (!isActive || railsLoadedForKey != key) return@launch
       val page = result.getOrNull()
       if (page == null) {
@@ -873,13 +983,17 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     detailsJob?.cancel()
     seasonJob?.cancel()
     detailsKey = key
+    _detailsRequest.value = DetailsRequestKey(type, tmdbId)
     seasonKey = null
+    _seasonRequest.value = null
     val cached = detailsCache.get(key, System.currentTimeMillis())
     _details.value = if (cached == null) LoadState.Loading else LoadState.Ready(cached.value)
     _episodes.value = LoadState.Ready(emptyList())
     if (cached != null && !cached.stale) return
     detailsJob = viewModelScope.launch {
-      val result = catchingFailure { client.details(type, tmdbId) }
+      val result = PerformanceTrace.suspendSection("details.load") {
+        catchingFailure { client.details(type, tmdbId) }
+      }
       if (!isActive || detailsKey != key) return@launch
       val loaded = result.getOrNull()
       if (loaded != null) {
@@ -906,11 +1020,14 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     val key = tmdbId to seasonNumber
     seasonJob?.cancel()
     seasonKey = key
+    _seasonRequest.value = SeasonRequestKey(tmdbId, seasonNumber)
     val cached = seasonCache.get(key, System.currentTimeMillis())
     _episodes.value = if (cached == null) LoadState.Loading else LoadState.Ready(cached.value)
     if (cached != null && !cached.stale) return
     seasonJob = viewModelScope.launch {
-      val result = catchingFailure { client.season(tmdbId, seasonNumber) }
+      val result = PerformanceTrace.suspendSection("season.load") {
+        catchingFailure { client.season(tmdbId, seasonNumber) }
+      }
       if (!isActive || seasonKey != key) return@launch
       val loaded = result.getOrNull()
       if (loaded != null) {
@@ -935,6 +1052,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     // Switching episodes must not let the previous episode's list render under the new header.
     streamsJob?.cancel()
     streamsKey = key
+    _streamsRequest.value = StreamsRequestKey(imdbId, season, episode)
     _streams.value = LoadState.Loading
     _streamsNotice.value = null
     streamsJob = viewModelScope.launch {
@@ -960,6 +1078,27 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       _streamsNotice.value = fetch.merged.notice
       _streams.value = LoadState.Ready(fetch.streams)
     }
+  }
+
+  /**
+   * Drops the merged stream list, which is the largest thing this ViewModel holds: as many as
+   * StreamMerge.MAX_MERGED_STREAMS releases, each with its own title, URL and description. Shared
+   * rather than screen-scoped, so without this it stayed reachable for the rest of the session
+   * after the viewer left the picker.
+   *
+   * Cancels the fetch as well, so one still in flight cannot put the list back afterwards. Losing
+   * it costs nothing that has to be preserved - streams are never cached (see [loadStreams]) - but
+   * it does leave a picker that is still on the back stack with nothing to draw, which is why
+   * StreamsScreen re-issues its load when it comes back to a [streamsRequest] that is no longer
+   * the one it asked for.
+   */
+  fun clearStreams() {
+    streamsJob?.cancel()
+    streamsJob = null
+    streamsKey = null
+    _streamsRequest.value = null
+    _streamsNotice.value = null
+    _streams.value = LoadState.Loading
   }
 
   /**

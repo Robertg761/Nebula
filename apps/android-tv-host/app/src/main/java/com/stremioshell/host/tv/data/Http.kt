@@ -16,11 +16,14 @@ import okhttp3.CacheControl
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.Interceptor
+import okhttp3.MediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.Buffer
+import okio.BufferedSource
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -230,9 +233,31 @@ internal class StaleOnNetworkFailureInterceptor(
       body.close()
     }
     return response.newBuilder()
-      .body(bytes.toResponseBody(contentType))
+      .body(BufferedBytesResponseBody(bytes, contentType))
       .build()
   }
+}
+
+/**
+ * The buffered replacement body, keeping the bytes it already holds reachable as bytes.
+ *
+ * `ByteArray.toResponseBody()` would copy them into an Okio buffer that [readUtf8Limited] then
+ * copies out again to build the String - three live copies of a body that is allowed to reach 5MB,
+ * for a body that has already been read and length-checked once. [source] still works for any
+ * caller that wants one (OkHttp's own logging, the cache), so this is a shortcut, not a special
+ * case.
+ */
+internal class BufferedBytesResponseBody(
+  private val bytes: ByteArray,
+  private val mediaType: MediaType?,
+) : ResponseBody() {
+  override fun contentType(): MediaType? = mediaType
+
+  override fun contentLength(): Long = bytes.size.toLong()
+
+  override fun source(): BufferedSource = Buffer().write(bytes)
+
+  fun utf8(): String = String(bytes, Charsets.UTF_8)
 }
 
 /**
@@ -327,6 +352,12 @@ object OkHttpFetcher : HttpFetcher {
  */
 internal fun ResponseBody.readUtf8Limited(maxBytes: Long): String {
   require(maxBytes >= 0L && maxBytes < Long.MAX_VALUE)
+  // Already read by the interceptor that buffered it, and its length is exact rather than declared,
+  // so the ceiling still applies but nothing has to be streamed to enforce it.
+  if (this is BufferedBytesResponseBody) {
+    if (contentLength() > maxBytes) throw HttpResponseTooLargeException(maxBytes)
+    return utf8()
+  }
   val declaredBytes = contentLength()
   if (declaredBytes > maxBytes) throw HttpResponseTooLargeException(maxBytes)
   val source = source()

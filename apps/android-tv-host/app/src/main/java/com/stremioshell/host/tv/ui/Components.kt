@@ -36,6 +36,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
@@ -95,6 +96,7 @@ import com.stremioshell.host.tv.ui.theme.NebulaShapes
 import com.stremioshell.host.tv.ui.theme.NebulaSpace
 import com.stremioshell.host.tv.ui.theme.nebulaCardBorder
 import com.stremioshell.host.tv.ui.theme.nebulaCardGlow
+import com.stremioshell.host.tv.diagnostics.PerformanceTrace
 import kotlinx.coroutines.delay
 
 /** Tag for the focus-recovery logs the QA matrix expects in a diagnostics capture. */
@@ -196,6 +198,7 @@ fun RequestInitialFocus(
     if (!enabled) return@LaunchedEffect
     var frames = 0
     var lastFailure: Throwable? = null
+    var firstRequest = true
     while (frames < FOCUS_MAX_FRAMES) {
       // Resumes at the start of the next frame, by which point the pending composition has
       // been laid out and the target node exists.
@@ -208,7 +211,14 @@ fun RequestInitialFocus(
         return@LaunchedEffect
       }
       if (target.placed) {
-        runCatching { target.requester.requestFocus() }.onFailure { lastFailure = it }
+        runCatching {
+          if (firstRequest) {
+            firstRequest = false
+            PerformanceTrace.section("focus.$label") { target.requester.requestFocus() }
+          } else {
+            target.requester.requestFocus()
+          }
+        }.onFailure { lastFailure = it }
       }
     }
     Log.w(
@@ -479,6 +489,22 @@ private fun rememberRailBringIntoViewSpec(): BringIntoViewSpec {
 }
 
 /**
+ * A list handed to a row as one value Compose can compare.
+ *
+ * Strong skipping is off on this compiler, so a bare `List<T>` parameter is unstable and a row that
+ * takes one is never skippable: it recomposes every time the screen around it does, which on Home
+ * is once per rail for every watch-state update, paging append and artwork arrival. Wrapping the
+ * list is what lets the row skip.
+ *
+ * The promise is the caller's to keep - nothing may mutate [items] once it is wrapped. Every list
+ * this holds is a snapshot the ViewModel replaces wholesale rather than edits in place, which is
+ * also why callers remember the wrapper against that snapshot: one allocation per data change
+ * rather than one per frame.
+ */
+@Immutable
+data class StableList<T>(val items: List<T>)
+
+/**
  * The rail every browse surface is built from.
  *
  * No vertical `contentPadding`. Every rail used to carry 8dp of it under a comment saying a
@@ -488,8 +514,9 @@ private fun rememberRailBringIntoViewSpec(): BringIntoViewSpec {
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun MediaRow(title: String, items: List<MediaItem>, onItemClick: (MediaItem) -> Unit) {
-  if (items.isEmpty()) return
+fun MediaRow(title: String, items: StableList<MediaItem>, onItemClick: (MediaItem) -> Unit) {
+  val cards = items.items
+  if (cards.isEmpty()) return
   Column(modifier = Modifier.fillMaxWidth()) {
     RailHeading(title)
     CompositionLocalProvider(LocalBringIntoViewSpec provides rememberRailBringIntoViewSpec()) {
@@ -498,7 +525,9 @@ fun MediaRow(title: String, items: List<MediaItem>, onItemClick: (MediaItem) -> 
         contentPadding = PaddingValues(horizontal = NebulaDimens.ScreenEdge),
         horizontalArrangement = Arrangement.spacedBy(NebulaDimens.CardGap),
       ) {
-        items(items, key = { it.key }) { item ->
+        // contentType, as on every other lazy list in the app: without it Compose is free to reuse
+        // a card's subcomposition slot for something of another shape entirely.
+        items(cards, key = { it.key }, contentType = { "card" }) { item ->
           MediaCard(item = item, onClick = { onItemClick(item) })
         }
       }
@@ -704,10 +733,17 @@ fun DelayedBusy(content: @Composable () -> Unit) {
 /**
  * One button in a [CardOptionsDialog].
  *
+ * A data class for its equality: as a plain class every rebuild of the actions list was a new
+ * identity, so [CardOptionsDialog] recomposed its whole sheet whenever the screen behind it did.
+ *
  * @param destructive it removes something. Styled as [NebulaButtonStyle.Danger] rather than as the
  *   dialog's Primary - "Remove from My List" used to be a full violet button identical to Play.
  */
-class CardAction(val label: String, val destructive: Boolean = false, val onClick: () -> Unit)
+data class CardAction(
+  val label: String,
+  val destructive: Boolean = false,
+  val onClick: () -> Unit,
+)
 
 /**
  * The sheet both of the app's dialogs are built from.
