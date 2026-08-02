@@ -392,4 +392,25 @@ class TmdbClientTest {
     // 268x151dp thumbnail, and decoded two dozen 1280px JPEGs to draw it.
     assertEquals("https://image.tmdb.org/t/p/w300/s.jpg", episodes.first().stillUrl)
   }
+
+  @Test
+  fun `catalog and metadata loads propagate stale fallback provenance`() = runBlocking {
+    val fetcher = object : HttpFetcher {
+      override suspend fun get(url: String): String = error("unexpected direct request")
+
+      override suspend fun getAllowingStaleResult(url: String): HttpFetchResult {
+        val body = when {
+          "/season/" in url -> """{"episodes":[]}"""
+          "/movie/9" in url -> """{"id":9,"title":"X"}"""
+          else -> """{"page":1,"total_pages":1,"results":[]}"""
+        }
+        return HttpFetchResult(body, staleFallback = true)
+      }
+    }
+    val client = TmdbClient(apiKey = "test-key", fetcher = fetcher, locale = Locale.US)
+
+    assertTrue(client.trendingLoad(MediaType.Movie).staleFallback)
+    assertTrue(client.detailsLoad(MediaType.Movie, 9).staleFallback)
+    assertTrue(client.seasonLoad(9, 1).staleFallback)
+  }
 }

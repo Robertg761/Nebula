@@ -56,6 +56,68 @@ class MetadataCacheTest {
   }
 
   @Test
+  fun `a stale fallback stays readable but never becomes fresh`() {
+    val cache = cache()
+    cache.putStale("tt1", "offline copy")
+
+    val hit = cache.get("tt1", nowMillis = 1_000)
+
+    assertEquals("offline copy", hit?.value)
+    assertTrue(hit!!.stale)
+
+    cache.put("tt1", "live copy", loadedAtMillis = 2_000)
+    assertFalse(cache.get("tt1", nowMillis = 2_000)!!.stale)
+  }
+
+  @Test
+  fun `hero reuse requires the same credential owner`() {
+    assertFalse(
+      MetadataCacheOwnership.canReuseHero(
+        sameHero = true,
+        credentialChanged = true,
+        cachedFresh = true,
+        requestActive = true,
+      ),
+    )
+    assertFalse(MetadataCacheOwnership.changed("key-a", "key-a"))
+    assertTrue(MetadataCacheOwnership.changed("key-a", "key-b"))
+    assertTrue(MetadataCacheOwnership.changed("key-a", null))
+    assertTrue(
+      MetadataCacheOwnership.canReuseHero(
+        sameHero = true,
+        credentialChanged = false,
+        cachedFresh = true,
+        requestActive = false,
+      ),
+    )
+  }
+
+  @Test
+  fun `late metadata callbacks require both cache and live credential ownership`() {
+    assertTrue(
+      MetadataCacheOwnership.isCurrent(
+        owner = "key-a",
+        cacheOwner = "key-a",
+        liveCredential = "key-a",
+      ),
+    )
+    assertFalse(
+      MetadataCacheOwnership.isCurrent(
+        owner = "key-a",
+        cacheOwner = "key-b",
+        liveCredential = "key-b",
+      ),
+    )
+    assertFalse(
+      MetadataCacheOwnership.isCurrent(
+        owner = "key-a",
+        cacheOwner = "key-a",
+        liveCredential = null,
+      ),
+    )
+  }
+
+  @Test
   fun `a clock that jumped backwards counts as stale`() {
     val cache = cache()
     cache.put("tt1", "Heat", loadedAtMillis = 5_000_000)

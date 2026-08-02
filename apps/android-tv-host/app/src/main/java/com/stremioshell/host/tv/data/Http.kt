@@ -33,6 +33,12 @@ import kotlinx.coroutines.withContext
 internal const val HTTP_TAG = "TvHttp"
 internal const val MAX_JSON_RESPONSE_BYTES: Long = 5L * 1024 * 1024
 
+/** Body plus the only cache provenance callers need to make freshness decisions. */
+data class HttpFetchResult(
+  val body: String,
+  val staleFallback: Boolean = false,
+)
+
 /** Seam for HTTP GETs so clients stay unit-testable without a server. */
 fun interface HttpFetcher {
   /** Returns the response body for a 2xx response; throws [HttpStatusException] otherwise. */
@@ -52,6 +58,16 @@ fun interface HttpFetcher {
    * old - catalogs and metadata, never addon stream URLs (those expire).
    */
   suspend fun getAllowingStale(url: String): String = get(url)
+
+  /**
+   * Provenance-aware counterpart for callers that own a longer-lived memory cache.
+   *
+   * Defaulting through [getAllowingStale] preserves the fun-interface contract and every existing
+   * test/application fetcher. Only the real OkHttp implementation can observe its local response
+   * marker, so custom fetchers remain fresh unless they deliberately opt into stale provenance.
+   */
+  suspend fun getAllowingStaleResult(url: String): HttpFetchResult =
+    HttpFetchResult(getAllowingStale(url))
 
   /**
    * Answers from the disk cache or not at all, returning null when nothing is stored.
@@ -89,8 +105,8 @@ object HttpCachePolicy {
 
   /**
    * Local-only response header describing why a stale body was returned. It is added after the
-   * cache lookup, never sent to a service, and gives diagnostics/tests provenance without changing
-   * [HttpFetcher]'s deliberately tiny public API.
+   * cache lookup and never sent to a service. Its reason stays inside this file; longer-lived cache
+   * owners receive only [HttpFetchResult.staleFallback].
    */
   const val STALE_PROVENANCE_HEADER = "X-Nebula-Stale-Provenance"
 
@@ -353,7 +369,11 @@ object OkHttpFetcher : HttpFetcher {
 
   override suspend fun getFresh(url: String): String = execute(url, Reach.Revalidated)
 
-  override suspend fun getAllowingStale(url: String): String = execute(url, Reach.Cacheable)
+  override suspend fun getAllowingStale(url: String): String =
+    getAllowingStaleResult(url).body
+
+  override suspend fun getAllowingStaleResult(url: String): HttpFetchResult =
+    executeResult(url, Reach.Cacheable)
 
   /**
    * An empty cache is the expected answer here, not an error: it is what a first run looks like,
@@ -367,7 +387,9 @@ object OkHttpFetcher : HttpFetcher {
       null
     }
 
-  private suspend fun execute(url: String, reach: Reach): String {
+  private suspend fun execute(url: String, reach: Reach): String = executeResult(url, reach).body
+
+  private suspend fun executeResult(url: String, reach: Reach): HttpFetchResult {
     val builder = Request.Builder().url(url).header("Accept", "application/json")
     // The marker opts a response into being stored and into the stale fallback. A cache-only read
     // must not carry it: the miss it expects is a synthetic 504, which is a retryable status, so
@@ -392,10 +414,19 @@ object OkHttpFetcher : HttpFetcher {
           retryAfterSeconds = HttpCachePolicy.retryAfterSeconds(response.header("Retry-After")),
         )
       }
-      response.body?.readUtf8Limited(MAX_JSON_RESPONSE_BYTES).orEmpty()
+      httpFetchResult(
+        response,
+        response.body?.readUtf8Limited(MAX_JSON_RESPONSE_BYTES).orEmpty(),
+      )
     }
   }
 }
+
+/** Keeps the private response-header protocol at the HTTP boundary. */
+internal fun httpFetchResult(response: Response, body: String): HttpFetchResult = HttpFetchResult(
+  body = body,
+  staleFallback = response.header(HttpCachePolicy.STALE_PROVENANCE_HEADER) != null,
+)
 
 /**
  * Reads a response without trusting Content-Length. Chunked/misreported bodies are capped by

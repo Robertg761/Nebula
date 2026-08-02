@@ -40,7 +40,11 @@ class ConfigPairingServer(
         Response.Status.NOT_FOUND,
         "text/plain; charset=utf-8",
         "Not found.",
-      ).also { it.addHeader("Cache-Control", "no-store") }
+      ).also {
+        it.addHeader("Cache-Control", "no-store")
+        // A tokened POST to the wrong path is also rejected before its body is consumed.
+        if (session.method == Method.POST) it.closeConnection(true)
+      }
     }
   }
 
@@ -50,13 +54,19 @@ class ConfigPairingServer(
         Response.Status.LENGTH_REQUIRED,
         "text/plain; charset=utf-8",
         "The request length is missing.",
-      ).also { it.addHeader("Cache-Control", "no-store") }
+      ).also {
+        it.addHeader("Cache-Control", "no-store")
+        it.closeConnection(true)
+      }
     if (contentLength !in 0..MAX_FORM_BYTES) {
       return newFixedLengthResponse(
         Response.Status.PAYLOAD_TOO_LARGE,
         "text/plain; charset=utf-8",
         "That form is too large.",
-      ).also { it.addHeader("Cache-Control", "no-store") }
+      ).also {
+        it.addHeader("Cache-Control", "no-store")
+        it.closeConnection(true)
+      }
     }
     // Claim the one-shot token before parsing. A second authenticated request can therefore never
     // be parsed or applied concurrently. Validation/storage failures release it so the same phone
@@ -117,7 +127,7 @@ class ConfigPairingServer(
       // An unauthorized or already-consumed POST is deliberately rejected before parseBody reads
       // its credential-bearing payload. Close that connection so unread form bytes cannot be
       // interpreted as another request on NanoHTTPD's keep-alive socket.
-      it.addHeader("Connection", "close")
+      it.closeConnection(true)
     }
 
   private fun badRequest(message: String): Response =
@@ -125,7 +135,10 @@ class ConfigPairingServer(
       Response.Status.BAD_REQUEST,
       "text/plain; charset=utf-8",
       message,
-    ).also { it.addHeader("Cache-Control", "no-store") }
+    ).also {
+      it.addHeader("Cache-Control", "no-store")
+      it.closeConnection(true)
+    }
 
   private fun formPage(error: String? = null): String {
     val errorHtml = if (error != null) {

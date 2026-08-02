@@ -413,6 +413,7 @@
 
   <!-- Details. -->
   <string name="details_loading">Loading details\u2026</string>
+  <string name="details_tmdb_key_required">Add a TMDB API key in Settings to load this title.</string>
   <string name="details_action_resume_episode">Resume S%1$dE%2$d</string>
   <string name="details_action_play_episode">Play S%1$dE%2$d</string>
   <string name="details_spoken_season_episode">season %1$d, episode %2$d</string>

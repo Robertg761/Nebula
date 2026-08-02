@@ -26,7 +26,7 @@ val githubReleaseOwner = (project.findProperty("githubReleaseOwner") as String?)
 val githubReleaseRepo = (project.findProperty("githubReleaseRepo") as String?)
   ?.trim()
   .orEmpty()
-  .ifBlank { "stremio-shell-tv" }
+  .ifBlank { "Nebula" }
 
 android {
   namespace = "com.stremioshell.host"

@@ -404,6 +404,7 @@ fun TvApp(
             is Screen.Details -> DetailsScreen(
               viewModel = viewModel,
               screen = screen,
+              onOpenSettings = { push(Screen.Settings) },
               onItemClick = openDetails,
               onPlay = { media, season, episode, startOver ->
                 // No IMDb id means no addon lookup is possible; the screen says so in place

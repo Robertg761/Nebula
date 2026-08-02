@@ -51,6 +51,45 @@ enum class SeekSettleResult {
 }
 
 /**
+ * Identity gate between a queued native seek and its fallback settle timeout.
+ *
+ * [expect] records the command before it enters the mpv worker, but no timeout is active until
+ * [completeMutation] reports success after the native mutation returns. A newer expectation or
+ * [cancel] invalidates both a late worker completion and a stale timeout callback from the older
+ * request. A failed mutation is retired without ever becoming timeout-eligible.
+ */
+internal class SeekSettleTimeoutGate {
+  private var expected: SeekRequest? = null
+  private var armed: SeekRequest? = null
+
+  fun expect(request: SeekRequest) {
+    expected = request
+    armed = null
+  }
+
+  /** Returns true only when this successful mutation should arm its timeout. */
+  fun completeMutation(request: SeekRequest, succeeded: Boolean): Boolean {
+    if (expected != request) return false
+    expected = null
+    if (!succeeded) return false
+    armed = request
+    return true
+  }
+
+  fun consume(request: SeekRequest): Boolean {
+    if (armed != request) return false
+    expected = null
+    armed = null
+    return true
+  }
+
+  fun cancel() {
+    expected = null
+    armed = null
+  }
+}
+
+/**
  * Collapses a burst of D-pad presses into one seek target.
  *
  * Issuing a seek per key event makes mpv flush the demuxer and re-request the

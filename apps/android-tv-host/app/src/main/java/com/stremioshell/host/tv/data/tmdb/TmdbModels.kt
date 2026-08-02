@@ -5,6 +5,12 @@ import kotlinx.serialization.Serializable
 
 enum class MediaType { Movie, Show }
 
+/** A decoded TMDB value and whether disk cache stood in for a failed live/cache-fresh request. */
+data class TmdbLoad<out T>(
+  val value: T,
+  val staleFallback: Boolean = false,
+)
+
 /** A row entry on browse/search surfaces. */
 data class MediaItem(
   val tmdbId: Int,

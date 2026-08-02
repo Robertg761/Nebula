@@ -201,6 +201,7 @@ private fun episodeWatchKey(tmdbId: Int, season: Int, episode: Int): String =
 fun DetailsScreen(
   viewModel: TvAppViewModel,
   screen: Screen.Details,
+  onOpenSettings: () -> Unit,
   onItemClick: (MediaType, Int) -> Unit,
   onPlay: (details: MediaDetails, season: Int?, episode: Int?, startOver: Boolean) -> Unit,
 ) {
@@ -210,6 +211,7 @@ fun DetailsScreen(
   val detailsRequest by viewModel.detailsRequest.collectAsStateWithLifecycle()
   val episodesState by viewModel.episodes.collectAsStateWithLifecycle()
   val seasonRequest by viewModel.seasonRequest.collectAsStateWithLifecycle()
+  val apiKey by viewModel.tmdbApiKey.collectAsStateWithLifecycle()
   // Every record, watched ones included: this screen marks finished episodes as well as
   // part-watched ones, so it cannot use the Continue Watching projection.
   val watching by viewModel.watchEntries.collectAsStateWithLifecycle()
@@ -230,13 +232,21 @@ fun DetailsScreen(
     today = LocalDate.now()
   }
 
-  LaunchedEffect(type, tmdbId) { viewModel.loadDetails(type, tmdbId) }
+  // Null is the eager StateFlow's cold-start sentinel, while blank is a real stored value. Waiting
+  // for the distinction prevents a Watch Next deep link from spending its only effect invocation
+  // before DataStore has supplied the viewer's saved key.
+  LaunchedEffect(type, tmdbId, apiKey) {
+    if (!apiKey.isNullOrBlank()) viewModel.loadDetails(type, tmdbId)
+  }
 
   // The details flow can still hold the PREVIOUS title on this screen's first frame: loadDetails
   // only runs from the effect above, one composition later. Rendering that Ready value would flash
   // the wrong title and, worse, seed the season selection from the wrong season list - so anything
   // that is not this screen's title counts as still loading.
-  val details: LoadState<MediaDetails> = if (
+  val missingKey = apiKey?.isBlank() == true
+  val details: LoadState<MediaDetails> = if (missingKey) {
+    LoadState.Failed(stringResource(R.string.details_tmdb_key_required))
+  } else if (
     detailsRequest == DetailsRequestKey(type, tmdbId)
   ) {
     when (val state = detailsState) {
@@ -255,7 +265,9 @@ fun DetailsScreen(
   LoadStateContent(
     details,
     loadingText = stringResource(R.string.details_loading),
-    onRetry = { viewModel.loadDetails(type, tmdbId) },
+    onRetry = { viewModel.loadDetails(type, tmdbId) }.takeUnless { missingKey },
+    failureActionLabel = stringResource(R.string.action_open_settings).takeIf { missingKey },
+    onFailureAction = onOpenSettings.takeIf { missingKey },
     // The shape of the page that is arriving, not a spinner in the middle of a black screen: the
     // viewer just pressed OK on a card carrying a title and a poster, and the app used to throw
     // all of it away and then snap from centre-of-screen to a left-aligned header.

@@ -88,6 +88,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stremioshell.host.BuildConfig
 import com.stremioshell.host.R
 import com.stremioshell.host.tv.SettingsMutationResult
+import com.stremioshell.host.tv.SettingsSaveUpdate
 import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.data.PlaybackPreferencePolicy
 import com.stremioshell.host.tv.data.PlayerPrefs
@@ -120,6 +121,13 @@ import kotlinx.coroutines.launch
  */
 private const val SaveWatchdogMs = 60_000L
 private const val CredentialRevealMs = 30_000L
+
+/** Null while the durable write is complete but connection checks are still running. */
+internal fun SettingsSaveUpdate.completionSuccess(): Boolean? = when (this) {
+  is SettingsSaveUpdate.Persisted -> null
+  is SettingsSaveUpdate.Complete -> true
+  is SettingsSaveUpdate.Failed -> false
+}
 
 /**
  * Everything the app has to be told, in the order it has to be told it.
@@ -468,19 +476,20 @@ fun SettingsScreen(
   }
 
   val saveConfigurationForAttempt: (Int) -> Unit = { attempt ->
-    viewModel.saveSettings(tmdbKey, subtitlesUrl) { status ->
+    viewModel.saveSettings(tmdbKey, subtitlesUrl) { update ->
       // A timed-out or superseded probe can still finish. It must neither repaint the verdict
       // for a newer draft nor complete a newer leave request.
       if (attempt == saveAttempt) {
-        saveStatus = status
-        if (status.contains("Checking connections")) {
+        saveStatus = update.message
+        val completionSuccess = update.completionSuccess()
+        if (completionSuccess == null) {
           persistedAttempt = attempt
           saving = true
         } else {
           saving = false
           if (completedAttempt != attempt) {
             completedAttempt = attempt
-            currentOnSaveComplete(true)
+            currentOnSaveComplete(completionSuccess)
           }
         }
       }

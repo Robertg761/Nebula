@@ -1,8 +1,12 @@
 package com.stremioshell.host.tv.pairing
 
 import com.stremioshell.host.tv.data.addon.AddonList
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.net.HttpURLConnection
+import java.net.Socket
 import java.net.URL
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -38,7 +42,7 @@ class ConfigPairingServerTest {
     server.stop()
   }
 
-  private data class Reply(val code: Int, val body: String)
+  private data class Reply(val code: Int, val body: String, val connection: String? = null)
 
   private fun request(path: String, form: String? = null): Reply {
     val connection = URL("http://127.0.0.1:${server.listeningPort}$path")
@@ -54,13 +58,74 @@ class ConfigPairingServerTest {
     return try {
       val code = connection.responseCode
       val stream = if (code < 400) connection.inputStream else connection.errorStream
-      Reply(code, stream?.bufferedReader()?.use { it.readText() }.orEmpty())
+      Reply(
+        code,
+        stream?.bufferedReader()?.use { it.readText() }.orEmpty(),
+        connection.getHeaderField("Connection"),
+      )
     } finally {
       connection.disconnect()
     }
   }
 
   private fun nextSubmission(): PairingSubmission? = submissions.poll(1, TimeUnit.SECONDS)
+
+  /** Sends headers HttpURLConnection deliberately repairs, such as a missing/invalid length. */
+  private fun rawPost(
+    contentLength: String?,
+    contentType: String = "application/x-www-form-urlencoded",
+    body: String = "",
+    path: String = "/config?t=$token",
+  ): Reply = Socket("127.0.0.1", server.listeningPort).use { socket ->
+    socket.soTimeout = 5_000
+    val request = buildString {
+      append("POST $path HTTP/1.1\r\n")
+      append("Host: 127.0.0.1\r\n")
+      append("Content-Type: $contentType\r\n")
+      append("Connection: keep-alive\r\n")
+      if (contentLength != null) append("Content-Length: $contentLength\r\n")
+      append("\r\n")
+      append(body)
+    }
+    socket.getOutputStream().apply {
+      write(request.toByteArray(StandardCharsets.ISO_8859_1))
+      flush()
+    }
+
+    val input = socket.getInputStream()
+    val status = readAsciiLine(input)
+    val headers = mutableMapOf<String, String>()
+    while (true) {
+      val line = readAsciiLine(input)
+      if (line.isEmpty()) break
+      val separator = line.indexOf(':')
+      if (separator > 0) {
+        headers[line.substring(0, separator).lowercase()] = line.substring(separator + 1).trim()
+      }
+    }
+    val bytes = ByteArray(headers["content-length"]?.toIntOrNull() ?: 0)
+    var read = 0
+    while (read < bytes.size) {
+      val count = input.read(bytes, read, bytes.size - read)
+      if (count < 0) break
+      read += count
+    }
+    Reply(
+      code = status.split(' ').getOrNull(1)?.toIntOrNull() ?: -1,
+      body = String(bytes, 0, read, StandardCharsets.UTF_8),
+      connection = headers["connection"],
+    )
+  }
+
+  private fun readAsciiLine(input: InputStream): String {
+    val bytes = ByteArrayOutputStream()
+    while (true) {
+      val value = input.read()
+      if (value < 0 || value == '\n'.code) break
+      if (value != '\r'.code) bytes.write(value)
+    }
+    return bytes.toString(StandardCharsets.ISO_8859_1.name())
+  }
 
   private fun receiptFor(submission: PairingSubmission) = PairingReceipt(
     tmdbKeyChanged = submission.tmdbKey != null,
@@ -212,6 +277,47 @@ class ConfigPairingServerTest {
     val reply = request("/config?t=$token", form = "tmdb=${"x".repeat(33 * 1024)}")
 
     assertEquals(413, reply.code)
+    assertEquals("close", reply.connection?.lowercase())
+    assertNull(nextSubmission())
+  }
+
+  @Test
+  fun `POST length rejections close the keep-alive connection`() {
+    val replies = listOf(
+      rawPost(contentLength = null),
+      rawPost(contentLength = "not-a-number"),
+      rawPost(contentLength = (33 * 1024).toString()),
+    )
+
+    assertEquals(listOf(411, 411, 413), replies.map { it.code })
+    replies.forEach { assertEquals("close", it.connection?.lowercase()) }
+    assertNull(nextSubmission())
+  }
+
+  @Test
+  fun `a body parse rejection closes the keep-alive connection`() {
+    // Multipart without a boundary makes NanoHTTPD's parseBody reject the request.
+    val reply = rawPost(
+      contentLength = "3",
+      contentType = "multipart/form-data",
+      body = "abc",
+    )
+
+    assertEquals(400, reply.code)
+    assertEquals("close", reply.connection?.lowercase())
+    assertNull(nextSubmission())
+  }
+
+  @Test
+  fun `a tokened POST to the wrong path closes without consuming its body`() {
+    val reply = rawPost(
+      contentLength = "3",
+      body = "abc",
+      path = "/not-config?t=$token",
+    )
+
+    assertEquals(404, reply.code)
+    assertEquals("close", reply.connection?.lowercase())
     assertNull(nextSubmission())
   }
 

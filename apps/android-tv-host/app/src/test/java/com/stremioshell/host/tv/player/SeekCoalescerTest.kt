@@ -307,6 +307,87 @@ class SeekCoalescerTest {
   }
 
   @Test
+  fun `seek timeout cannot fire before the native mutation executes`() {
+    val seeker = coalescer()
+    val gate = SeekSettleTimeoutGate()
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 0L)
+    val request = seeker.consumePendingRequest()!!
+
+    gate.expect(request)
+
+    assertFalse(gate.consume(request))
+    assertTrue(gate.completeMutation(request, succeeded = true))
+    assertTrue(gate.consume(request))
+  }
+
+  @Test
+  fun `stale seek timeout cannot consume a newer request`() {
+    val seeker = coalescer()
+    val gate = SeekSettleTimeoutGate()
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 0L)
+    val first = seeker.consumePendingRequest()!!
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 500L)
+    val second = seeker.consumePendingRequest()!!
+
+    gate.expect(first)
+    assertTrue(gate.completeMutation(first, succeeded = true))
+    gate.expect(second)
+    assertTrue(gate.completeMutation(second, succeeded = true))
+
+    assertFalse(gate.consume(first))
+    assertTrue(gate.consume(second))
+  }
+
+  @Test
+  fun `new press invalidates a late native completion`() {
+    val seeker = coalescer()
+    val gate = SeekSettleTimeoutGate()
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 0L)
+    val request = seeker.consumePendingRequest()!!
+
+    gate.expect(request)
+    gate.cancel()
+
+    assertFalse(gate.completeMutation(request, succeeded = true))
+    assertFalse(gate.consume(request))
+  }
+
+  @Test
+  fun `failed native mutation retires only its seek and never arms a timeout`() {
+    val seeker = coalescer()
+    val gate = SeekSettleTimeoutGate()
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 0L)
+    val failed = seeker.consumePendingRequest()!!
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 500L)
+    val newer = seeker.consumePendingRequest()!!
+
+    gate.expect(failed)
+    gate.expect(newer)
+
+    assertFalse(gate.completeMutation(failed, succeeded = false))
+    assertEquals(SeekSettleResult.Superseded, seeker.settle(failed))
+    assertEquals(120.0, seeker.previewSec!!, 0.001)
+    assertTrue(gate.completeMutation(newer, succeeded = true))
+    assertFalse(gate.consume(failed))
+    assertTrue(gate.consume(newer))
+  }
+
+  @Test
+  fun `failed current mutation can be retired without a timeout`() {
+    val seeker = coalescer()
+    val gate = SeekSettleTimeoutGate()
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 0L)
+    val failed = seeker.consumePendingRequest()!!
+
+    gate.expect(failed)
+
+    assertFalse(gate.completeMutation(failed, succeeded = false))
+    assertFalse(gate.consume(failed))
+    assertEquals(SeekSettleResult.Complete, seeker.settle(failed))
+    assertNull(seeker.previewSec)
+  }
+
+  @Test
   fun `the final coalesced request is exact unless a scrub preview opts into keyframes`() {
     val seeker = coalescer()
     seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 0L)

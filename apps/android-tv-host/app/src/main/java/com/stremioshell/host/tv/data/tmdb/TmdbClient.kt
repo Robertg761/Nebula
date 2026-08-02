@@ -36,10 +36,16 @@ class TmdbClient(
   }
 
   suspend fun trending(type: MediaType, page: Int = 1): MediaPage =
-    pagedItems(trendingEndpoint(type), type, page)
+    trendingLoad(type, page).value
+
+  suspend fun trendingLoad(type: MediaType, page: Int = 1): TmdbLoad<MediaPage> =
+    pagedItemsLoad(trendingEndpoint(type), type, page)
 
   suspend fun popular(type: MediaType, page: Int = 1): MediaPage =
-    pagedItems(popularEndpoint(type), type, page)
+    popularLoad(type, page).value
+
+  suspend fun popularLoad(type: MediaType, page: Int = 1): TmdbLoad<MediaPage> =
+    pagedItemsLoad(popularEndpoint(type), type, page)
 
   /**
    * A genre rail.
@@ -49,7 +55,13 @@ class TmdbClient(
    * of votes and no artwork.
    */
   suspend fun discover(type: MediaType, genreId: Int, page: Int = 1): MediaPage =
-    pagedItems(discoverEndpoint(type, genreId), type, page)
+    discoverLoad(type, genreId, page).value
+
+  suspend fun discoverLoad(
+    type: MediaType,
+    genreId: Int,
+    page: Int = 1,
+  ): TmdbLoad<MediaPage> = pagedItemsLoad(discoverEndpoint(type, genreId), type, page)
 
   /**
    * The cache-only counterparts of the three catalog reads above: the rail's first page as the
@@ -108,15 +120,18 @@ class TmdbClient(
    * round trips would put the cast row seconds behind the title on a TV's Wi-Fi, and each one would
    * be its own chance to fail.
    */
-  suspend fun details(type: MediaType, tmdbId: Int): MediaDetails {
+  suspend fun details(type: MediaType, tmdbId: Int): MediaDetails =
+    detailsLoad(type, tmdbId).value
+
+  suspend fun detailsLoad(type: MediaType, tmdbId: Int): TmdbLoad<MediaDetails> {
     val isMovie = type == MediaType.Movie
     val path = if (isMovie) "movie/$tmdbId" else "tv/$tmdbId"
     val appends = if (isMovie) MOVIE_APPENDS else SHOW_APPENDS
     // `include_image_language` is what makes the appended images block useful: without it TMDB
     // filters artwork to `language`, i.e. en-US only, and drops the textless files it stores under
     // no language at all - which for logos is a large share of them.
-    val body = PerformanceTrace.suspendSection("tmdb.details.fetch") {
-      fetcher.getAllowingStale(
+    val fetched = PerformanceTrace.suspendSection("tmdb.details.fetch") {
+      fetcher.getAllowingStaleResult(
         url(
           path,
           "append_to_response=$appends&include_image_language=" +
@@ -125,7 +140,7 @@ class TmdbClient(
       )
     }
     val details = PerformanceTrace.suspendSection("tmdb.details.decode") {
-      decode<TmdbDetailsResponse>(body)
+      decode<TmdbDetailsResponse>(fetched.body)
     }
     // Certifications live under a different key per media type, and in a different shape: shows
     // carry one rating per country, movies carry a list of releases per country.
@@ -136,7 +151,7 @@ class TmdbClient(
     } else {
       details.contentRatings?.results.orEmpty().map { it.country to it.rating }
     }
-    return MediaDetails(
+    val value = MediaDetails(
       item = MediaItem(
         tmdbId = details.id,
         type = type,
@@ -191,11 +206,15 @@ class TmdbClient(
         preferredLanguage = TmdbLocale.language(locale),
       )?.let { IMAGE_BASE_LOGO + it },
     )
+    return TmdbLoad(value, fetched.staleFallback)
   }
 
-  suspend fun season(tmdbId: Int, seasonNumber: Int): List<EpisodeItem> {
-    val body = fetcher.getAllowingStale(url("tv/$tmdbId/season/$seasonNumber"))
-    return decode<TmdbSeasonResponse>(body).episodes.map { episode ->
+  suspend fun season(tmdbId: Int, seasonNumber: Int): List<EpisodeItem> =
+    seasonLoad(tmdbId, seasonNumber).value
+
+  suspend fun seasonLoad(tmdbId: Int, seasonNumber: Int): TmdbLoad<List<EpisodeItem>> {
+    val fetched = fetcher.getAllowingStaleResult(url("tv/$tmdbId/season/$seasonNumber"))
+    val value = decode<TmdbSeasonResponse>(fetched.body).episodes.map { episode ->
       EpisodeItem(
         seasonNumber = episode.seasonNumber,
         episodeNumber = episode.episodeNumber,
@@ -205,6 +224,7 @@ class TmdbClient(
         airDate = episode.airDate,
       )
     }
+    return TmdbLoad(value, fetched.staleFallback)
   }
 
   private fun trendingEndpoint(type: MediaType) =
@@ -226,11 +246,14 @@ class TmdbClient(
     )
   }
 
-  private suspend fun pagedItems(
+  private suspend fun pagedItemsLoad(
     endpoint: CatalogEndpoint,
     type: MediaType,
     page: Int,
-  ): MediaPage = decodePage(fetcher.getAllowingStale(catalogUrl(endpoint, page)), type)
+  ): TmdbLoad<MediaPage> {
+    val fetched = fetcher.getAllowingStaleResult(catalogUrl(endpoint, page))
+    return TmdbLoad(decodePage(fetched.body, type), fetched.staleFallback)
+  }
 
   private suspend fun cachedFirstPage(endpoint: CatalogEndpoint, type: MediaType): MediaPage? {
     val body = fetcher.getCachedOnly(catalogUrl(endpoint, page = 1)) ?: return null

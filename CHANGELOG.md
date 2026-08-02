@@ -64,6 +64,19 @@ scrolling row and nothing animates layout, which is what this hardware cannot af
   picture whenever the panel was up.
 
 **Fixes.**
+- Watch Next/deep-link Details waits for the stored TMDB key to initialize instead of hanging on
+  its cold-start sentinel; a genuinely missing key now offers a focused route to Settings.
+- Search results and paging are owned by both query and credential generation, so changing or
+  clearing the TMDB key cannot leave or land results fetched with the previous key.
+- Returning from Settings retries a stream request that previously failed for having no addon, and
+  a settings persistence failure no longer masquerades as a successful Save & leave.
+- Start Over durably clears the old resume point even if playback fails or is exited immediately.
+  Display-frame-rate discovery survives pause/surface recreation, and a seek's fallback timer now
+  starts only after mpv receives that exact seek, so an old timeout cannot clear a newer target.
+- Stale disk-cache fallbacks remain visible but immediately refreshable instead of being re-dated
+  as live responses for four hours; hero metadata is also re-owned correctly after a key change.
+- Watch Next updates explicitly clear nullable provider columns, pairing closes rejected POST bodies
+  before keep-alive reuse, and the updater now follows releases from `Robertg761/Nebula`.
 - Settings opened with its own heading scrolled off the top: the opening focus request dragged the
   page down against a layout that was still settling, and a single scroll reset was overwritten by
   the animation that caused it. The page is held at its top until you actually move.

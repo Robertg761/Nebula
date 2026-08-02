@@ -17,7 +17,6 @@ import com.stremioshell.host.tv.data.SettingsStore
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
-import org.junit.Assert.assertNotNull
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -112,13 +111,11 @@ class TvNavigationInstrumentedTest {
     )
 
     launch(intent).use {
-      // With no test credential, Details intentionally remains in its safe
-      // loading state. Its accessibility description proves the URI reached
-      // Details rather than falling through to Home.
-      assertNotNull(
-        "Watch Next URI did not route to Details",
-        device.wait(Until.findObject(By.desc("Loading details\u2026")), TIMEOUT_MS),
-      )
+      // The blank test configuration is a real, initialized value, not an endless load. The
+      // recovery action proves both that the URI reached Details and that the cold DataStore
+      // sentinel was allowed to resolve before the screen decided what to render.
+      waitForText("Add a TMDB API key in Settings to load this title.")
+      waitForFocusedText("Open Settings")
       device.pressBack()
       waitForText("NEBULA")
     }

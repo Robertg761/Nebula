@@ -71,6 +71,41 @@ class HttpCachePolicyTest {
   }
 
   @Test
+  fun `existing fetchers inherit a fresh provenance result without another request`() = runBlocking {
+    var requests = 0
+    val fetcher = object : HttpFetcher {
+      override suspend fun get(url: String): String = error("not the cache-tolerant path")
+
+      override suspend fun getAllowingStale(url: String): String {
+        requests++
+        return "cached-or-live"
+      }
+    }
+
+    val result = fetcher.getAllowingStaleResult("https://example.test/catalog")
+
+    assertEquals("cached-or-live", result.body)
+    assertTrue(!result.staleFallback)
+    assertEquals(1, requests)
+  }
+
+  @Test
+  fun `the private response marker becomes only a stale boolean`() {
+    val fresh = httpFetchResult(response(cacheableRequest, 200), "fresh")
+    val staleResponse = response(cacheableRequest, 200).newBuilder()
+      .header(HttpCachePolicy.STALE_PROVENANCE_HEADER, "network-io")
+      .build()
+    val stale = httpFetchResult(staleResponse, "offline")
+
+    assertEquals("fresh", fresh.body)
+    assertTrue(!fresh.staleFallback)
+    assertEquals("offline", stale.body)
+    assertTrue(stale.staleFallback)
+    // The interceptor's internal reason/header value is not part of the returned type.
+    assertTrue(!stale.toString().contains("network-io"))
+  }
+
+  @Test
   fun `marker header never reaches the server`() {
     assertNull(HttpCachePolicy.withoutMarker(cacheableRequest).header(HttpCachePolicy.CACHEABLE_HEADER))
   }

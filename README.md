@@ -89,9 +89,9 @@ releases through the protected `release` environment:
 The in-app updater polls GitHub Releases on startup and every six hours in
 the background on an unmetered connection (release builds only), matches the
 `-tv-` named asset, and
-downloads it in the background. Update source defaults live in
-`app/build.gradle.kts` (`githubReleaseOwner`, `githubReleaseRepo`) and can be
-overridden with `-PgithubReleaseOwner=... -PgithubReleaseRepo=...`.
+downloads it in the background. Update source defaults to `Robertg761/Nebula` in
+`app/build.gradle.kts` through `githubReleaseOwner` and `githubReleaseRepo`, and can
+be overridden with `-PgithubReleaseOwner=... -PgithubReleaseRepo=...`.
 
 Before dispatching a release:
 

@@ -16,10 +16,11 @@ import com.stremioshell.host.tv.TvAppActivity
  * what puts resume points on the Android TV home screen next to Netflix's and
  * YouTube's.
  *
- * Deliberately thin and untested: every decision lives in [WatchNextMapper] and
- * [WatchNextDiff], and what is left is ContentResolver calls that only a device
- * can answer. Every failure is swallowed - a home-screen row is a nicety, and the
- * provider is missing entirely on a phone or a non-TV emulator image.
+ * Deliberately thin: every decision lives in [WatchNextMapper] and [WatchNextDiff],
+ * while the ContentValues update semantics are covered by a device-backed test.
+ * The remaining ContentResolver calls need a TV provider. Every failure is swallowed -
+ * a home-screen row is a nicety, and the provider is missing entirely on a phone or a
+ * non-TV emulator image.
  */
 // tvprovider 1.0.0 marks its Watch Next compatibility surface RestrictedApi
 // even though this is the documented public API for third-party TV apps.
@@ -109,7 +110,7 @@ class WatchNextPublisher(context: Context) {
     return rows
   }
 
-  private fun contentValuesFor(program: WatchNextProgramData): ContentValues {
+  internal fun contentValuesFor(program: WatchNextProgramData): ContentValues {
     val builder = WatchNextProgram.Builder()
     builder.setType(
       when (program.type) {
@@ -132,7 +133,28 @@ class WatchNextPublisher(context: Context) {
     program.durationMillis?.let { builder.setDurationMillis(it) }
     program.seasonNumber?.let { builder.setSeasonNumber(it) }
     program.episodeNumber?.let { builder.setEpisodeNumber(it) }
-    return builder.build().toContentValues()
+    return builder.build().toContentValues().apply {
+      // This same ContentValues object is used for inserts and in-place updates. Builder fields
+      // that are not set are omitted rather than written as SQL NULL, which means an update would
+      // otherwise retain the old value. The visible case is Restart: the mapped row becomes NEXT
+      // with no resume position, but the launcher keeps drawing the previous progress bar because
+      // COLUMN_LAST_PLAYBACK_POSITION_MILLIS was never cleared.
+      if (program.posterArtUri == null) {
+        putNull(TvContractCompat.WatchNextPrograms.COLUMN_POSTER_ART_URI)
+      }
+      if (program.lastPlaybackPositionMillis == null) {
+        putNull(TvContractCompat.WatchNextPrograms.COLUMN_LAST_PLAYBACK_POSITION_MILLIS)
+      }
+      if (program.durationMillis == null) {
+        putNull(TvContractCompat.WatchNextPrograms.COLUMN_DURATION_MILLIS)
+      }
+      if (program.seasonNumber == null) {
+        putNull(TvContractCompat.WatchNextPrograms.COLUMN_SEASON_DISPLAY_NUMBER)
+      }
+      if (program.episodeNumber == null) {
+        putNull(TvContractCompat.WatchNextPrograms.COLUMN_EPISODE_DISPLAY_NUMBER)
+      }
+    }
   }
 
   /**

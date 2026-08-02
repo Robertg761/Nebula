@@ -7,10 +7,12 @@ import androidx.lifecycle.viewModelScope
 import com.stremioshell.host.tv.channel.WatchNextSync
 import com.stremioshell.host.tv.data.AddonProbe
 import com.stremioshell.host.tv.data.MetadataCache
+import com.stremioshell.host.tv.data.MetadataCacheOwnership
 import com.stremioshell.host.tv.data.NetworkErrorMessage
 import com.stremioshell.host.tv.data.NetworkSource
 import com.stremioshell.host.tv.data.PlayerPrefs
 import com.stremioshell.host.tv.data.PlayerPrefsStore
+import com.stremioshell.host.tv.data.RefreshCompletionPolicy
 import com.stremioshell.host.tv.data.SettingsDraft
 import com.stremioshell.host.tv.data.SettingsSaveGuard
 import com.stremioshell.host.tv.data.SettingsStatus
@@ -40,7 +42,10 @@ import com.stremioshell.host.tv.data.tmdb.RailPageState
 import com.stremioshell.host.tv.data.tmdb.RailPaging
 import com.stremioshell.host.tv.data.tmdb.SearchPageState
 import com.stremioshell.host.tv.data.tmdb.SearchPaging
+import com.stremioshell.host.tv.data.tmdb.SearchRequestGuard
+import com.stremioshell.host.tv.data.tmdb.SearchRequestToken
 import com.stremioshell.host.tv.data.tmdb.TmdbClient
+import com.stremioshell.host.tv.data.tmdb.TmdbLoad
 import com.stremioshell.host.tv.diagnostics.PerformanceTrace
 import com.stremioshell.host.tv.pairing.ConfigMerge
 import com.stremioshell.host.tv.pairing.ConfigPairingServer
@@ -63,6 +68,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -156,6 +162,19 @@ sealed interface LoadState<out T> {
   data object Loading : LoadState<Nothing>
   data class Ready<T>(val value: T) : LoadState<T>
   data class Failed(val message: String) : LoadState<Nothing>
+}
+
+/**
+ * A settings save has two useful milestones: the configuration is durably written, then its
+ * connections have finished probing. These used to be inferred from status copy, which made the
+ * persistence failure sentence look exactly like a successful terminal update to Settings.
+ */
+sealed interface SettingsSaveUpdate {
+  val message: String
+
+  data class Persisted(override val message: String) : SettingsSaveUpdate
+  data class Complete(override val message: String) : SettingsSaveUpdate
+  data class Failed(override val message: String) : SettingsSaveUpdate
 }
 
 class TvAppViewModel(application: Application) : AndroidViewModel(application) {
@@ -309,6 +328,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   // cancel the older one and a late response can be dropped instead of landing on the wrong screen.
   private var searchJob: Job? = null
   private var searchPageJob: Job? = null
+  private val searchRequests = SearchRequestGuard()
   private var detailsJob: Job? = null
   private var detailsKey: Pair<MediaType, Int>? = null
   private var seasonJob: Job? = null
@@ -331,12 +351,20 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   private val detailsCache = MetadataCache<Pair<MediaType, Int>, MediaDetails>(maxEntries = 10)
   private val seasonCache = MetadataCache<Pair<Int, Int>, List<EpisodeItem>>(maxEntries = 20)
 
-  /** Which TMDB key the two caches above hold data for; see [metadataClient]. */
+  /** Which TMDB key the two caches above hold data for; null also owns the cleared state. */
   private var metadataCacheKey: String? = null
 
   /** See [clientFor]. */
   private var cachedClientKey: String? = null
   private var cachedClient: TmdbClient? = null
+
+  init {
+    // Search state can outlive the Search screen. Invalidate it at the source as soon as DataStore
+    // publishes a different key, rather than relying solely on the screen's debounced re-submit.
+    viewModelScope.launch {
+      tmdbApiKey.collect { synchronizeSearchCredential(it) }
+    }
+  }
 
   // Phone pairing.
   sealed interface PairingState {
@@ -594,6 +622,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     /** One shared HTTP call is capped at 40s; every source is probed in parallel. */
     const val PAIRING_APPLY_TIMEOUT_MS = 50_000L
     const val PAIRING_CLOSED_MESSAGE = "Pairing was closed before the settings could be saved."
+    const val SEARCH_KEY_REQUIRED_MESSAGE = "Add your TMDB API key in Settings to search."
 
     /**
      * How long a screen-scoped flow keeps collecting after its last reader leaves. Long enough to
@@ -603,22 +632,54 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     const val IDLE_UNSUBSCRIBE_MS = 5_000L
   }
 
-  private fun tmdb(): TmdbClient? =
-    tmdbApiKey.value?.takeIf { it.isNotBlank() }?.let { clientFor(it) }
+  private fun synchronizeSearchCredential(value: String?): String? {
+    val key = value?.takeIf { it.isNotBlank() }
+    if (!searchRequests.updateCredential(key)) return key
+
+    searchJob?.cancel()
+    searchPageJob?.cancel()
+    _searchPaging.value = SearchPageState()
+    _searchResults.value = when {
+      _searchQuery.value.isBlank() -> LoadState.Ready(emptyList())
+      key == null -> LoadState.Failed(SEARCH_KEY_REQUIRED_MESSAGE)
+      else -> LoadState.Loading
+    }
+    return key
+  }
+
+  private fun ownsSearch(token: SearchRequestToken): Boolean {
+    val key = synchronizeSearchCredential(tmdbApiKey.value)
+    return searchRequests.isCurrent(token, _searchQuery.value, key)
+  }
 
   /**
-   * [tmdb], for the two callers that cache what they load. Cached metadata belongs to the key that
-   * fetched it, so a changed key empties both caches before it is used for anything: a viewer who
-   * swapped keys must not be served the previous account's payloads.
+   * Resolves TMDB for the two callers that cache what they load. Cached metadata belongs to the key
+   * that fetched it, so a changed key empties both caches before it is used for anything: a viewer
+   * who swapped keys must not be served the previous account's payloads.
    */
   private fun metadataClient(): TmdbClient? {
-    val key = tmdbApiKey.value?.takeIf { it.isNotBlank() } ?: return null
-    if (metadataCacheKey != key) {
+    val key = MetadataCacheOwnership.credential(tmdbApiKey.value)
+    if (MetadataCacheOwnership.changed(metadataCacheKey, key)) {
+      // These jobs write through the key-owned caches. Cancellation is the fast path; every
+      // completion also checks its captured owner because a response may already be past a
+      // cancellable suspension when the setting changes.
+      heroArtJob?.cancel()
+      detailsJob?.cancel()
+      seasonJob?.cancel()
       metadataCacheKey = key
       detailsCache.clear()
       seasonCache.clear()
     }
-    return clientFor(key)
+    return key?.let { clientFor(it) }
+  }
+
+  /** A disk fallback stays immediately refreshable until a genuinely fresh response replaces it. */
+  private fun <K : Any, V : Any> MetadataCache<K, V>.putLoad(
+    key: K,
+    load: TmdbLoad<V>,
+    nowMillis: Long,
+  ) {
+    if (load.staleFallback) putStale(key, load.value) else put(key, load.value, nowMillis)
   }
 
   /**
@@ -635,13 +696,16 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       cachedClient = it
     }
 
-  private suspend fun TmdbClient.load(query: CatalogQuery, page: Int): MediaPage = when (query) {
-    is CatalogQuery.Trending -> trending(query.type, page)
-    is CatalogQuery.Popular -> popular(query.type, page)
-    is CatalogQuery.Genre -> discover(query.type, query.genreId, page)
+  private suspend fun TmdbClient.loadResult(
+    query: CatalogQuery,
+    page: Int,
+  ): TmdbLoad<MediaPage> = when (query) {
+    is CatalogQuery.Trending -> trendingLoad(query.type, page)
+    is CatalogQuery.Popular -> popularLoad(query.type, page)
+    is CatalogQuery.Genre -> discoverLoad(query.type, query.genreId, page)
   }
 
-  /** [load]'s first page as the shared disk cache already holds it, or null when it does not. */
+  /** [loadResult]'s first page as the shared disk cache already holds it, or null when absent. */
   private suspend fun TmdbClient.loadCached(query: CatalogQuery): MediaPage? = when (query) {
     is CatalogQuery.Trending -> cachedTrending(query.type)
     is CatalogQuery.Popular -> cachedPopular(query.type)
@@ -710,6 +774,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       val loaded = LinkedHashMap<String, HomeRail>()
       val failed = mutableSetOf<String>()
       val failures = mutableListOf<Throwable>()
+      var usedStaleFallback = false
       // Every rail's paging state waits here until the emission that makes its row visible. The
       // asyncs below all run on this coroutine's (main) dispatcher and only suspend inside the
       // request, so these three collections are single-threaded despite the fan-out.
@@ -746,14 +811,16 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
         wave.map { spec ->
           async {
             val result = PerformanceTrace.suspendSection("home.rail.${spec.title}") {
-              catchingFailure { client.load(spec.query, page = 1) }
+              catchingFailure { client.loadResult(spec.query, page = 1) }
             }
             if (!isActive || railsLoadedForKey != key) return@async
-            val page = result.getOrNull()
-            if (page == null) {
+            val loadedPage = result.getOrNull()
+            if (loadedPage == null) {
               failed += spec.title
               result.exceptionOrNull()?.let { failures += it }
             } else {
+              if (loadedPage.staleFallback) usedStaleFallback = true
+              val page = loadedPage.value
               // The depth the row has reached, not the depth it had when this load started: rails
               // served from the cache can be paged into while the refresh behind them is still in
               // flight, and the tail is what stops that refresh from cutting the row back to one
@@ -785,8 +852,12 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       // Only mention a failure that actually left a gap; a rail still covered by the copy already
       // on screen needs no notice, just a retry on the next visit.
       _railsNotice.value = if (assembled.missingTitles.isEmpty()) null else message
-      // Only a complete load counts as fresh, so a partial one is retried on the next visit.
-      railsLoadedAtMillis = if (failed.isEmpty()) System.currentTimeMillis() else null
+      // Only a complete non-fallback load counts as fresh, so partial/offline loads retry later.
+      railsLoadedAtMillis = RefreshCompletionPolicy.loadedAtMillis(
+        nowMillis = System.currentTimeMillis(),
+        hasFailures = failed.isNotEmpty(),
+        usedStaleFallback = usedStaleFallback,
+      )
     }
   }
 
@@ -857,14 +928,23 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     setRailPaging(title, state.copy(loading = true))
     railPageJobs[title] = viewModelScope.launch {
       val result = PerformanceTrace.suspendSection("home.page.$title") {
-        catchingFailure { clientFor(key).load(spec.query, state.nextPage) }
+        catchingFailure { clientFor(key).loadResult(spec.query, state.nextPage) }
       }
       if (!isActive || railsLoadedForKey != key) return@launch
-      val page = result.getOrNull()
-      if (page == null) {
+      val loadedPage = result.getOrNull()
+      if (loadedPage == null) {
         setRailPaging(title, RailPaging.failed(state))
         return@launch
       }
+      if (loadedPage.staleFallback) {
+        // The cached tail may predate the first page now on screen. Treat it like a failed append:
+        // preserve the row and cursor, then make the next Home visit run a full refresh that can
+        // reopen this same page rather than permanently carrying the stale tail forward.
+        railsLoadedAtMillis = null
+        setRailPaging(title, RailPaging.failed(state))
+        return@launch
+      }
+      val page = loadedPage.value
       val current = (_homeRails.value as? LoadState.Ready)?.value ?: return@launch
       val index = current.indexOfFirst { it.title == title }
       if (index < 0) return@launch
@@ -918,30 +998,32 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    * which query the state it is rendering belongs to.
    */
   fun search(query: String) {
+    val key = synchronizeSearchCredential(tmdbApiKey.value)
     // The search field re-submits what it holds whenever its collector is re-armed (a key
     // arriving, a voice query seeding it), and the answer to a query already in hand or
     // already on its way is the same answer. A failure is not: Retry sends the same string
     // back through here and must actually retry.
-    if (query == _searchQuery.value && _searchResults.value !is LoadState.Failed) return
+    if (searchRequests.canReuse(query, key) && _searchResults.value !is LoadState.Failed) return
     searchJob?.cancel()
     searchPageJob?.cancel()
     _searchQuery.value = query
     _searchPaging.value = SearchPageState()
+    val request = searchRequests.begin(query, key)
     if (query.isBlank()) {
       _searchResults.value = LoadState.Ready(emptyList())
       return
     }
     // Reported rather than ignored: search with no key used to leave the last state on screen,
     // which read as "nothing matched" instead of "this needs setting up".
-    val client = tmdb()
+    val client = key?.let { clientFor(it) }
     if (client == null) {
-      _searchResults.value = LoadState.Failed("Add your TMDB API key in Settings to search.")
+      _searchResults.value = LoadState.Failed(SEARCH_KEY_REQUIRED_MESSAGE)
       return
     }
     _searchResults.value = LoadState.Loading
     searchJob = viewModelScope.launch {
       val page = catchingFailure { client.searchPage(query) }
-      if (!isActive || _searchQuery.value != query) return@launch
+      if (!isActive || !ownsSearch(request)) return@launch
       page.onSuccess {
         _searchResults.value = LoadState.Ready(it.items)
         _searchPaging.value = SearchPaging.afterFirstPage(it)
@@ -954,16 +1036,18 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
 
   /** Appends one search page without replacing or reordering cards already under focus. */
   fun loadNextSearchPage() {
+    val key = synchronizeSearchCredential(tmdbApiKey.value)
     val paging = _searchPaging.value
     if (!SearchPaging.canLoad(paging) || searchPageJob?.isActive == true) return
     val query = _searchQuery.value
     if (_searchResults.value !is LoadState.Ready) return
-    val client = tmdb() ?: return
+    val request = searchRequests.current(query, key) ?: return
+    val client = key?.let { clientFor(it) } ?: return
     val requestedPage = paging.nextPage
     _searchPaging.value = SearchPaging.begin(paging)
     searchPageJob = viewModelScope.launch {
       val page = catchingFailure { client.searchPage(query, requestedPage) }
-      if (!isActive || _searchQuery.value != query) return@launch
+      if (!isActive || !ownsSearch(request)) return@launch
       page.onSuccess {
         val latest = (_searchResults.value as? LoadState.Ready)?.value ?: return@onSuccess
         val merged = SearchPaging.merge(latest, it.items)
@@ -1026,28 +1110,55 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    */
   fun loadHeroArt(type: MediaType, tmdbId: Int) {
     val key = type to tmdbId
-    if (heroArtKey == key) return
+    val previousCredential = metadataCacheKey
+    val client = metadataClient()
+    val credentialChanged = MetadataCacheOwnership.changed(previousCredential, metadataCacheKey)
+    if (client == null) {
+      heroArtJob?.cancel()
+      heroArtKey = key
+      _heroLogoUrl.value = null
+      return
+    }
+    val now = System.currentTimeMillis()
+    val sameHero = heroArtKey == key
+    val cached = detailsCache.get(key, now)
+    if (
+      MetadataCacheOwnership.canReuseHero(
+        sameHero = sameHero,
+        credentialChanged = credentialChanged,
+        cachedFresh = cached?.stale == false,
+        requestActive = heroArtJob?.isActive == true,
+      )
+    ) return
     heroArtKey = key
-    _heroLogoUrl.value = null
-    val cached = detailsCache.get(key, System.currentTimeMillis())
+    if (!sameHero || credentialChanged) _heroLogoUrl.value = null
     if (cached != null) {
       _heroLogoUrl.value = cached.value.logoUrl
       if (!cached.stale) return
     }
-    val client = metadataClient() ?: return
     heroArtJob?.cancel()
+    val credentialOwner = metadataCacheKey
     heroArtJob = viewModelScope.launch {
-      val loaded = catchingFailure { client.details(type, tmdbId) }.getOrNull() ?: return@launch
+      val loaded = catchingFailure { client.detailsLoad(type, tmdbId) }.getOrNull()
+        ?: return@launch
       // The billboard rotates and the rails reload; a result for a title that is no longer featured
       // must not paint over the one that is.
-      if (heroArtKey != key) return@launch
-      detailsCache.put(key, loaded, System.currentTimeMillis())
-      _heroLogoUrl.value = loaded.logoUrl
+      if (
+        heroArtKey != key ||
+        !MetadataCacheOwnership.isCurrent(
+          owner = credentialOwner,
+          cacheOwner = metadataCacheKey,
+          liveCredential = tmdbApiKey.value,
+        )
+      ) return@launch
+      detailsCache.putLoad(key, loaded, System.currentTimeMillis())
+      _heroLogoUrl.value = loaded.value.logoUrl
     }
   }
 
   fun loadDetails(type: MediaType, tmdbId: Int) {
     val client = metadataClient() ?: return
+    val credentialOwner = metadataCacheKey
     val key = type to tmdbId
     // Opening another title invalidates the details *and* the season list of the previous one.
     detailsJob?.cancel()
@@ -1062,13 +1173,21 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     if (cached != null && !cached.stale) return
     detailsJob = viewModelScope.launch {
       val result = PerformanceTrace.suspendSection("details.load") {
-        catchingFailure { client.details(type, tmdbId) }
+        catchingFailure { client.detailsLoad(type, tmdbId) }
       }
-      if (!isActive || detailsKey != key) return@launch
+      if (
+        !isActive ||
+        detailsKey != key ||
+        !MetadataCacheOwnership.isCurrent(
+          owner = credentialOwner,
+          cacheOwner = metadataCacheKey,
+          liveCredential = tmdbApiKey.value,
+        )
+      ) return@launch
       val loaded = result.getOrNull()
       if (loaded != null) {
-        detailsCache.put(key, loaded, System.currentTimeMillis())
-        _details.value = LoadState.Ready(loaded)
+        detailsCache.putLoad(key, loaded, System.currentTimeMillis())
+        _details.value = LoadState.Ready(loaded.value)
         return@launch
       }
       // Nothing to fall back on is the only case the screen reports as a failure; a stale copy is
@@ -1083,6 +1202,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   /** An episode list, on the same terms as [loadDetails]: cached copy first, refresh in place. */
   fun loadSeason(tmdbId: Int, seasonNumber: Int) {
     val client = metadataClient() ?: return
+    val credentialOwner = metadataCacheKey
     // The details screen can ask for a season while it is still showing the previous title (its
     // effects run before the new details land); that request is stale by definition.
     val requestedDetails = detailsKey
@@ -1096,13 +1216,21 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     if (cached != null && !cached.stale) return
     seasonJob = viewModelScope.launch {
       val result = PerformanceTrace.suspendSection("season.load") {
-        catchingFailure { client.season(tmdbId, seasonNumber) }
+        catchingFailure { client.seasonLoad(tmdbId, seasonNumber) }
       }
-      if (!isActive || seasonKey != key) return@launch
+      if (
+        !isActive ||
+        seasonKey != key ||
+        !MetadataCacheOwnership.isCurrent(
+          owner = credentialOwner,
+          cacheOwner = metadataCacheKey,
+          liveCredential = tmdbApiKey.value,
+        )
+      ) return@launch
       val loaded = result.getOrNull()
       if (loaded != null) {
-        seasonCache.put(key, loaded, System.currentTimeMillis())
-        _episodes.value = LoadState.Ready(loaded)
+        seasonCache.putLoad(key, loaded, System.currentTimeMillis())
+        _episodes.value = LoadState.Ready(loaded.value)
         return@launch
       }
       if (cached != null) return@launch
@@ -1403,7 +1531,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   fun saveSettings(
     tmdbKey: String,
     subtitlesBaseUrl: String,
-    onStatus: (String) -> Unit,
+    onStatus: (SettingsSaveUpdate) -> Unit,
   ) {
     viewModelScope.launch {
       try {
@@ -1430,17 +1558,23 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
         // land long after Home had rendered and blank it back to "Loading catalogs..." mid-scroll.
         if (resolved.tmdbKey.isNotBlank()) loadRails(resolved.tmdbKey, force = true)
         val kept = SettingsSaveGuard.keptNotice(resolved)
-        onStatus(listOfNotNull(kept, "Saved. Checking connections...").joinToString("  "))
+        onStatus(
+          SettingsSaveUpdate.Persisted(
+            listOfNotNull(kept, "Saved. Checking connections...").joinToString("  "),
+          ),
+        )
 
         val probe = probeConfiguration(resolved.tmdbKey, resolved.addonUrls)
         val status = SettingsStatus.tmdbStatus(resolved.tmdbKey, probe.tmdbConnected) +
           "   |   " + SettingsStatus.addonStatus(probe.addons)
-        onStatus(listOfNotNull(kept, status).joinToString("  "))
+        onStatus(SettingsSaveUpdate.Complete(listOfNotNull(kept, status).joinToString("  ")))
       } catch (cancelled: CancellationException) {
         throw cancelled
       } catch (_: Throwable) {
         onStatus(
-          "Couldn't save settings. Check the TV's available storage and try again.",
+          SettingsSaveUpdate.Failed(
+            "Couldn't save settings. Check the TV's available storage and try again.",
+          ),
         )
       }
     }

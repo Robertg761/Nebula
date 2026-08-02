@@ -46,4 +46,29 @@ class StalenessPolicyTest {
   fun `a non-positive window is rejected`() {
     assertThrows(IllegalArgumentException::class.java) { StalenessPolicy(maxAgeMillis = 0) }
   }
+
+  @Test
+  fun `only a complete non-stale refresh advances the freshness clock`() {
+    assertTrue(
+      RefreshCompletionPolicy.loadedAtMillis(
+        nowMillis = 10_000,
+        hasFailures = false,
+        usedStaleFallback = false,
+      ) == 10_000L,
+    )
+    assertTrue(
+      RefreshCompletionPolicy.loadedAtMillis(
+        nowMillis = 10_000,
+        hasFailures = true,
+        usedStaleFallback = false,
+      ) == null,
+    )
+    assertTrue(
+      RefreshCompletionPolicy.loadedAtMillis(
+        nowMillis = 10_000,
+        hasFailures = false,
+        usedStaleFallback = true,
+      ) == null,
+    )
+  }
 }

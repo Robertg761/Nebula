@@ -79,6 +79,19 @@ private val RESOLUTION_GUTTER = 64.dp
 private val HEADER_POSTER_WIDTH = 80.dp
 private val HEADER_POSTER_HEIGHT = 120.dp
 
+internal fun shouldLoadStreamsOnResume(
+  loadIssued: Boolean,
+  heldRequest: StreamsRequestKey?,
+  requested: StreamsRequestKey,
+  state: LoadState<List<AddonStream>>,
+  addons: List<String>?,
+): Boolean {
+  if (!loadIssued || heldRequest != requested) return true
+  return state is LoadState.Failed &&
+    state.message.contains("No addon", ignoreCase = true) &&
+    addons?.isNotEmpty() == true
+}
+
 @Composable
 fun StreamsScreen(
   viewModel: TvAppViewModel,
@@ -116,8 +129,18 @@ fun StreamsScreen(
   // bandwidth were being reclaimed for. Keyed on the collected request as well, so a drop while
   // the picker is actually on screen is picked up without waiting for the next resume - and read
   // off the flow rather than off that key, because a resume can outrun the collector restarting.
-  LifecycleResumeEffect(screen, streamsRequest) {
-    if (!loadIssued || viewModel.streamsRequest.value != request) {
+  // The state and addon list are keys too: Settings is pushed over this picker, so its original
+  // request is still current when the viewer comes back after adding the addon that request lacked.
+  LifecycleResumeEffect(screen, streamsRequest, streams, addons) {
+    if (
+      shouldLoadStreamsOnResume(
+        loadIssued = loadIssued,
+        heldRequest = viewModel.streamsRequest.value,
+        requested = request,
+        state = viewModel.streams.value,
+        addons = viewModel.addonManifestUrls.value,
+      )
+    ) {
       viewModel.loadStreams(screen.imdbId, screen.season, screen.episode)
       loadIssued = true
     }
@@ -137,7 +160,11 @@ fun StreamsScreen(
   // best row for *this* episode may well be better than a memory two episodes old, and a
   // list that played itself would take that choice away.
   val rawList = (state as? LoadState.Ready)?.value.orEmpty()
-  var filters by remember(screen) { mutableStateOf(StreamFilters()) }
+  // Opens on the full list rather than the Recommended cut. With one configured addon the
+  // curation only hid releases behind a "26 of 73" it never explained - the viewer asked to
+  // simply see everything their source returned. Recommended stays one press away on the
+  // View chip for anyone who wants the conservative preset back.
+  var filters by remember(screen) { mutableStateOf(StreamFilters.SHOW_ALL) }
   var streamListFocusTick by remember(screen) { mutableIntStateOf(0) }
   val sourceOptions = remember(rawList) { StreamFilterPolicy.sources(rawList) }
   // Read once per load, not once per press. Every regex on this screen lives behind this call, and

@@ -3,6 +3,7 @@ package com.stremioshell.host.tv.player
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -182,5 +183,83 @@ class PlaybackPoliciesTest {
     assertEquals(1f, PlaybackFrameRate.progressRemaining(0, 15_000), 0f)
     assertEquals(0.5f, PlaybackFrameRate.progressRemaining(7_500, 15_000), 0f)
     assertEquals(0f, PlaybackFrameRate.progressRemaining(20_000, 15_000), 0f)
+  }
+
+  @Test
+  fun `unknown frame rate starts once per load generation`() {
+    assertTrue(PlaybackFrameRate.shouldStartDiscovery(0f, null, loadGeneration = 7))
+    assertFalse(PlaybackFrameRate.shouldStartDiscovery(0f, 7, loadGeneration = 7))
+    assertTrue(PlaybackFrameRate.shouldStartDiscovery(0f, 6, loadGeneration = 7))
+    assertFalse(PlaybackFrameRate.shouldStartDiscovery(23.976f, null, loadGeneration = 7))
+  }
+
+  @Test
+  fun `failed frame rate read releases only its matching discovery generation`() {
+    assertNull(
+      PlaybackFrameRate.afterDiscoveryFailure(
+        discoveryGeneration = 7,
+        failedGeneration = 7,
+      ),
+    )
+    assertEquals(
+      8L,
+      PlaybackFrameRate.afterDiscoveryFailure(
+        discoveryGeneration = 8,
+        failedGeneration = 7,
+      ),
+    )
+  }
+
+  @Test
+  fun `restored resume reset state wins over stale launch intent`() {
+    assertTrue(
+      PlaybackResumePolicy.mergeResetRequest(
+        launchRequested = true,
+        restoredRequested = null,
+      ),
+    )
+    assertTrue(
+      PlaybackResumePolicy.mergeResetRequest(
+        launchRequested = false,
+        restoredRequested = true,
+      ),
+    )
+    assertFalse(
+      PlaybackResumePolicy.mergeResetRequest(
+        launchRequested = true,
+        restoredRequested = false,
+      ),
+    )
+  }
+
+  @Test
+  fun `explicit start over persists below normal resume threshold`() {
+    assertEquals(
+      ResumeSaveAction.Reset,
+      PlaybackResumePolicy.saveAction(
+        finished = false,
+        positionMs = 0,
+        minimumSaveMs = 10_000,
+        resetRequested = true,
+      ),
+    )
+    assertEquals(
+      ResumeSaveAction.Ignore,
+      PlaybackResumePolicy.saveAction(
+        finished = false,
+        positionMs = 0,
+        minimumSaveMs = 10_000,
+        resetRequested = false,
+      ),
+    )
+    assertEquals(
+      ResumeSaveAction.Finished,
+      PlaybackResumePolicy.saveAction(
+        finished = true,
+        positionMs = 0,
+        minimumSaveMs = 10_000,
+        resetRequested = true,
+      ),
+    )
   }
 }

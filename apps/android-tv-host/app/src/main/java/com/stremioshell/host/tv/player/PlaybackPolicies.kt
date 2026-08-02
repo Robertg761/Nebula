@@ -220,4 +220,42 @@ object PlaybackFrameRate {
     if (totalMs <= 0L) return 0f
     return ((totalMs - elapsedMs).coerceIn(0L, totalMs).toFloat() / totalMs).coerceIn(0f, 1f)
   }
+
+  /**
+   * Starts one bounded discovery cycle per file generation while the content rate is unknown.
+   * A stale generation is not allowed to suppress discovery for the replacement file.
+   */
+  fun shouldStartDiscovery(
+    contentFps: Float,
+    discoveryGeneration: Long?,
+    loadGeneration: Long,
+  ): Boolean =
+    (!contentFps.isFinite() || contentFps <= 0f) && discoveryGeneration != loadGeneration
+
+  /** A failed read releases only the discovery cycle that issued it. */
+  fun afterDiscoveryFailure(
+    discoveryGeneration: Long?,
+    failedGeneration: Long,
+  ): Long? = discoveryGeneration.takeUnless { it == failedGeneration }
+}
+
+enum class ResumeSaveAction { Finished, Position, Reset, Ignore }
+
+/** Pure launch/restoration and persistence decisions for an explicit Start Over request. */
+object PlaybackResumePolicy {
+  /** Restored state wins, including `false`, so recreation cannot resurrect a consumed intent. */
+  fun mergeResetRequest(launchRequested: Boolean, restoredRequested: Boolean?): Boolean =
+    restoredRequested ?: launchRequested
+
+  fun saveAction(
+    finished: Boolean,
+    positionMs: Long,
+    minimumSaveMs: Long,
+    resetRequested: Boolean,
+  ): ResumeSaveAction = when {
+    finished -> ResumeSaveAction.Finished
+    positionMs > minimumSaveMs -> ResumeSaveAction.Position
+    resetRequested -> ResumeSaveAction.Reset
+    else -> ResumeSaveAction.Ignore
+  }
 }

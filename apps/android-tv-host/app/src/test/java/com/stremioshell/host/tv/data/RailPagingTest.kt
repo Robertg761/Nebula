@@ -205,8 +205,25 @@ class RailPagingTest {
   fun `a failed fetch stops the rail rather than retrying on every scroll`() {
     val state = RailPaging.failed(RailPageState(nextPage = 3, loading = true))
 
+    assertEquals(3, state.nextPage)
     assertFalse(state.loading)
     assertTrue(state.endReached)
     assertFalse(RailPaging.shouldFetchNext(state, itemCount = 40, lastVisibleIndex = 39))
+  }
+
+  @Test
+  fun `a failed stale page reopens the same cursor after a full rail refresh`() {
+    val failed = RailPaging.failed(RailPageState(nextPage = 3, loading = true))
+
+    val refreshed = RailPaging.afterFirstPage(
+      page = page(items(1..20), page = 1),
+      itemCount = 40,
+      carried = failed,
+    )
+
+    assertEquals(3, refreshed.nextPage)
+    assertFalse(refreshed.loading)
+    assertFalse(refreshed.endReached)
+    assertTrue(RailPaging.shouldFetchNext(refreshed, itemCount = 40, lastVisibleIndex = 39))
   }
 }

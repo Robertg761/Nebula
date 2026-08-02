@@ -27,3 +27,12 @@ class StalenessPolicy(private val maxAgeMillis: Long = DEFAULT_MAX_AGE_MILLIS) {
     const val DEFAULT_MAX_AGE_MILLIS: Long = 4L * 60 * 60 * 1000
   }
 }
+
+/** Decides whether a completed refresh may advance a longer-lived in-memory freshness clock. */
+object RefreshCompletionPolicy {
+  fun loadedAtMillis(
+    nowMillis: Long,
+    hasFailures: Boolean,
+    usedStaleFallback: Boolean,
+  ): Long? = nowMillis.takeUnless { hasFailures || usedStaleFallback }
+}
