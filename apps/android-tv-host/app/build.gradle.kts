@@ -165,7 +165,7 @@ dependencies {
   implementation("io.coil-kt:coil-compose:2.6.0")
   implementation("com.squareup.okhttp3:okhttp:4.12.0")
   implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
-  implementation("dev.jdtech.mpv:libmpv:0.4.1")
+  implementation("dev.jdtech.mpv:libmpv:0.5.1")
 
   // Phone-pairing config entry (QR + tiny on-device web form)
   implementation("com.google.zxing:core:3.5.3")
