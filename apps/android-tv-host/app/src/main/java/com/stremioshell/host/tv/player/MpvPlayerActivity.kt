@@ -83,8 +83,16 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -2756,12 +2764,26 @@ class MpvPlayerActivity : ComponentActivity() {
     val preview by seekPreviewSec
     val duration by durationSec
     val speed by playbackSpeed
+    val isPaused by paused
     var focused by remember { mutableStateOf(false) }
     // A seek that has not landed yet: the position under the thumb is where the
     // presses have got to, not where mpv is.
     val scrubbing = preview >= 0
     val position = if (scrubbing) preview else actual
     val fraction = if (duration > 0) (position / duration).toFloat().coerceIn(0f, 1f) else 0f
+    val scrubLabel = stringResource(R.string.player_scrub_position)
+    val scrubState = if (duration.isFinite() && duration > 0.0) {
+      stringResource(
+        R.string.player_scrub_position_state,
+        formatTime(position),
+        formatTime(duration),
+      )
+    } else {
+      stringResource(R.string.player_scrub_position_state_unknown, formatTime(position))
+    }
+    val toggleLabel = stringResource(if (isPaused) R.string.action_play else R.string.player_pause)
+    val seekBackLabel = stringResource(R.string.player_seek_back_ten_seconds)
+    val seekForwardLabel = stringResource(R.string.player_seek_forward_ten_seconds)
     val shape = NebulaShapes.large
     Row(
       modifier = Modifier
@@ -2775,6 +2797,44 @@ class MpvPlayerActivity : ComponentActivity() {
         }
         .initialFocusTarget(if (focusable) target else null)
         .focusable(enabled = focusable)
+        // Raw D-pad keys are not accessibility actions. This row is the OSD's initial focus, so an
+        // actionless node here made TalkBack and Switch Access land on two timestamps they could
+        // read but neither operate nor adjust. Clear the decorative child text and expose the
+        // transport contract directly; an unknown-duration stream keeps the step actions but does
+        // not pretend to be an adjustable range.
+        .clearAndSetSemantics {
+          if (focusable) {
+            contentDescription = scrubLabel
+            stateDescription = scrubState
+            onClick(label = toggleLabel) {
+              togglePause()
+              showOsd()
+              true
+            }
+            customActions = listOf(
+              CustomAccessibilityAction(seekBackLabel) {
+                requestSeek(-10.0, isRepeat = false)
+              },
+              CustomAccessibilityAction(seekForwardLabel) {
+                requestSeek(10.0, isRepeat = false)
+              },
+            )
+            PlaybackTimeline.accessibilitySeekTarget(position.toFloat(), duration)?.let {
+              progressBarRangeInfo = ProgressBarRangeInfo(
+                current = it.toFloat(),
+                range = 0f..duration.toFloat(),
+                steps = 0,
+              )
+              setProgress { requested ->
+                val seekTarget = PlaybackTimeline.accessibilitySeekTarget(requested, duration)
+                  ?: return@setProgress false
+                seekToSec(seekTarget)
+                showOsd()
+                true
+              }
+            }
+          }
+        }
         .background(
           if (focused) NebulaPalette.Violet.copy(alpha = 0.14f) else Color.Transparent,
           shape,

@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.tvprovider.media.tv.TvContractCompat
+import com.stremioshell.host.tv.PhysicalTvInstrumentationGuard
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -16,6 +17,7 @@ class WatchNextPublisherInstrumentedTest {
 
   @Test
   fun nullableFieldsAreWrittenAsNullSoAnUpdateClearsThePreviousRow() {
+    PhysicalTvInstrumentationGuard.requireExternalBackupOnPhysicalDevice()
     val values = WatchNextPublisher(context).contentValuesFor(
       WatchNextProgramData(
         internalProviderId = "movie:550",

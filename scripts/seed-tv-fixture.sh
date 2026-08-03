@@ -4,11 +4,10 @@
 # accessibility tree, POST the credentials from ~/.config/nebula/credentials.env,
 # and verify Home actually shows a rail before returning.
 #
-# Exists because connected-test cleanup uninstalls the app - and with it the
-# private DataStore holding the fixture credentials - so every benchmark or
-# profile run otherwise starts from a factory-fresh setup screen. Running this
-# first, with the same variant APK the connected run will install, works
-# because `install -r` over an existing install preserves app data.
+# `install -r` with the same variant preserves the fixture's private DataStore.
+# Repository connected-test runs now retain the target APK by default; keep the
+# explicit `leaveApksInstalledAfterTest=true` property on any ad-hoc benchmark
+# command too, because an override that enables cleanup would erase the fixture.
 #
 # Usage: ANDROID_SERIAL=<serial> scripts/seed-tv-fixture.sh <apk-path>
 set -euo pipefail

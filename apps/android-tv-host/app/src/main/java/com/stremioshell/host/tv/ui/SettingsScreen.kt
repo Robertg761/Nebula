@@ -27,6 +27,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
@@ -52,6 +53,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
@@ -63,12 +65,14 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -111,15 +115,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
-/**
- * How long the Save button stays blocked before it assumes its save is never going to answer.
- *
- * Every addon manifest and the TMDB probe are checked in parallel and each can block for ~30s, so
- * this is deliberately longer than the slowest honest save. It exists only as a floor under the
- * one failure mode a plain `saving` flag has: a write that throws before its first callback would
- * otherwise leave the button inert and the spinner turning for the life of the screen.
- */
-private const val SaveWatchdogMs = 60_000L
 private const val CredentialRevealMs = 30_000L
 
 /** Null while the durable write is complete but connection checks are still running. */
@@ -142,12 +137,14 @@ internal fun SettingsSaveUpdate.completionSuccess(): Boolean? = when (this) {
  * Save is therefore the last control on the page, below everything it commits. It used to sit in
  * the middle of the stack, above the Advanced section whose field it is the only way to persist.
  */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun SettingsScreen(
   viewModel: TvAppViewModel,
   onPairWithPhone: () -> Unit = {},
   onDirtyChanged: (Boolean) -> Unit = {},
   saveRequest: Int = 0,
+  onSaveRequestHandled: (Int) -> Unit = {},
   resetRequest: Int = 0,
   onSaveComplete: (Boolean) -> Unit = {},
 ) {
@@ -155,6 +152,7 @@ fun SettingsScreen(
   val storedAddons by viewModel.addonManifestUrls.collectAsStateWithLifecycle()
   val storedSubtitles by viewModel.subtitlesBaseUrl.collectAsStateWithLifecycle()
   val storedPlayerPrefs by viewModel.playerPrefs.collectAsStateWithLifecycle()
+  val saveOperation by viewModel.settingsSaveOperation.collectAsStateWithLifecycle()
 
   var tmdbKey by rememberSaveable { mutableStateOf("") }
   var newAddonUrl by rememberSaveable { mutableStateOf("") }
@@ -168,8 +166,7 @@ fun SettingsScreen(
   var playbackSeeded by rememberSaveable { mutableStateOf(false) }
 
   // Deliberately not saveable, unlike the field values above. A notice describes something that
-  // just happened, and `saving` tracks a coroutine a config change kills - restoring that one
-  // would leave a spinner turning with nothing behind it.
+  // just happened. The save itself is ViewModel-owned and reattached below by its saveable id.
   var showTmdbKey by remember { mutableStateOf(false) }
   var showAddonUrl by remember { mutableStateOf(false) }
   var showSubtitlesUrl by remember { mutableStateOf(false) }
@@ -178,10 +175,8 @@ fun SettingsScreen(
   var playbackNotice by remember { mutableStateOf<Notice?>(null) }
   var supportNotice by remember { mutableStateOf<Notice?>(null) }
   var exportingDiagnostics by remember { mutableStateOf(false) }
-  var saving by remember { mutableStateOf(false) }
-  var saveAttempt by remember { mutableIntStateOf(0) }
-  var persistedAttempt by remember { mutableIntStateOf(-1) }
-  var completedAttempt by remember { mutableIntStateOf(-1) }
+  var activeSaveId by rememberSaveable { mutableStateOf<Long?>(null) }
+  var completedSaveId by rememberSaveable { mutableStateOf<Long?>(null) }
   var pendingRemoval by remember { mutableStateOf<String?>(null) }
   var pendingRemovalFeedback by remember { mutableStateOf<String?>(null) }
   var pendingClearKey by remember { mutableStateOf(false) }
@@ -200,14 +195,22 @@ fun SettingsScreen(
   var addonMoveTick by remember { mutableIntStateOf(0) }
   var playbackControls by remember { mutableStateOf<PlayerPrefs?>(null) }
   var playbackMutationInFlight by remember { mutableStateOf(false) }
+  // A focused field is a D-pad navigation stop until the viewer explicitly presses Center/Enter.
+  // Not saveable: recreation and leaving Settings both end any active input session.
+  var editingField by remember { mutableStateOf<SettingsTextField?>(null) }
   val currentOnSaveComplete by rememberUpdatedState(onSaveComplete)
+  val currentOnSaveRequestHandled by rememberUpdatedState(onSaveRequestHandled)
   val context = LocalContext.current
+  val softwareKeyboard = LocalSoftwareKeyboardController.current
   val supportScope = rememberCoroutineScope()
 
   val addons = storedAddons.orEmpty()
   val addonLabels = remember(addons) { AddonList.labels(addons) }
   val playbackReady = storedPlayerPrefs != null
   val playback = playbackControls ?: storedPlayerPrefs ?: PlayerPrefs()
+  val activeSave = saveOperation?.takeIf { it.requestId == activeSaveId }
+  val saving = activeSave?.running == true
+  val playbackBusy = playbackMutationInFlight || activeSave?.savingPlaybackLanguages == true
   val playbackSubtitleSize = SubtitleSize.fromStorage(playback.subtitleSize)
   val playbackAudioOutput = AudioOutputMode.fromStorage(playback.audioOutput)
   val listState = rememberLazyListState()
@@ -226,15 +229,18 @@ fun SettingsScreen(
   // fixed node at all - it migrates to whichever control of whichever row now holds the addon a
   // reorder just moved.
   val pairInitialFocus = rememberInitialFocusTarget()
+  val tmdbFieldFocus = rememberInitialFocusTarget()
   val clearKeyFocus = rememberInitialFocusTarget()
   val lastRemoveFocus = rememberInitialFocusTarget()
   val movedAddonFocus = rememberInitialFocusTarget()
+  val addonUrlFieldFocus = rememberInitialFocusTarget()
   val addonRevealFocus = rememberInitialFocusTarget()
   val addButtonFocus = rememberInitialFocusTarget()
   val audioLanguageFocus = rememberInitialFocusTarget()
   val subtitleLanguageFocus = rememberInitialFocusTarget()
   val playbackLanguageSaveFocus = rememberInitialFocusTarget()
   val advancedFocus = rememberInitialFocusTarget()
+  val subtitlesUrlFieldFocus = rememberInitialFocusTarget()
   val subtitlesRevealFocus = rememberInitialFocusTarget()
   val saveFocus = rememberInitialFocusTarget()
 
@@ -261,6 +267,37 @@ fun SettingsScreen(
         saveFocus to SettingsItem.Save,
       ),
     )
+  }
+
+  val stopEditing: (SettingsTextField) -> Unit = { field ->
+    if (editingField == field) {
+      editingField = null
+      softwareKeyboard?.hide()
+    }
+  }
+  val startEditing: (SettingsTextField, InitialFocusTarget) -> Unit = { field, target ->
+    if (editingField == field) {
+      // BACK hides Gboard without notifying Compose that the input session ended. Center on the
+      // still-focused editable field is therefore an explicit reopen request.
+      softwareKeyboard?.show()
+    } else {
+      editingField = field
+      // Accessibility ACTION_CLICK does not guarantee input focus. Remote Center arrives on an
+      // already-focused field, so this is a no-op there and makes the non-key path deterministic.
+      if (target.placed && !target.focused) {
+        runCatching { target.requester.requestFocus() }
+      }
+    }
+  }
+
+  // Material3's value-based text field starts an input connection on TV even when
+  // showKeyboardOnFocus=false. `readOnly` is the hard boundary; after recomposition has made the
+  // selected field editable, wait one frame so the new input connection exists before showing IME.
+  LaunchedEffect(editingField, softwareKeyboard) {
+    if (editingField != null) {
+      withFrameNanos { }
+      softwareKeyboard?.show()
+    }
   }
 
   LaunchedEffect(resetRequest, storedKey, storedSubtitles) {
@@ -301,7 +338,44 @@ fun SettingsScreen(
       }
       // A mutation callback installs its authoritative post-write value directly. Do not replace
       // that with an older queued StateFlow emission while the write is still completing.
-      if (!playbackMutationInFlight) playbackControls = prefs
+      if (!playbackBusy) playbackControls = prefs
+    }
+  }
+
+  // Reconnect the current composition to a ViewModel-owned save. No callback is retained by the
+  // ViewModel: recreation disposes this observer and the replacement observes the same request id.
+  LaunchedEffect(activeSaveId, saveOperation) {
+    val requestId = activeSaveId ?: return@LaunchedEffect
+    val operation = saveOperation
+    if (operation?.requestId != requestId) {
+      activeSaveId = null
+      saveStatus = context.getString(
+        R.string.settings_save_watchdog_unconfirmed,
+        context.getString(R.string.app_name),
+      )
+      if (completedSaveId != requestId) {
+        completedSaveId = requestId
+        currentOnSaveComplete(false)
+      }
+      return@LaunchedEffect
+    }
+
+    operation.playerPrefs?.let { saved ->
+      playbackControls = saved
+      if (audioLanguage == operation.submittedAudioLanguage) {
+        audioLanguage = saved.audioLanguage
+      }
+      if (subtitleLanguage == operation.submittedSubtitleLanguage) {
+        subtitleLanguage = saved.subtitleLanguage
+      }
+    }
+    val update = operation.update ?: return@LaunchedEffect
+    saveStatus = update.message
+    val success = update.completionSuccess() ?: return@LaunchedEffect
+    if (completedSaveId != requestId) {
+      completedSaveId = requestId
+      activeSaveId = null
+      currentOnSaveComplete(success)
     }
   }
 
@@ -468,32 +542,10 @@ fun SettingsScreen(
   // probe so a late callback cannot paint the new draft as connected.
   val invalidateConnectionVerdict: () -> Unit = {
     val wasSaving = saving
-    saveAttempt++
-    persistedAttempt = -1
-    saving = false
+    activeSaveId?.let(viewModel::cancelSettingsSave)
+    activeSaveId = null
     saveStatus = ""
     if (wasSaving) currentOnSaveComplete(false)
-  }
-
-  val saveConfigurationForAttempt: (Int) -> Unit = { attempt ->
-    viewModel.saveSettings(tmdbKey, subtitlesUrl) { update ->
-      // A timed-out or superseded probe can still finish. It must neither repaint the verdict
-      // for a newer draft nor complete a newer leave request.
-      if (attempt == saveAttempt) {
-        saveStatus = update.message
-        val completionSuccess = update.completionSuccess()
-        if (completionSuccess == null) {
-          persistedAttempt = attempt
-          saving = true
-        } else {
-          saving = false
-          if (completedAttempt != attempt) {
-            completedAttempt = attempt
-            currentOnSaveComplete(completionSuccess)
-          }
-        }
-      }
-    }
   }
 
   val startSave: () -> Unit = save@{
@@ -514,66 +566,24 @@ fun SettingsScreen(
         focusJumper.jump(addButtonFocus)
         currentOnSaveComplete(false)
       } else {
-        val attempt = saveAttempt + 1
-        saveAttempt = attempt
-        persistedAttempt = -1
-        saving = true
-        if (!playbackReady) {
-          saveConfigurationForAttempt(attempt)
-        } else {
-          val submittedAudio = audioLanguage
-          val submittedSubtitles = subtitleLanguage
-          playbackMutationInFlight = true
-          viewModel.savePlaybackLanguages(submittedAudio, submittedSubtitles) { result ->
-            result.prefs?.let { playbackControls = it }
-            playbackMutationInFlight = false
-            if (attempt != saveAttempt) return@savePlaybackLanguages
-            if (result.outcome == SettingsMutationResult.Failed) {
-              saving = false
-              if (completedAttempt != attempt) {
-                completedAttempt = attempt
-                saveStatus = context.getString(
-                  R.string.settings_save_playback_languages_failed,
-                )
-                currentOnSaveComplete(false)
-              }
-            } else {
-              result.prefs?.let { saved ->
-                if (audioLanguage == submittedAudio) audioLanguage = saved.audioLanguage
-                if (subtitleLanguage == submittedSubtitles) {
-                  subtitleLanguage = saved.subtitleLanguage
-                }
-              }
-              saveConfigurationForAttempt(attempt)
-            }
-          }
-        }
+        completedSaveId = null
+        saveStatus = ""
+        activeSaveId = viewModel.startSettingsSave(
+          tmdbKey = tmdbKey,
+          subtitlesBaseUrl = subtitlesUrl,
+          audioLanguage = audioLanguage.takeIf { playbackReady },
+          subtitleLanguage = subtitleLanguage.takeIf { playbackReady },
+        )
       }
     }
   }
 
   LaunchedEffect(saveRequest) {
-    if (saveRequest > 0) startSave()
-  }
-
-  LaunchedEffect(saveAttempt, saving) {
-    val attempt = saveAttempt
-    if (!saving || attempt == 0) return@LaunchedEffect
-    delay(SaveWatchdogMs)
-    if (!saving || attempt != saveAttempt) return@LaunchedEffect
-    saving = false
-    val persisted = persistedAttempt == attempt
-    saveStatus = if (persisted) {
-      context.getString(R.string.settings_save_watchdog_persisted)
-    } else {
-      context.getString(
-        R.string.settings_save_watchdog_unconfirmed,
-        context.getString(R.string.app_name),
-      )
-    }
-    if (completedAttempt != attempt) {
-      completedAttempt = attempt
-      currentOnSaveComplete(persisted)
+    if (saveRequest > 0) {
+      // Consume before starting: both calls are synchronous, and a recreation can then either
+      // restore this unconsumed token or restore activeSaveId, never replay both.
+      currentOnSaveRequestHandled(saveRequest)
+      startSave()
     }
   }
 
@@ -656,6 +666,7 @@ fun SettingsScreen(
             if (it != tmdbKey) invalidateConnectionVerdict()
             tmdbKey = it
           },
+          readOnly = editingField != SettingsTextField.TmdbKey,
           singleLine = true,
           placeholder = { Text(stringResource(R.string.settings_tmdb_key_placeholder)) },
           visualTransformation = if (showTmdbKey) {
@@ -672,18 +683,32 @@ fun SettingsScreen(
             autoCorrectEnabled = false,
             keyboardType = KeyboardType.Ascii,
             imeAction = ImeAction.Done,
+            showKeyboardOnFocus = false,
+          ),
+          keyboardActions = KeyboardActions(
+            onDone = { stopEditing(SettingsTextField.TmdbKey) },
           ),
           modifier = Modifier
             // Sized to the 32 characters it holds rather than to a fraction of the card, which left
             // a field twice as wide as any value it can ever contain.
             .widthIn(max = 460.dp)
             .fillMaxWidth()
+            .initialFocusTarget(tmdbFieldFocus)
             .semantics {
               contentDescription = context.getString(R.string.settings_tmdb_api_key)
             }
             // A material3 text field traps the D-pad on TV, so move focus
             // between fields explicitly before it consumes the key.
-            .fieldNav(focusJumper, down = clearKeyFocus, up = pairInitialFocus),
+            .fieldNav(
+              focusJumper,
+              down = clearKeyFocus,
+              up = pairInitialFocus,
+              isEditing = editingField == SettingsTextField.TmdbKey,
+              onStartEditing = {
+                startEditing(SettingsTextField.TmdbKey, tmdbFieldFocus)
+              },
+              onStopEditing = { stopEditing(SettingsTextField.TmdbKey) },
+            ),
         )
         // Under the field rather than beside it. Every button on this screen is reachable
         // by pressing down, which is the only direction a text field can be talked out of:
@@ -805,6 +830,7 @@ fun SettingsScreen(
               text = stringResource(R.string.settings_move_up),
               icon = Icons.Filled.KeyboardArrowUp,
               enabled = index > 0,
+              focusableWhenDisabled = false,
               style = NebulaButtonStyle.Ghost,
               onClick = {
                 val label = addonLabels[index]
@@ -853,6 +879,7 @@ fun SettingsScreen(
               text = stringResource(R.string.settings_move_down),
               icon = Icons.Filled.KeyboardArrowDown,
               enabled = index < addons.lastIndex,
+              focusableWhenDisabled = false,
               style = NebulaButtonStyle.Ghost,
               onClick = {
                 val label = addonLabels[index]
@@ -934,6 +961,7 @@ fun SettingsScreen(
             if (it != newAddonUrl) invalidateConnectionVerdict()
             newAddonUrl = it
           },
+          readOnly = editingField != SettingsTextField.AddonUrl,
           singleLine = true,
           placeholder = { Text(stringResource(R.string.settings_addon_url_placeholder)) },
           visualTransformation = if (showAddonUrl) {
@@ -950,11 +978,16 @@ fun SettingsScreen(
             autoCorrectEnabled = false,
             keyboardType = KeyboardType.Uri,
             imeAction = ImeAction.Done,
+            showKeyboardOnFocus = false,
+          ),
+          keyboardActions = KeyboardActions(
+            onDone = { stopEditing(SettingsTextField.AddonUrl) },
           ),
           modifier = Modifier
             // Shares its right edge with the rows above it, which are fillMaxWidth. At 0.8f the
             // list terminated 151dp further right than the field that adds to it.
             .fillMaxWidth()
+            .initialFocusTarget(addonUrlFieldFocus)
             .semantics {
               contentDescription = context.getString(R.string.settings_new_addon_url_description)
             }
@@ -962,6 +995,11 @@ fun SettingsScreen(
               focusJumper,
               down = addonRevealFocus,
               up = if (addons.isEmpty()) clearKeyFocus else lastRemoveFocus,
+              isEditing = editingField == SettingsTextField.AddonUrl,
+              onStartEditing = {
+                startEditing(SettingsTextField.AddonUrl, addonUrlFieldFocus)
+              },
+              onStopEditing = { stopEditing(SettingsTextField.AddonUrl) },
             ),
         )
         Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
@@ -1067,10 +1105,12 @@ fun SettingsScreen(
         OutlinedTextField(
           value = audioLanguage,
           onValueChange = {
+            if (it != audioLanguage) invalidateConnectionVerdict()
             audioLanguage = it
             playbackNotice = null
           },
-          enabled = playbackReady && !playbackMutationInFlight,
+          enabled = playbackReady && !playbackBusy,
+          readOnly = editingField != SettingsTextField.AudioLanguage,
           singleLine = true,
           placeholder = {
             Text(
@@ -1087,6 +1127,15 @@ fun SettingsScreen(
             autoCorrectEnabled = false,
             keyboardType = KeyboardType.Ascii,
             imeAction = ImeAction.Next,
+            showKeyboardOnFocus = false,
+          ),
+          keyboardActions = KeyboardActions(
+            onNext = {
+              // Next is a real edit transition, not a navigation-mode landing. Make the subtitle
+              // field editable before moving focus; its frame-delayed effect keeps Gboard open.
+              editingField = SettingsTextField.SubtitleLanguage
+              focusJumper.leaveTextField(subtitleLanguageFocus)
+            },
           ),
           modifier = Modifier
             .widthIn(max = 460.dp)
@@ -1095,7 +1144,16 @@ fun SettingsScreen(
             .semantics {
               contentDescription = context.getString(R.string.settings_audio_language_label)
             }
-            .fieldNav(focusJumper, down = subtitleLanguageFocus, up = addButtonFocus),
+            .fieldNav(
+              focusJumper,
+              down = subtitleLanguageFocus,
+              up = addButtonFocus,
+              isEditing = editingField == SettingsTextField.AudioLanguage,
+              onStartEditing = {
+                startEditing(SettingsTextField.AudioLanguage, audioLanguageFocus)
+              },
+              onStopEditing = { stopEditing(SettingsTextField.AudioLanguage) },
+            ),
         )
         Text(
           stringResource(R.string.settings_subtitle_language_label),
@@ -1105,10 +1163,12 @@ fun SettingsScreen(
         OutlinedTextField(
           value = subtitleLanguage,
           onValueChange = {
+            if (it != subtitleLanguage) invalidateConnectionVerdict()
             subtitleLanguage = it
             playbackNotice = null
           },
-          enabled = playbackReady && !playbackMutationInFlight,
+          enabled = playbackReady && !playbackBusy,
+          readOnly = editingField != SettingsTextField.SubtitleLanguage,
           singleLine = true,
           placeholder = {
             Text(
@@ -1126,6 +1186,10 @@ fun SettingsScreen(
             autoCorrectEnabled = false,
             keyboardType = KeyboardType.Ascii,
             imeAction = ImeAction.Done,
+            showKeyboardOnFocus = false,
+          ),
+          keyboardActions = KeyboardActions(
+            onDone = { stopEditing(SettingsTextField.SubtitleLanguage) },
           ),
           modifier = Modifier
             .widthIn(max = 460.dp)
@@ -1134,11 +1198,20 @@ fun SettingsScreen(
             .semantics {
               contentDescription = context.getString(R.string.settings_subtitle_language_label)
             }
-            .fieldNav(focusJumper, down = playbackLanguageSaveFocus, up = audioLanguageFocus),
+            .fieldNav(
+              focusJumper,
+              down = playbackLanguageSaveFocus,
+              up = audioLanguageFocus,
+              isEditing = editingField == SettingsTextField.SubtitleLanguage,
+              onStartEditing = {
+                startEditing(SettingsTextField.SubtitleLanguage, subtitleLanguageFocus)
+              },
+              onStopEditing = { stopEditing(SettingsTextField.SubtitleLanguage) },
+            ),
         )
         NebulaButton(
           text = stringResource(R.string.settings_apply_language_preferences),
-          enabled = playbackReady && !playbackMutationInFlight,
+          enabled = playbackReady && !playbackBusy,
           onClick = {
             val submittedAudio = audioLanguage
             val submittedSubtitles = subtitleLanguage
@@ -1185,7 +1258,7 @@ fun SettingsScreen(
               R.string.settings_subtitle_size,
               stringResource(playbackSubtitleSize.labelResource()),
             ),
-            enabled = playbackReady && !playbackMutationInFlight,
+            enabled = playbackReady && !playbackBusy,
             onClick = {
               val next = SubtitleSize.stepped(playbackSubtitleSize, 1)
               playbackMutationInFlight = true
@@ -1214,7 +1287,7 @@ fun SettingsScreen(
               R.string.settings_audio_output,
               stringResource(playbackAudioOutput.labelResource()),
             ),
-            enabled = playbackReady && !playbackMutationInFlight,
+            enabled = playbackReady && !playbackBusy,
             onClick = {
               val next = AudioOutputMode.stepped(playbackAudioOutput, 1)
               playbackMutationInFlight = true
@@ -1263,7 +1336,7 @@ fun SettingsScreen(
                 R.string.settings_autoplay_next_off
               },
             ),
-            enabled = playbackReady && !playbackMutationInFlight,
+            enabled = playbackReady && !playbackBusy,
             onClick = {
               val next = !playback.autoPlayNext
               playbackMutationInFlight = true
@@ -1296,7 +1369,7 @@ fun SettingsScreen(
               playback.upNextCountdownSeconds,
               playback.upNextCountdownSeconds,
             ),
-            enabled = playbackReady && playback.autoPlayNext && !playbackMutationInFlight,
+            enabled = playbackReady && playback.autoPlayNext && !playbackBusy,
             onClick = {
               val next = PlaybackPreferencePolicy.nextCountdownSeconds(
                 playback.upNextCountdownSeconds,
@@ -1326,7 +1399,7 @@ fun SettingsScreen(
         }
         NebulaButton(
           text = stringResource(R.string.settings_reset_playback_defaults),
-          enabled = playbackReady && !playbackMutationInFlight,
+          enabled = playbackReady && !playbackBusy,
           style = NebulaButtonStyle.Ghost,
           onClick = {
             pendingPlaybackResetFeedback = null
@@ -1467,6 +1540,7 @@ fun SettingsScreen(
                 if (it != subtitlesUrl) invalidateConnectionVerdict()
                 subtitlesUrl = it
               },
+              readOnly = editingField != SettingsTextField.SubtitlesUrl,
               singleLine = true,
               placeholder = { Text(SubtitlesClient.OPENSUBTITLES_V3_BASE) },
               visualTransformation = if (showSubtitlesUrl) {
@@ -1481,17 +1555,31 @@ fun SettingsScreen(
                 autoCorrectEnabled = false,
                 keyboardType = KeyboardType.Uri,
                 imeAction = ImeAction.Done,
+                showKeyboardOnFocus = false,
+              ),
+              keyboardActions = KeyboardActions(
+                onDone = { stopEditing(SettingsTextField.SubtitlesUrl) },
               ),
               // Down goes to Save, which is the only thing that commits this value - the reason the
               // button now sits below the field instead of above it.
               modifier = Modifier
                 .fillMaxWidth()
+                .initialFocusTarget(subtitlesUrlFieldFocus)
                 .semantics {
                   contentDescription = context.getString(
                     R.string.settings_subtitles_addon_url_description,
                   )
                 }
-                .fieldNav(focusJumper, down = subtitlesRevealFocus, up = advancedFocus),
+                .fieldNav(
+                  focusJumper,
+                  down = subtitlesRevealFocus,
+                  up = advancedFocus,
+                  isEditing = editingField == SettingsTextField.SubtitlesUrl,
+                  onStartEditing = {
+                    startEditing(SettingsTextField.SubtitlesUrl, subtitlesUrlFieldFocus)
+                  },
+                  onStopEditing = { stopEditing(SettingsTextField.SubtitlesUrl) },
+                ),
             )
             NebulaButton(
               text = stringResource(
@@ -1927,34 +2015,83 @@ private fun SectionNotice(notice: Notice) {
 }
 
 /**
- * Sends D-pad up and down to explicit neighbours before the text field can eat them.
+ * Gives a Settings field two TV modes: D-pad focus for navigation, explicit Center/Enter editing.
  *
- * A key is only reported handled when focus actually moved, or when the jump that will move it is
- * already under way. requestFocus throws for a requester attached to nothing - the addon list is
- * empty, the Advanced section is collapsed - and the previous version of this claimed those keys
- * anyway, which left the viewer pressing a direction that did nothing at all.
+ * Every caller is `readOnly` in navigation mode. That is intentionally stronger than
+ * [KeyboardOptions.showKeyboardOnFocus]: the value-based Material3 field ignored that option on
+ * Google TV and still opened Gboard as soon as D-pad focus landed. Center/Enter first makes only
+ * this field editable, then its caller opens the keyboard after a frame. Up/Down ends editing
+ * before going to a named neighbour, which also recovers after BACK hid Gboard without changing
+ * Compose focus. Losing focus is the final reset path.
  *
  * Since the page became a lazy list, "attached to nothing" also covers a section that is merely
  * off screen, which is why the move goes through [SettingsFocusJumper] rather than straight to the
  * requester: only it can tell a target that does not exist from one that has been scrolled out and
  * disposed, and bring the second kind back.
  */
+internal enum class SettingsTextField {
+  TmdbKey,
+  AddonUrl,
+  AudioLanguage,
+  SubtitleLanguage,
+  SubtitlesUrl,
+}
+
+internal enum class SettingsFieldKeyAction { NavigateUp, NavigateDown, Edit }
+
+internal fun settingsFieldKeyAction(
+  key: Key,
+  type: KeyEventType,
+  isEditing: Boolean,
+): SettingsFieldKeyAction? = when {
+  type != KeyEventType.KeyDown -> null
+  key == Key.DirectionDown -> SettingsFieldKeyAction.NavigateDown
+  key == Key.DirectionUp -> SettingsFieldKeyAction.NavigateUp
+  key == Key.DirectionCenter -> SettingsFieldKeyAction.Edit
+  (key == Key.Enter || key == Key.NumPadEnter) && !isEditing -> SettingsFieldKeyAction.Edit
+  else -> null
+}
+
 private fun Modifier.fieldNav(
   jumper: SettingsFocusJumper,
   down: InitialFocusTarget?,
   up: InitialFocusTarget?,
+  isEditing: Boolean,
+  onStartEditing: () -> Unit,
+  onStopEditing: () -> Unit,
 ): Modifier =
-  onPreviewKeyEvent { event ->
-    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-    val target = when (event.key) {
-      Key.DirectionDown -> down
-      Key.DirectionUp -> up
-      // Left and right belong to the caret. Nothing on this screen needs them: every
-      // button sits under the field it belongs to, not beside it.
-      else -> null
-    }
-    target != null && jumper.jump(target)
+  onFocusChanged { state ->
+    if (!state.hasFocus) onStopEditing()
   }
+    // Preserve activation for TalkBack/switch access while readOnly removes the field's editing
+    // action. This action exposes no field value and uses the same delayed start path as Center.
+    .semantics {
+      onClick {
+        onStartEditing()
+        true
+      }
+    }
+    .onPreviewKeyEvent { event ->
+      val action = settingsFieldKeyAction(event.key, event.type, isEditing)
+      val target = when (action) {
+        SettingsFieldKeyAction.NavigateDown -> down
+        SettingsFieldKeyAction.NavigateUp -> up
+        // Left and right belong to the caret. Hardware Enter belongs to the IME once editable, so
+        // Done/Next can fire. Key-up is ignored to prevent a second move.
+        SettingsFieldKeyAction.Edit, null -> null
+      }
+      if (action == SettingsFieldKeyAction.Edit) {
+        onStartEditing()
+        true
+      } else if (target != null) {
+        // BACK hides Gboard but leaves this field editable and focused. Flip readOnly first so an
+        // input connection cannot follow focus to the next navigation stop.
+        onStopEditing()
+        jumper.leaveTextField(target)
+      } else {
+        false
+      }
+    }
 
 /** The two reorder controls an addon row carries, and so the two nodes focus can land on. */
 internal enum class AddonMoveControl { Up, Down }
@@ -2050,20 +2187,59 @@ private class SettingsFocusJumper(
   private var pending: Job? = null
 
   /**
+   * A text field's preview handler must decide whether to consume the D-pad event immediately.
+   * [InitialFocusTarget.focused] is updated by onFocusChanged after requestFocus returns, so reading
+   * it in that same handler reports the old field as focused and hands the key back to EditText.
+   *
+   * Every field neighbour is an explicit target whose enabled state matches the source field. A
+   * successfully dispatched request is therefore the correct synchronous handled result; focus
+   * landing is still observed normally on the following focus event.
+   */
+  fun leaveTextField(target: InitialFocusTarget): Boolean =
+    jump(target, consumePlacedRequest = true)
+
+  /**
    * @return true when the key that asked for this move has been dealt with - either focus moved
    *   now, or a scroll that will move it is running. False means nothing happened and the key
    *   still belongs to whoever else wants it, which is the verdict a live-but-unfocusable target
    *   has always produced.
    */
-  fun jump(target: InitialFocusTarget): Boolean {
+  fun jump(target: InitialFocusTarget): Boolean = jump(target, consumePlacedRequest = false)
+
+  private fun jump(
+    target: InitialFocusTarget,
+    consumePlacedRequest: Boolean,
+  ): Boolean {
     // `placed` is cleared on dispose, so it reads as "there is a node here now", not "there was
     // one once". A live node answers within this frame exactly as it did before the page was
     // lazy - and a live node that refuses (disabled, not focusable yet) also answers as it did.
     if (target.placed) {
-      return runCatching {
+      val dispatched = runCatching {
         target.requester.requestFocus()
-        target.focused
-      }.getOrDefault(false)
+      }.isSuccess
+      if (!dispatched) return false
+      if (target.focused) return true
+      if (!consumePlacedRequest) return false
+
+      // requestFocus() returns before InitialFocusTarget's onFocusChanged callback runs. That is
+      // why a text field must consume a successfully dispatched direction immediately, but it also
+      // means a placed lazy-list item just outside the viewport can report success and never take
+      // focus. Verify the handoff on the next frame; if it did not land, bring the target's section
+      // back and use the same bounded recovery as a fully disposed item. This also makes a quick
+      // double-Up after closing the TV keyboard as reliable as two slower remote presses.
+      val section = itemOf[target] ?: return true
+      pending?.cancel()
+      pending = scope.launch {
+        withFrameNanos { }
+        if (target.focused) return@launch
+        listState.scrollToItem(section.ordinal)
+        repeat(FocusRecoveryFrames) {
+          withFrameNanos { }
+          if (target.focused) return@launch
+          if (target.placed) runCatching { target.requester.requestFocus() }
+        }
+      }
+      return true
     }
     // Not placed and not ours: the caller aimed at something this screen never composes, which is
     // the case the old runCatching existed for. Leave the key alone.

@@ -126,6 +126,7 @@ fun SearchScreen(
   onItemClick: (MediaType, Int) -> Unit,
   onOpenSettings: () -> Unit = {},
   focusQueryRequest: Int = 0,
+  onFocusQueryRequestHandled: (Int) -> Unit = {},
 ) {
   val results by viewModel.searchResults.collectAsStateWithLifecycle()
   val requested by viewModel.searchQuery.collectAsStateWithLifecycle()
@@ -188,6 +189,14 @@ fun SearchScreen(
     label = "Search query field",
     enabled = focusQueryRequest > 0,
   )
+  // The request belongs to the navigation event, not to this screen's lifetime. Clear it only
+  // after focus actually lands so Details -> BACK restores the result card instead of replaying a
+  // bare hardware-Search request and stealing focus back to the field.
+  LaunchedEffect(focusQueryRequest, queryField.focused) {
+    if (focusQueryRequest > 0 && queryField.focused) {
+      onFocusQueryRequestHandled(focusQueryRequest)
+    }
+  }
 
   // Pressing Retry disposes the only focusable the failed state had, and what replaces it is a
   // spinner with none at all - which leaves the D-pad pointing at nothing until something asks for

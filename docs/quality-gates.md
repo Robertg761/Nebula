@@ -21,6 +21,10 @@ APK built from `apps/android-tv-host`.
 - Credential-free isolated-emulator tests pass on Android TV API 26 and API 34:
   `./scripts/run-tv-instrumentation.sh 26` and
   `./scripts/run-tv-instrumentation.sh 34` from the repository root.
+- Never point `:app:connectedDebugAndroidTest` directly at a personal TV. The tests reject
+  unguarded physical hardware and Gradle retains the target APK by default, but the supported
+  hardware workflow is `scripts/run-tv-instrumentation-physical.sh`; it is the layer that can
+  restore DataStore after the instrumentation process dies or disconnects.
 - The wrapper JAR/distribution, dependency locks, and verification metadata
   match the reviewed build graph.
 - Docs updated when behavior or configuration changes.

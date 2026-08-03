@@ -1,6 +1,7 @@
 package com.stremioshell.host.tv.ui
 
 import com.stremioshell.host.tv.SettingsSaveUpdate
+import com.stremioshell.host.tv.SettingsSaveOperation
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -24,5 +25,28 @@ class SettingsSaveUpdateTest {
   @Test
   fun completedProbeFinishesPendingNavigationSuccessfully() {
     assertTrue(SettingsSaveUpdate.Complete("connected").completionSuccess()!!)
+  }
+
+  @Test
+  fun operationRemainsRunningAfterPersistenceUntilProbeFinishes() {
+    assertTrue(SettingsSaveOperation(requestId = 1).running)
+    assertTrue(
+      SettingsSaveOperation(
+        requestId = 1,
+        update = SettingsSaveUpdate.Persisted("saved"),
+      ).running,
+    )
+    assertFalse(
+      SettingsSaveOperation(
+        requestId = 1,
+        update = SettingsSaveUpdate.Complete("connected"),
+      ).running,
+    )
+    assertFalse(
+      SettingsSaveOperation(
+        requestId = 1,
+        update = SettingsSaveUpdate.Failed("failed"),
+      ).running,
+    )
   }
 }

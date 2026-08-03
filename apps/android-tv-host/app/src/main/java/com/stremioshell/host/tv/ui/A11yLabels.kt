@@ -73,4 +73,14 @@ object A11yLabels {
   /** The button's own text is a tick and a dash, neither of which says what pressing it does. */
   fun watchlistButton(title: String, inList: Boolean): String =
     if (inList) "Remove $title from My List" else "Add $title to My List"
+
+  /** A focused recovery action includes the failure that made the action necessary. */
+  fun failureRecovery(message: String, action: String): String {
+    val context = message.trim()
+    val label = action.trim()
+    if (context.isEmpty()) return label
+    if (label.isEmpty()) return context
+    val separator = if (context.last() in ".!?") " " else ". "
+    return context + separator + label
+  }
 }

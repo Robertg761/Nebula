@@ -3,11 +3,15 @@ package com.stremioshell.host.tv.ui
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -19,10 +23,11 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -30,13 +35,21 @@ import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.tv.material3.Border
 import androidx.tv.material3.Icon
@@ -45,9 +58,11 @@ import androidx.tv.material3.Surface
 import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.stremioshell.host.R
 import com.stremioshell.host.tv.TvAppViewModel
 import com.stremioshell.host.tv.pairing.PairingConnectionCheck
+import com.stremioshell.host.tv.pairing.PairingVisibilityGate
 import com.stremioshell.host.tv.pairing.encodeQrBitmap
 import com.stremioshell.host.tv.ui.theme.NebulaDimens
 import com.stremioshell.host.tv.ui.theme.NebulaIcon
@@ -68,12 +83,66 @@ private val QrCodeSize = 260.dp
  */
 private val PairPanelSize = QrCodeSize + 48.dp
 
+/**
+ * The title is a 38dp line; 48dp leaves room for rounding and font metrics without spending the
+ * last 10dp of a 540dp viewport's safe area.
+ */
+private val PairHeaderHeightBudget = 48.dp
+private val PairMinimumInstructionPaneHeight = 160.dp
+
+/**
+ * Caps the variable-height instructions beside the fixed QR panel.
+ *
+ * At the app's minimum 540dp TV viewport this is exactly 308dp: 48dp safe area and 32dp card
+ * padding at each edge, plus the header and its 24dp gap, leave one full QR-panel height. A result
+ * containing TMDB plus all eight addons scrolls inside that pane instead of growing the card past
+ * the bottom edge.
+ */
+internal fun pairInstructionPaneMaxHeight(viewportHeight: Dp): Dp {
+  val available = viewportHeight -
+    NebulaDimens.ScreenEdge * 2 -
+    NebulaDimens.DialogPadding * 2 -
+    PairHeaderHeightBudget -
+    NebulaSpace.lg
+  return available.coerceIn(PairMinimumInstructionPaneHeight, PairPanelSize)
+}
+
+internal enum class PairScrollDirection { Up, Down }
+
+/**
+ * Pages a non-focusable result list while its action keeps TV focus.
+ *
+ * The policy deliberately sees only geometry, never connection labels, URLs or credentials.
+ */
+internal fun pairDpadScrollTarget(
+  current: Int,
+  max: Int,
+  viewport: Int,
+  direction: PairScrollDirection,
+): Int? {
+  if (max <= 0 || viewport <= 0) return null
+  val page = maxOf(1, viewport * 3 / 4)
+  val target = when (direction) {
+    PairScrollDirection.Up -> current - page
+    PairScrollDirection.Down -> current + page
+  }.coerceIn(0, max)
+  return target.takeIf { it != current }
+}
+
 @Composable
 fun PairScreen(viewModel: TvAppViewModel, onPaired: () -> Unit) {
   val state by viewModel.pairing.collectAsStateWithLifecycle()
 
-  LaunchedEffect(Unit) { viewModel.startPairing() }
-  DisposableEffect(Unit) { onDispose { viewModel.stopPairing() } }
+  // Composition survives HOME, app switching and screen-off. Resume scope does not: the LAN
+  // listener is live only while the QR screen is actually visible, and every resume gets a fresh
+  // one-shot token instead of reviving the URL that was hidden from the TV.
+  val visibilityGate = remember(viewModel) {
+    PairingVisibilityGate(viewModel::startPairing, viewModel::stopPairing)
+  }
+  LifecycleResumeEffect(visibilityGate) {
+    visibilityGate.onVisible()
+    onPauseOrDispose { visibilityGate.onHidden() }
+  }
 
   val goBack = rememberBackAction()
   val failed = state is TvAppViewModel.PairingState.Failed
@@ -84,82 +153,127 @@ fun PairScreen(viewModel: TvAppViewModel, onPaired: () -> Unit) {
   // the target moves to it: on a failure that is Retry, not the Cancel beside it.
   val primaryFocus = rememberInitialFocusTarget()
   RequestInitialFocus(target = primaryFocus, key = failed, label = "Pair primary action")
+  val instructionScroll = rememberScrollState()
+  val instructionScrollScope = rememberCoroutineScope()
 
-  Box(
-    // Every other screen honours the overscan margin through this token. The card used to be a
-    // fixed 880dp inside a 898dp content area - 9dp of margin a set with overscan enabled eats
-    // whole, taking the card's border and corners with it.
-    modifier = Modifier.fillMaxSize().padding(NebulaDimens.ScreenEdge),
-    contentAlignment = Alignment.Center,
+  // Validation replaces short instructions with as many as nine connection rows. Start at the end
+  // nearest the focused action, then let UP page back through every earlier result. The action is
+  // pinned below this scroll viewport, so it stays visible throughout.
+  LaunchedEffect(state, primaryFocus.focused, instructionScroll.maxValue) {
+    if (primaryFocus.focused) instructionScroll.animateScrollTo(instructionScroll.maxValue)
+  }
+
+  BoxWithConstraints(
+    modifier = Modifier.fillMaxSize(),
   ) {
-    Surface(
-      shape = NebulaShapes.extraLarge,
-      colors = SurfaceDefaults.colors(containerColor = NebulaPalette.Surface),
-      border = Border(
-        border = BorderStroke(1.dp, NebulaPalette.Outline),
-        shape = NebulaShapes.extraLarge,
-      ),
-      modifier = Modifier.widthIn(max = 780.dp),
+    val instructionPaneMaxHeight = pairInstructionPaneMaxHeight(maxHeight)
+    val instructionPaneHeightPx = with(LocalDensity.current) {
+      instructionPaneMaxHeight.roundToPx()
+    }
+    Box(
+      // Every other screen honours the overscan margin through this token. The card used to be a
+      // fixed 880dp inside a 898dp content area - 9dp of margin a set with overscan enabled eats
+      // whole, taking the card's border and corners with it.
+      modifier = Modifier.fillMaxSize().padding(NebulaDimens.ScreenEdge),
+      contentAlignment = Alignment.Center,
     ) {
-      Column(modifier = Modifier.padding(NebulaDimens.DialogPadding)) {
-        // ScreenHeader hangs its tick in the margin by padding itself to the screen's content
-        // line. Inside a card that indent is the card's padding instead, so the header is pulled
-        // back by its own inset: the words land flush with the copy below and the tick hangs.
-        ScreenHeader(
-          title = stringResource(R.string.pair_title),
-          modifier = Modifier.offset(x = -NebulaDimens.ScreenEdge),
-        )
-        Row(
-          modifier = Modifier.padding(top = NebulaSpace.lg),
-          horizontalArrangement = Arrangement.spacedBy(NebulaSpace.xl),
-          // The panel is the taller child in every state, so the copy beside it is centred
-          // against it rather than left hanging off the top of a half-empty card.
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(NebulaSpace.md),
+      Surface(
+        shape = NebulaShapes.extraLarge,
+        colors = SurfaceDefaults.colors(containerColor = NebulaPalette.Surface),
+        border = Border(
+          border = BorderStroke(1.dp, NebulaPalette.Outline),
+          shape = NebulaShapes.extraLarge,
+        ),
+        modifier = Modifier.widthIn(max = 780.dp),
+      ) {
+        Column(modifier = Modifier.padding(NebulaDimens.DialogPadding)) {
+          // ScreenHeader hangs its tick in the margin by padding itself to the screen's content
+          // line. Inside a card that indent is the card's padding instead, so the header is pulled
+          // back by its own inset: the words land flush with the copy below and the tick hangs.
+          ScreenHeader(
+            title = stringResource(R.string.pair_title),
+            modifier = Modifier.offset(x = -NebulaDimens.ScreenEdge),
+          )
+          Row(
+            modifier = Modifier.padding(top = NebulaSpace.lg),
+            horizontalArrangement = Arrangement.spacedBy(NebulaSpace.xl),
+            // The panel is the taller child in every state, so the copy beside it is centred
+            // against it rather than left hanging off the top of a half-empty card.
+            verticalAlignment = Alignment.CenterVertically,
           ) {
-            when (val s = state) {
-              is TvAppViewModel.PairingState.Ready -> ReadyInstructions(s.url)
-              is TvAppViewModel.PairingState.Failed -> PairingFailure(s.message)
-              is TvAppViewModel.PairingState.Validating -> PairingValidationProgress(s.addonCount)
-              is TvAppViewModel.PairingState.ValidationFailed ->
-                PairingValidationFailure(s.message, s.checks)
-              is TvAppViewModel.PairingState.Received -> PairedConfirmation(s)
-              else -> PairingProgress()
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
-              // Leads with the action, like every other surface in the app. The remote used to
-              // start on "give up" with the obvious move sitting to its right.
-              if (failed) {
+            Column(
+              modifier = Modifier
+                .weight(1f)
+                .height(instructionPaneMaxHeight)
+                // Validation rows are informational, so making each one focusable would turn nine
+                // status lines into nine fake actions. Instead, UP/DOWN pages their viewport while
+                // Retry/Leave/Continue keeps real focus and stays visible below it.
+                .onPreviewKeyEvent { event ->
+                  if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                  val direction = when (event.key) {
+                    Key.DirectionUp -> PairScrollDirection.Up
+                    Key.DirectionDown -> PairScrollDirection.Down
+                    else -> return@onPreviewKeyEvent false
+                  }
+                  val target = pairDpadScrollTarget(
+                    current = instructionScroll.value,
+                    max = instructionScroll.maxValue,
+                    viewport = instructionPaneHeightPx,
+                    direction = direction,
+                  ) ?: return@onPreviewKeyEvent false
+                  instructionScrollScope.launch { instructionScroll.scrollTo(target) }
+                  true
+                },
+              verticalArrangement = Arrangement.spacedBy(NebulaSpace.md),
+            ) {
+              Column(
+                modifier = Modifier
+                  .weight(1f)
+                  .verticalScroll(instructionScroll),
+              ) {
+                when (val s = state) {
+                  is TvAppViewModel.PairingState.Ready -> ReadyInstructions(s.url)
+                  is TvAppViewModel.PairingState.Failed -> PairingFailure(s.message)
+                  is TvAppViewModel.PairingState.Validating ->
+                    PairingValidationProgress(s.addonCount)
+                  is TvAppViewModel.PairingState.ValidationFailed ->
+                    PairingValidationFailure(s.message, s.checks)
+                  is TvAppViewModel.PairingState.Received -> PairedConfirmation(s)
+                  else -> PairingProgress()
+                }
+              }
+              Row(horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap)) {
+                // Leads with the action, like every other surface in the app. The remote used to
+                // start on "give up" with the obvious move sitting to its right.
+                if (failed) {
+                  NebulaButton(
+                    text = stringResource(R.string.action_retry),
+                    onClick = { viewModel.startPairing() },
+                    style = NebulaButtonStyle.Primary,
+                    icon = Icons.Filled.Refresh,
+                    modifier = Modifier.initialFocusTarget(primaryFocus.takeIf { failed }),
+                  )
+                }
+                // One call site rather than two, so the node - and the focus sitting on it -
+                // survives the handoff instead of being destroyed at the moment the phone
+                // answers. In Received this is the only thing on screen a remote can land on,
+                // which is what keeps the D-pad alive during the wait.
                 NebulaButton(
-                  text = stringResource(R.string.action_retry),
-                  onClick = { viewModel.startPairing() },
-                  style = NebulaButtonStyle.Primary,
-                  icon = Icons.Filled.Refresh,
-                  modifier = Modifier.initialFocusTarget(primaryFocus.takeIf { failed }),
+                  text = if (received) {
+                    stringResource(R.string.action_continue)
+                  } else {
+                    // An already-started atomic DataStore commit cannot be rolled back. "Leave"
+                    // accurately describes closing this screen/server without promising otherwise.
+                    stringResource(R.string.action_leave_pairing)
+                  },
+                  onClick = if (received) onPaired else goBack,
+                  style = if (received) NebulaButtonStyle.Primary else NebulaButtonStyle.Ghost,
+                  modifier = Modifier.initialFocusTarget(primaryFocus.takeIf { !failed }),
                 )
               }
-              // One call site rather than two, so the node - and the focus sitting on it -
-              // survives the handoff instead of being destroyed at the moment the phone
-              // answers. In Received this is the only thing on screen a remote can land on,
-              // which is what keeps the D-pad alive during the wait.
-              NebulaButton(
-                text = if (received) {
-                  stringResource(R.string.action_continue)
-                } else {
-                  // An already-started atomic DataStore commit cannot be rolled back. "Leave"
-                  // accurately describes closing this screen/server without promising otherwise.
-                  stringResource(R.string.action_leave_pairing)
-                },
-                onClick = if (received) onPaired else goBack,
-                style = if (received) NebulaButtonStyle.Primary else NebulaButtonStyle.Ghost,
-                modifier = Modifier.initialFocusTarget(primaryFocus.takeIf { !failed }),
-              )
             }
+            PairPanel(state)
           }
-          PairPanel(state)
         }
       }
     }

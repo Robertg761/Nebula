@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.stremioshell.host.R
 import com.stremioshell.host.tv.channel.WatchNextSync
 import com.stremioshell.host.tv.data.AddonProbe
 import com.stremioshell.host.tv.data.MetadataCache
@@ -62,6 +63,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -175,6 +177,26 @@ sealed interface SettingsSaveUpdate {
   data class Persisted(override val message: String) : SettingsSaveUpdate
   data class Complete(override val message: String) : SettingsSaveUpdate
   data class Failed(override val message: String) : SettingsSaveUpdate
+}
+
+/**
+ * The observable state of one whole Settings save.
+ *
+ * This belongs to the ViewModel rather than the Settings composition because the operation writes
+ * two DataStores and then probes the network. Activity recreation must replace the observer, not
+ * cancel the work or leave a callback pointing at the disposed screen.
+ */
+@Immutable
+data class SettingsSaveOperation(
+  val requestId: Long,
+  val update: SettingsSaveUpdate? = null,
+  val savingPlaybackLanguages: Boolean = false,
+  val playerPrefs: PlayerPrefs? = null,
+  val submittedAudioLanguage: String? = null,
+  val submittedSubtitleLanguage: String? = null,
+) {
+  val running: Boolean
+    get() = update == null || update is SettingsSaveUpdate.Persisted
 }
 
 class TvAppViewModel(application: Application) : AndroidViewModel(application) {
@@ -343,6 +365,11 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    */
   private val settingsMutationMutex = Mutex()
   private val playerPrefsMutationMutex = Mutex()
+
+  private val _settingsSaveOperation = MutableStateFlow<SettingsSaveOperation?>(null)
+  val settingsSaveOperation: StateFlow<SettingsSaveOperation?> = _settingsSaveOperation
+  private var settingsSaveJob: Job? = null
+  private var nextSettingsSaveRequestId = 0L
 
   // What Details and its episode lists have already shown, so BACK into a title the viewer just
   // left paints it rather than spinning at them. Sized for a browsing session, not for a library:
@@ -621,6 +648,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   private companion object {
     /** One shared HTTP call is capped at 40s; every source is probed in parallel. */
     const val PAIRING_APPLY_TIMEOUT_MS = 50_000L
+    const val SETTINGS_SAVE_TIMEOUT_MS = 60_000L
     const val PAIRING_CLOSED_MESSAGE = "Pairing was closed before the settings could be saved."
     const val SEARCH_KEY_REQUIRED_MESSAGE = "Add your TMDB API key in Settings to search."
 
@@ -1481,23 +1509,30 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     mutation: suspend () -> Unit,
   ) {
     viewModelScope.launch {
-      val result = runCatching {
-        playerPrefsMutationMutex.withLock {
-          val before = playerPrefsStore.get()
-          mutation()
-          val after = playerPrefsStore.get()
-          PlayerPrefsMutationResult(
-            outcome = if (after == before) {
-              SettingsMutationResult.Unchanged
-            } else {
-              SettingsMutationResult.Changed
-            },
-            prefs = after,
-          )
-        }
-      }.getOrElse { PlayerPrefsMutationResult(SettingsMutationResult.Failed) }
-      onResult(result)
+      onResult(mutatePlayerPrefsNow(mutation))
     }
+  }
+
+  private suspend fun mutatePlayerPrefsNow(
+    mutation: suspend () -> Unit,
+  ): PlayerPrefsMutationResult = try {
+    playerPrefsMutationMutex.withLock {
+      val before = playerPrefsStore.get()
+      mutation()
+      val after = playerPrefsStore.get()
+      PlayerPrefsMutationResult(
+        outcome = if (after == before) {
+          SettingsMutationResult.Unchanged
+        } else {
+          SettingsMutationResult.Changed
+        },
+        prefs = after,
+      )
+    }
+  } catch (cancelled: CancellationException) {
+    throw cancelled
+  } catch (_: Throwable) {
+    PlayerPrefsMutationResult(SettingsMutationResult.Failed)
   }
 
   /** Runs the TMDB and every-addon checks concurrently for Settings and pairing alike. */
@@ -1528,55 +1563,143 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     )
   }
 
-  fun saveSettings(
+  /**
+   * Starts one complete Settings transaction and returns the id the UI should observe.
+   *
+   * The initial state is published synchronously, before the coroutine can run, so a recreation
+   * between the button press and the first suspension can always reconnect to the same request.
+   */
+  fun startSettingsSave(
     tmdbKey: String,
     subtitlesBaseUrl: String,
-    onStatus: (SettingsSaveUpdate) -> Unit,
-  ) {
-    viewModelScope.launch {
+    audioLanguage: String? = null,
+    subtitleLanguage: String? = null,
+  ): Long {
+    settingsSaveJob?.cancel()
+    val requestId = ++nextSettingsSaveRequestId
+    val initial = SettingsSaveOperation(
+      requestId = requestId,
+      savingPlaybackLanguages = audioLanguage != null && subtitleLanguage != null,
+      submittedAudioLanguage = audioLanguage,
+      submittedSubtitleLanguage = subtitleLanguage,
+    )
+    _settingsSaveOperation.value = initial
+    settingsSaveJob = viewModelScope.launch {
+      var operation = initial
+      var persisted = false
       try {
-        val resolved = settingsMutationMutex.withLock {
-          // Add/remove/reorder persist immediately. Read that list inside the same lock instead of
-          // accepting a compositional snapshot: a rapid Save after a list edit must not overwrite
-          // the edit with the previous frame's value.
-          val currentAddons = settings.addonManifestUrls.first()
-          SettingsSaveGuard.resolve(
-            SettingsDraft(tmdbKey, currentAddons, subtitlesBaseUrl),
-            StoredSettings(settings.tmdbApiKey.first(), currentAddons),
-          ).also { result ->
-            settings.setConfiguration(
-              result.tmdbKey,
-              result.addonUrls,
-              result.subtitlesBaseUrl,
+        withTimeout(SETTINGS_SAVE_TIMEOUT_MS) {
+          if (operation.savingPlaybackLanguages) {
+            val playbackResult = mutatePlayerPrefsNow {
+              playerPrefsStore.setLanguages(audioLanguage!!, subtitleLanguage!!)
+            }
+            if (playbackResult.outcome == SettingsMutationResult.Failed) {
+              publishSettingsSave(
+                operation.copy(
+                  savingPlaybackLanguages = false,
+                  update = SettingsSaveUpdate.Failed(
+                    getApplication<Application>().getString(
+                      R.string.settings_save_playback_languages_failed,
+                    ),
+                  ),
+                ),
+              )
+              return@withTimeout
+            }
+            operation = operation.copy(
+              savingPlaybackLanguages = false,
+              playerPrefs = playbackResult.prefs,
             )
+            publishSettingsSave(operation)
           }
+
+          val resolved = settingsMutationMutex.withLock {
+            // Add/remove/reorder persist immediately. Read that list inside the same lock instead
+            // of accepting a compositional snapshot: a rapid Save after a list edit must not
+            // overwrite the edit with the previous frame's value.
+            val currentAddons = settings.addonManifestUrls.first()
+            SettingsSaveGuard.resolve(
+              SettingsDraft(tmdbKey, currentAddons, subtitlesBaseUrl),
+              StoredSettings(settings.tmdbApiKey.first(), currentAddons),
+            ).also { result ->
+              settings.setConfiguration(
+                result.tmdbKey,
+                result.addonUrls,
+                result.subtitlesBaseUrl,
+              )
+            }
+          }
+          persisted = true
+          // Persisting the key is what makes Home load its rails, so start that load here, with the
+          // key we just wrote (the exposed flow has not caught up yet). loadRails de-dupes it
+          // against the load Home asks for when it next composes, so the save produces exactly one.
+          if (resolved.tmdbKey.isNotBlank()) loadRails(resolved.tmdbKey, force = true)
+          val kept = SettingsSaveGuard.keptNotice(resolved)
+          operation = operation.copy(
+            update = SettingsSaveUpdate.Persisted(
+              listOfNotNull(kept, "Saved. Checking connections...").joinToString("  "),
+            ),
+          )
+          publishSettingsSave(operation)
+
+          val probe = probeConfiguration(resolved.tmdbKey, resolved.addonUrls)
+          val status = SettingsStatus.tmdbStatus(resolved.tmdbKey, probe.tmdbConnected) +
+            "   |   " + SettingsStatus.addonStatus(probe.addons)
+          publishSettingsSave(
+            operation.copy(
+              update = SettingsSaveUpdate.Complete(
+                listOfNotNull(kept, status).joinToString("  "),
+              ),
+            ),
+          )
         }
-        // Persisting the key is what makes Home load its rails, so start that load here, with the
-        // key we just wrote (the exposed flow has not caught up yet). loadRails de-dupes it against
-        // the load Home asks for when it next composes, so the save produces exactly one. The
-        // connection checks below can block for ~30s each, and a load kicked off after them would
-        // land long after Home had rendered and blank it back to "Loading catalogs..." mid-scroll.
-        if (resolved.tmdbKey.isNotBlank()) loadRails(resolved.tmdbKey, force = true)
-        val kept = SettingsSaveGuard.keptNotice(resolved)
-        onStatus(
-          SettingsSaveUpdate.Persisted(
-            listOfNotNull(kept, "Saved. Checking connections...").joinToString("  "),
+      } catch (_: TimeoutCancellationException) {
+        val message = if (persisted) {
+          getApplication<Application>().getString(R.string.settings_save_watchdog_persisted)
+        } else {
+          getApplication<Application>().getString(
+            R.string.settings_save_watchdog_unconfirmed,
+            getApplication<Application>().getString(R.string.app_name),
+          )
+        }
+        publishSettingsSave(
+          operation.copy(
+            savingPlaybackLanguages = false,
+            update = if (persisted) {
+              SettingsSaveUpdate.Complete(message)
+            } else {
+              SettingsSaveUpdate.Failed(message)
+            },
           ),
         )
-
-        val probe = probeConfiguration(resolved.tmdbKey, resolved.addonUrls)
-        val status = SettingsStatus.tmdbStatus(resolved.tmdbKey, probe.tmdbConnected) +
-          "   |   " + SettingsStatus.addonStatus(probe.addons)
-        onStatus(SettingsSaveUpdate.Complete(listOfNotNull(kept, status).joinToString("  ")))
       } catch (cancelled: CancellationException) {
         throw cancelled
       } catch (_: Throwable) {
-        onStatus(
-          SettingsSaveUpdate.Failed(
-            "Couldn't save settings. Check the TV's available storage and try again.",
+        publishSettingsSave(
+          operation.copy(
+            savingPlaybackLanguages = false,
+            update = SettingsSaveUpdate.Failed(
+              "Couldn't save settings. Check the TV's available storage and try again.",
+            ),
           ),
         )
       }
     }
+    return requestId
   }
+
+  /** Cancels only the request the caller still owns; a stale screen cannot cancel a newer save. */
+  fun cancelSettingsSave(requestId: Long) {
+    if (_settingsSaveOperation.value?.requestId != requestId) return
+    settingsSaveJob?.cancel()
+    settingsSaveJob = null
+    _settingsSaveOperation.value = null
+  }
+
+  private fun publishSettingsSave(operation: SettingsSaveOperation) {
+    if (_settingsSaveOperation.value?.requestId == operation.requestId) {
+      _settingsSaveOperation.value = operation
+    }
+  }
+
 }

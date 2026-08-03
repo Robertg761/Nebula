@@ -108,4 +108,16 @@ class A11yLabelsTest {
     assertEquals("Remove Dune from My List", A11yLabels.watchlistButton("Dune", inList = true))
     assertEquals("Add Dune to My List", A11yLabels.watchlistButton("Dune", inList = false))
   }
+
+  @Test
+  fun `failure recovery announces its context before the action`() {
+    assertEquals(
+      "No stream addons are configured. Open Settings",
+      A11yLabels.failureRecovery("No stream addons are configured", "Open Settings"),
+    )
+    assertEquals(
+      "The request timed out. Retry",
+      A11yLabels.failureRecovery("The request timed out.", "Retry"),
+    )
+  }
 }

@@ -62,9 +62,11 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -628,6 +630,8 @@ fun FailureMessage(
 ) {
   val firstActionFocus = rememberInitialFocusTarget()
   val hasAction = actionLabel != null && onAction != null
+  val primaryActionLabel = actionLabel.orEmpty()
+  val retryLabel = stringResource(R.string.action_retry)
   RequestInitialFocus(
     target = firstActionFocus,
     key = message to actionLabel,
@@ -656,7 +660,9 @@ fun FailureMessage(
         // These strings come straight off an HTTP or addon failure and are of unbounded length;
         // without a measure one runs past the overscan margin and is physically clipped.
         textAlign = TextAlign.Center,
-        modifier = Modifier.widthIn(max = 640.dp),
+        modifier = Modifier.widthIn(max = 640.dp).semantics {
+          liveRegion = LiveRegionMode.Assertive
+        },
       )
       if (hasAction || onRetry != null) {
         Row(
@@ -665,19 +671,27 @@ fun FailureMessage(
         ) {
           if (hasAction) {
             NebulaButton(
-              text = actionLabel!!,
+              text = primaryActionLabel,
               onClick = onAction!!,
               style = NebulaButtonStyle.Primary,
-              modifier = Modifier.initialFocusTarget(firstActionFocus),
+              modifier = Modifier
+                .initialFocusTarget(firstActionFocus)
+                .semantics {
+                  contentDescription = A11yLabels.failureRecovery(message, primaryActionLabel)
+                },
             )
           }
           if (onRetry != null) {
             NebulaButton(
-              text = stringResource(R.string.action_retry),
+              text = retryLabel,
               onClick = onRetry,
               style = if (hasAction) NebulaButtonStyle.Secondary else NebulaButtonStyle.Primary,
               icon = Icons.Filled.Refresh,
-              modifier = Modifier.initialFocusTarget(firstActionFocus.takeIf { !hasAction }),
+              modifier = Modifier
+                .initialFocusTarget(firstActionFocus.takeIf { !hasAction })
+                .semantics {
+                  contentDescription = A11yLabels.failureRecovery(message, retryLabel)
+                },
             )
           }
         }

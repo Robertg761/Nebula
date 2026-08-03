@@ -45,6 +45,11 @@
   <string name="player_next_episode">Next episode</string>
   <string name="player_controls_hint">OK selects   |   LEFT/RIGHT moves   |   DOWN to the bar   |   BACK hides</string>
   <string name="player_scrub_hint">OK play/pause   |   LEFT/RIGHT 10s   |   UP for controls   |   DOWN hides</string>
+  <string name="player_scrub_position">Playback position</string>
+  <string name="player_scrub_position_state">%1$s of %2$s</string>
+  <string name="player_scrub_position_state_unknown">%1$s elapsed</string>
+  <string name="player_seek_back_ten_seconds">Seek back 10 seconds</string>
+  <string name="player_seek_forward_ten_seconds">Seek forward 10 seconds</string>
   <string name="player_ends_at">Ends at %1$s</string>
   <string name="player_no_next_episode">No next episode</string>
   <string name="player_starting_next_episode">Starting next episode</string>

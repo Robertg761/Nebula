@@ -7,6 +7,22 @@ package com.stremioshell.host.tv.player
  */
 object PlaybackTimeline {
   /**
+   * Converts Compose's float accessibility progress request into a safe native seek target.
+   * Unknown/non-finite timelines expose step actions but not an adjustable range.
+   */
+  fun accessibilitySeekTarget(requestedSec: Float, durationSec: Double): Double? {
+    if (
+      !requestedSec.isFinite() ||
+      !durationSec.isFinite() ||
+      durationSec <= 0.0 ||
+      durationSec > Float.MAX_VALUE.toDouble()
+    ) {
+      return null
+    }
+    return requestedSec.toDouble().coerceIn(0.0, durationSec)
+  }
+
+  /**
    * Wall-clock seconds left at [speed], or null when the duration is unknown
    * (mpv reports 0 until it has one, and never for some live streams).
    */

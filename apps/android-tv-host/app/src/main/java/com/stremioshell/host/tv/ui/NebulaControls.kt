@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -59,6 +60,11 @@ import com.stremioshell.host.tv.ui.theme.nebulaButtonGlow
  */
 enum class NebulaButtonStyle { Primary, Secondary, Ghost, Danger }
 
+internal object NebulaButtonFocusPolicy {
+  fun canFocus(enabled: Boolean, focusableWhenDisabled: Boolean): Boolean =
+    enabled || focusableWhenDisabled
+}
+
 /**
  * The app's button.
  *
@@ -74,6 +80,7 @@ fun NebulaButton(
   style: NebulaButtonStyle = NebulaButtonStyle.Secondary,
   icon: ImageVector? = null,
   enabled: Boolean = true,
+  focusableWhenDisabled: Boolean = true,
 ) {
   val shape = NebulaShapes.large
   val colors = when (style) {
@@ -143,7 +150,11 @@ fun NebulaButton(
     } else {
       PaddingValues(horizontal = NebulaSpace.lg, vertical = NebulaSpace.sm)
     },
-    modifier = modifier,
+    // Most disabled controls retain focus so disabling the pressed node cannot strand the D-pad.
+    // Callers with permanently unavailable edge actions can explicitly remove those inert stops.
+    modifier = modifier.focusProperties {
+      canFocus = NebulaButtonFocusPolicy.canFocus(enabled, focusableWhenDisabled)
+    },
   ) {
     if (icon != null) {
       // Decorative: the label beside it already names the action, and a described icon would make

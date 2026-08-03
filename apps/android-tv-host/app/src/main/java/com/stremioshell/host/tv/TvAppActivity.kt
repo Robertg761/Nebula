@@ -34,6 +34,19 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
+private const val STATE_PENDING_KIND = "tv.pending_launch.kind"
+private const val STATE_PENDING_ID = "tv.pending_launch.id"
+private const val STATE_PENDING_WATCH_TYPE = "tv.pending_launch.watch.type"
+private const val STATE_PENDING_WATCH_TMDB = "tv.pending_launch.watch.tmdb"
+private const val STATE_PENDING_WATCH_SEASON = "tv.pending_launch.watch.season"
+private const val STATE_PENDING_WATCH_EPISODE = "tv.pending_launch.watch.episode"
+private const val STATE_PENDING_WATCH_POSITION = "tv.pending_launch.watch.position"
+private const val STATE_PENDING_SEARCH_QUERY = "tv.pending_launch.search.query"
+
+private const val PENDING_WATCH_NEXT = "watch_next"
+private const val PENDING_SEARCH = "search"
+private const val PENDING_SETTINGS = "settings"
+
 /**
  * Native Compose TV app: TMDB catalogs + Comet (Real-Debrid) streams + libmpv
  * playback. Runs alongside the WebView shell until it reaches parity, then
@@ -73,36 +86,12 @@ class TvAppActivity : ComponentActivity() {
   private val pendingStreams = mutableStateOf<Screen.Streams?>(null)
 
   /**
-   * The title a Watch Next row on the TV home asked to reopen, parsed off the
-   * launch intent.
-   *
-   * Held rather than acted on: routing it needs a starting destination on TvApp,
-   * which this activity does not own yet (see the deep-link patch in the Watch
-   * Next notes). Until that lands, a Watch Next press opens Home - the same place
-   * the launcher icon goes, which is where it went before the row existed.
-   *
-   * Compose state, and populated from onNewIntent as well, because singleTask
-   * means a second press while the app is already up arrives as a new intent into
-   * a running composition rather than as a fresh onCreate.
+   * The one external/remote launch request TvApp has not consumed yet. Event identity is Compose
+   * state as well as payload, so two identical search/deep-link requests remain distinct effects.
+   * Populated on a fresh launch and from onNewIntent because this Activity is singleTask.
    */
-  internal val pendingWatchNextTarget = mutableStateOf<WatchNextTarget?>(null)
-
-  /**
-   * A query the Assistant handed us ("search for dune on <app>"), or an empty one when
-   * the remote's search key was pressed and only the destination was asked for.
-   *
-   * Compose state and populated from onNewIntent for the same reason as
-   * [pendingWatchNextTarget]: singleTask means a second ask while the app is already up
-   * arrives as a new intent into a running composition, not as a fresh onCreate.
-   */
-  internal val pendingSearch = mutableStateOf<SearchLaunch?>(null)
-
-  /**
-   * A `stremio-tv://settings` link: launcher shortcuts and the baseline-profile generator,
-   * which needs a deterministic route to Settings that no focus or IME state can divert.
-   * Compose state and fed from onNewIntent, on the same singleTask terms as the two above.
-   */
-  internal val pendingOpenSettings = mutableStateOf(false)
+  private val pendingLaunches = PendingLaunchTracker()
+  private val pendingLaunchEvent = mutableStateOf<PendingLaunchEvent?>(null)
 
   /**
    * The player is started for a result purely so it can hand an episode back for
@@ -123,7 +112,15 @@ class TvAppActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     val watchStore = WatchStateStore(applicationContext)
-    route(intent)
+    when (val seed = PendingLaunchPolicy.onCreate(
+      restoringState = savedInstanceState != null,
+      restoredPending = savedInstanceState?.pendingLaunchEvent(),
+      retainedIntentRequest = requestOf(intent),
+    )) {
+      is PendingLaunchSeed.Fresh -> queueLaunch(seed.request)
+      is PendingLaunchSeed.Restored -> restoreLaunch(seed.event)
+      null -> Unit
+    }
 
     if (BuildConfig.DEBUG) {
       // Debug-only: allow test automation to inject settings via intent extras.
@@ -139,6 +136,12 @@ class TvAppActivity : ComponentActivity() {
     }
     setContent {
       NebulaTheme {
+        val launchEvent = pendingLaunchEvent.value
+        val watchNextEvent = launchEvent?.takeIf { it.request is PendingLaunch.WatchNext }
+        val searchEvent = launchEvent?.takeIf { it.request is PendingLaunch.Search }
+        val settingsEvent = launchEvent?.takeIf { it.request == PendingLaunch.Settings }
+        val watchNextLaunch = (watchNextEvent?.request as? PendingLaunch.WatchNext)?.target
+        val searchLaunch = (searchEvent?.request as? PendingLaunch.Search)?.launch
         TvApp(
           streamLauncher = StreamLauncher { screen, stream ->
             if (launchInFlight.compareAndSet(false, true)) {
@@ -165,7 +168,8 @@ class TvAppActivity : ComponentActivity() {
           },
           pendingStreams = pendingStreams.value,
           onPendingStreamsHandled = { pendingStreams.value = null },
-          pendingDeepLink = pendingWatchNextTarget.value?.let { target ->
+          pendingLaunchId = launchEvent?.id,
+          pendingDeepLink = watchNextLaunch?.let { target ->
             Screen.Details(
               type = if (target.mediaType == WatchNextDeepLink.TYPE_SHOW) {
                 MediaType.Show
@@ -177,11 +181,15 @@ class TvAppActivity : ComponentActivity() {
               initialEpisode = target.episode,
             )
           },
-          onPendingDeepLinkHandled = { pendingWatchNextTarget.value = null },
-          pendingSearch = pendingSearch.value,
-          onPendingSearchHandled = { pendingSearch.value = null },
-          pendingOpenSettings = pendingOpenSettings.value,
-          onPendingOpenSettingsHandled = { pendingOpenSettings.value = false },
+          onPendingDeepLinkHandled = {
+            watchNextEvent?.let(::consumeLaunch)
+          },
+          pendingSearch = searchLaunch,
+          onPendingSearchHandled = {
+            searchEvent?.let(::consumeLaunch)
+          },
+          pendingOpenSettings = settingsEvent != null,
+          onPendingOpenSettingsHandled = { settingsEvent?.let(::consumeLaunch) },
         )
         UpdatePromptHost()
       }
@@ -196,18 +204,40 @@ class TvAppActivity : ComponentActivity() {
     route(intent)
   }
 
+  override fun onSaveInstanceState(outState: Bundle) {
+    pendingLaunches.current?.let(outState::putPendingLaunch)
+    super.onSaveInstanceState(outState)
+  }
+
   /**
-   * Files a launch intent under the one thing it asks for. Never clears a pending
-   * request: a plain relaunch says nothing about a deep link the composition has not
-   * picked up yet.
+   * Files a destination request as the newest event. A plain relaunch changes nothing: it says
+   * nothing about a request the composition has not picked up yet.
    */
   private fun route(intent: Intent?) {
-    when (val request = LaunchIntents.route(intent?.action, intent?.dataString, queryOf(intent))) {
-      is LaunchRequest.OpenWatchNext -> pendingWatchNextTarget.value = request.target
-      is LaunchRequest.OpenSearch -> pendingSearch.value = request.launch
-      LaunchRequest.OpenSettings -> pendingOpenSettings.value = true
-      LaunchRequest.Launch -> Unit
-    }
+    PendingLaunchPolicy.from(requestOf(intent))?.let(::queueLaunch)
+  }
+
+  private fun requestOf(intent: Intent?): LaunchRequest =
+    LaunchIntents.route(intent?.action, intent?.dataString, queryOf(intent))
+
+  /**
+   * Replaces any older destination request. The pending state is one ordered event, even though
+   * TvApp exposes its three payload shapes separately.
+   */
+  private fun queueLaunch(request: PendingLaunch) {
+    val event = pendingLaunches.enqueue(request)
+    pendingLaunchEvent.value = event
+  }
+
+  private fun restoreLaunch(event: PendingLaunchEvent) {
+    pendingLaunches.restore(event)
+    pendingLaunchEvent.value = event
+  }
+
+  /** Ignores a stale callback if a newer request arrived before the old effect was cancelled. */
+  private fun consumeLaunch(event: PendingLaunchEvent) {
+    if (pendingLaunches.consume(event.id) == null) return
+    pendingLaunchEvent.value = null
   }
 
   /**
@@ -232,7 +262,7 @@ class TvAppActivity : ComponentActivity() {
    */
   override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
     if (SearchKeys.opensSearch(keyCode)) {
-      pendingSearch.value = SearchLaunch("")
+      queueLaunch(PendingLaunch.Search(SearchLaunch("")))
       return true
     }
     return super.onKeyDown(keyCode, event)
@@ -299,4 +329,60 @@ class TvAppActivity : ComponentActivity() {
     // a row the viewer just dismissed must not still be there behind them.
     WatchNextSync.publish(this, force = true)
   }
+}
+
+private fun Bundle.putPendingLaunch(event: PendingLaunchEvent) {
+  putLong(STATE_PENDING_ID, event.id)
+  when (val request = event.request) {
+    is PendingLaunch.WatchNext -> {
+      putString(STATE_PENDING_KIND, PENDING_WATCH_NEXT)
+      putString(STATE_PENDING_WATCH_TYPE, request.target.mediaType)
+      putInt(STATE_PENDING_WATCH_TMDB, request.target.tmdbId)
+      request.target.season?.let { putInt(STATE_PENDING_WATCH_SEASON, it) }
+      request.target.episode?.let { putInt(STATE_PENDING_WATCH_EPISODE, it) }
+      putLong(STATE_PENDING_WATCH_POSITION, request.target.resumePositionMs)
+    }
+    is PendingLaunch.Search -> {
+      putString(STATE_PENDING_KIND, PENDING_SEARCH)
+      putString(STATE_PENDING_SEARCH_QUERY, request.launch.query)
+    }
+    PendingLaunch.Settings ->
+      putString(STATE_PENDING_KIND, PENDING_SETTINGS)
+  }
+}
+
+private fun Bundle.pendingLaunchEvent(): PendingLaunchEvent? {
+  val id = getLong(STATE_PENDING_ID, 0L)
+  if (id <= 0L) return null
+  val request = when (getString(STATE_PENDING_KIND)) {
+    PENDING_WATCH_NEXT -> {
+      val mediaType = getString(STATE_PENDING_WATCH_TYPE) ?: return null
+      val tmdbId = getInt(STATE_PENDING_WATCH_TMDB, 0)
+      if (
+        tmdbId <= 0 ||
+        (mediaType != WatchNextDeepLink.TYPE_MOVIE && mediaType != WatchNextDeepLink.TYPE_SHOW)
+      ) {
+        null
+      } else {
+        PendingLaunch.WatchNext(
+          WatchNextTarget(
+            mediaType = mediaType,
+            tmdbId = tmdbId,
+            season = getInt(STATE_PENDING_WATCH_SEASON)
+              .takeIf { containsKey(STATE_PENDING_WATCH_SEASON) },
+            episode = getInt(STATE_PENDING_WATCH_EPISODE)
+              .takeIf { containsKey(STATE_PENDING_WATCH_EPISODE) },
+            resumePositionMs = getLong(STATE_PENDING_WATCH_POSITION, 0L)
+              .coerceAtLeast(0L),
+          )
+        )
+      }
+    }
+    PENDING_SEARCH -> PendingLaunch.Search(
+      SearchLaunch(getString(STATE_PENDING_SEARCH_QUERY).orEmpty())
+    )
+    PENDING_SETTINGS -> PendingLaunch.Settings
+    else -> null
+  }
+  return request?.let { PendingLaunchEvent(id, it) }
 }

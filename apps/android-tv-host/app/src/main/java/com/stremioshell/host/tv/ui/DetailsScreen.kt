@@ -95,6 +95,7 @@ import com.stremioshell.host.tv.data.tmdb.CastMember
 import com.stremioshell.host.tv.data.tmdb.DetailsMetadata
 import com.stremioshell.host.tv.data.tmdb.EpisodeItem
 import com.stremioshell.host.tv.data.tmdb.MediaDetails
+import com.stremioshell.host.tv.data.tmdb.MediaItem
 import com.stremioshell.host.tv.data.tmdb.MediaType
 import com.stremioshell.host.tv.ui.theme.NebulaAccentBrushVertical
 import com.stremioshell.host.tv.ui.theme.NebulaBackdropScrim
@@ -169,6 +170,71 @@ private const val FOCUS_LINE_FRACTION = 0.18f
 
 /** Placeholder rows drawn while a season is in flight. */
 private const val EPISODE_SKELETON_ROWS = 3
+
+private const val DETAILS_FOCUS_HEADER_PRIMARY = "header:primary"
+private const val DETAILS_FOCUS_HEADER_START_OVER = "header:start-over"
+private const val DETAILS_FOCUS_EPISODE_PREFIX = "episode:"
+private const val DETAILS_FOCUS_SIMILAR_PREFIX = "similar:"
+
+private fun detailsEpisodeFocusKey(season: Int, episode: Int): String =
+  "$DETAILS_FOCUS_EPISODE_PREFIX$season:$episode"
+
+private fun detailsSimilarFocusKey(itemKey: String): String =
+  "$DETAILS_FOCUS_SIMILAR_PREFIX$itemKey"
+
+internal fun shouldRequestDetailsPrimaryFocus(
+  primaryFocusClaimed: Boolean,
+  resumeFocusClaimed: Boolean,
+  resumeTargetReady: Boolean,
+  returnFocusPending: Boolean,
+): Boolean =
+  !primaryFocusClaimed && !resumeFocusClaimed && !resumeTargetReady && !returnFocusPending
+
+internal fun hasPendingDetailsReturnFocus(
+  generation: Int,
+  handledGeneration: Int,
+  focusKey: String?,
+): Boolean = focusKey != null && generation > handledGeneration
+
+/**
+ * A temporary loading anchor is only allowed to hand focus to the eventual result while the
+ * viewer is still standing on it. Once that anchor has actually received focus, leaving it is an
+ * explicit navigation decision and the completed request must not pull focus back.
+ */
+internal fun loadingAnchorWasSuperseded(
+  requestActive: Boolean,
+  stillLoading: Boolean,
+  anchorWasFocused: Boolean,
+  anchorFocused: Boolean,
+): Boolean = requestActive && stillLoading && anchorWasFocused && !anchorFocused
+
+internal enum class EpisodeLoadFocusState { Loading, Failed, Empty, Populated }
+
+internal enum class SeasonRetryFocusDestination {
+  None,
+  SeasonChip,
+  ResumeEpisode,
+  FirstEpisode,
+  Retry,
+}
+
+internal fun seasonRetryFocusDestination(
+  active: Boolean,
+  state: EpisodeLoadFocusState,
+  resumeTargetReady: Boolean,
+): SeasonRetryFocusDestination {
+  if (!active) return SeasonRetryFocusDestination.None
+  return when (state) {
+    EpisodeLoadFocusState.Loading -> SeasonRetryFocusDestination.SeasonChip
+    EpisodeLoadFocusState.Failed -> SeasonRetryFocusDestination.Retry
+    EpisodeLoadFocusState.Empty -> SeasonRetryFocusDestination.SeasonChip
+    EpisodeLoadFocusState.Populated -> if (resumeTargetReady) {
+      SeasonRetryFocusDestination.ResumeEpisode
+    } else {
+      SeasonRetryFocusDestination.FirstEpisode
+    }
+  }
+}
 
 /**
  * What the header's play control starts, and what it says.
@@ -287,8 +353,37 @@ fun DetailsScreen(
     // Aiming focus at the stopped-at episode is a one-shot arrival gesture; picking a season by
     // hand hands focus control back to the user.
     var resumeAimArmed by rememberSaveable(type, tmdbId) { mutableStateOf(screen.initialEpisode != null) }
+    // Deliberately not saveable: a real activity recreation loses window focus and must be free to
+    // run the arrival request again. Covered-route BACK is distinguished below by its explicit,
+    // saveable return generation, which suppresses both arrival requests until the named node wins.
+    var primaryFocusClaimed by remember(type, tmdbId) { mutableStateOf(false) }
+    var resumeFocusClaimed by remember(type, tmdbId) { mutableStateOf(false) }
+    // Passive focus restoration is not enough across route disposal: remember exactly which
+    // navigation-producing control launched the child route, then explicitly request that node
+    // when this saved screen is composed again. The generation distinguishes a new round-trip from
+    // ordinary recomposition. Both counters are saveable: once a return is handled, an unrelated
+    // activity recreation must not turn that old navigation into a fresh focus request.
+    var returnFocusKey by rememberSaveable(type, tmdbId) { mutableStateOf<String?>(null) }
+    var returnFocusGeneration by rememberSaveable(type, tmdbId) { mutableIntStateOf(0) }
+    var handledReturnFocusGeneration by rememberSaveable(type, tmdbId) { mutableIntStateOf(0) }
+    var returnLoadingAnchorClaimed by remember(type, tmdbId) { mutableStateOf(false) }
+    val armReturnFocus: (String) -> Unit = { key ->
+      returnFocusKey = key
+      returnFocusGeneration++
+      returnLoadingAnchorClaimed = false
+    }
+    var retryFocusActive by rememberSaveable(type, tmdbId, selectedSeason) {
+      mutableStateOf(false)
+    }
+    var retryLoadingAnchorClaimed by remember(type, tmdbId, selectedSeason) {
+      mutableStateOf(false)
+    }
     val primaryFocus = rememberInitialFocusTarget()
     val resumeFocus = rememberInitialFocusTarget()
+    val returnFocus = rememberInitialFocusTarget()
+    val returnWaitingFocus = rememberInitialFocusTarget()
+    val retryLoadingFocus = rememberInitialFocusTarget()
+    val retryResultFocus = rememberInitialFocusTarget()
     val goBack = rememberBackAction()
     val listState = rememberLazyListState()
 
@@ -428,15 +523,18 @@ fun DetailsScreen(
     val allEpisodesUpcoming = episodes is LoadState.Ready &&
       episodes.value.isNotEmpty() &&
       episodes.value.all { AirDate.isUpcoming(it.airDate, today) }
+    val retrySeason = {
+      retryLoadingAnchorClaimed = false
+      retryFocusActive = true
+      viewModel.loadSeason(media.item.tmdbId, selectedSeason)
+    }
     val retryHeader: (() -> Unit)? = when {
       headerPlay != null ||
         media.imdbId == null ||
         !hasSeasonRow ||
         episodesPending ||
         allEpisodesUpcoming -> null
-      else -> {
-        { viewModel.loadSeason(media.item.tmdbId, selectedSeason) }
-      }
+      else -> retrySeason
     }
 
     // The episode this arrival should mark and focus, once its season is the one on screen.
@@ -444,19 +542,62 @@ fun DetailsScreen(
     // Focus only moves down to the episode once it is really in the loaded list. Until then - and
     // forever, if the season never loads - the header action keeps the D-pad alive, so this never
     // trades a working screen for a request aimed at a node that does not exist.
-    val canAimAtEpisode = resumeEpisode != null &&
+    val resumeTargetReady = resumeEpisode != null &&
       episodes is LoadState.Ready && episodes.value.any { it.episodeNumber == resumeEpisode }
-    // Latched, because RequestInitialFocus re-runs whenever `enabled` changes: letting the primary
-    // request switch back on (the user picks another season, the resumed episode stops being the
-    // target) would yank focus off whatever they had just moved to.
-    // Deliberately not saveable: an activity recreation loses focus outright, so the primary
-    // request has to be free to re-arm and put it back.
-    var handedToEpisode by remember(type, tmdbId) { mutableStateOf(false) }
+
+    val returnFocusPending = hasPendingDetailsReturnFocus(
+      generation = returnFocusGeneration,
+      handledGeneration = handledReturnFocusGeneration,
+      focusKey = returnFocusKey,
+    )
+    // An episode may briefly be absent while its saved season reloads. Keep a temporary focus on
+    // the selected season instead of falling back early; once the result lands the exact episode
+    // gets its request. A genuinely missing target falls back to the header's unconditional node.
+    val resolvedReturnFocusKey = if (!returnFocusPending) {
+      null
+    } else {
+      when (val key = returnFocusKey) {
+        DETAILS_FOCUS_HEADER_PRIMARY -> key
+        DETAILS_FOCUS_HEADER_START_OVER ->
+          key.takeIf { headerPlay?.resume != null } ?: DETAILS_FOCUS_HEADER_PRIMARY
+        else -> when {
+          key?.startsWith(DETAILS_FOCUS_EPISODE_PREFIX) == true -> when (episodes) {
+            is LoadState.Loading -> null
+            is LoadState.Failed -> DETAILS_FOCUS_HEADER_PRIMARY
+            is LoadState.Ready -> key.takeIf { wanted ->
+              episodes.value.any {
+                detailsEpisodeFocusKey(it.seasonNumber, it.episodeNumber) == wanted
+              }
+            } ?: DETAILS_FOCUS_HEADER_PRIMARY
+          }
+          key?.startsWith(DETAILS_FOCUS_SIMILAR_PREFIX) == true -> key.takeIf { wanted ->
+            media.similar.any { detailsSimilarFocusKey(it.key) == wanted }
+          } ?: DETAILS_FOCUS_HEADER_PRIMARY
+          else -> DETAILS_FOCUS_HEADER_PRIMARY
+        }
+      }
+    }
+    val returnFocusWaiting = returnFocusPending && resolvedReturnFocusKey == null
+
+    val episodeLoadFocusState = when (episodes) {
+      is LoadState.Loading -> EpisodeLoadFocusState.Loading
+      is LoadState.Failed -> EpisodeLoadFocusState.Failed
+      is LoadState.Ready -> if (episodes.value.isEmpty()) {
+        EpisodeLoadFocusState.Empty
+      } else {
+        EpisodeLoadFocusState.Populated
+      }
+    }
+    val retryFocusDestination = seasonRetryFocusDestination(
+      active = retryFocusActive,
+      state = episodeLoadFocusState,
+      resumeTargetReady = resumeTargetReady && !resumeFocusClaimed,
+    )
+
     // Captured out here because the effect below cannot read composition locals.
     val resumePeekPx = with(LocalDensity.current) { RESUME_PEEK.roundToPx() }
-    LaunchedEffect(canAimAtEpisode) {
-      if (!canAimAtEpisode) return@LaunchedEffect
-      handedToEpisode = true
+    LaunchedEffect(resumeTargetReady, resumeFocusClaimed, returnFocusPending) {
+      if (!resumeTargetReady || resumeFocusClaimed || returnFocusPending) return@LaunchedEffect
       // The episode list is lazy, so the row focus is being aimed at is very likely not composed
       // yet - a resume ten episodes into a season is off screen. Put it in view first: a focus
       // request at a node that does not exist just times out and leaves focus in the header.
@@ -476,14 +617,145 @@ fun DetailsScreen(
       target = primaryFocus,
       key = media.item.tmdbId,
       label = "Details primary action",
-      enabled = !handedToEpisode,
+      enabled = shouldRequestDetailsPrimaryFocus(
+        primaryFocusClaimed = primaryFocusClaimed,
+        resumeFocusClaimed = resumeFocusClaimed,
+        resumeTargetReady = resumeTargetReady,
+        returnFocusPending = returnFocusPending,
+      ),
     )
     RequestInitialFocus(
       target = resumeFocus,
       key = "$tmdbId:$selectedSeason:$resumeEpisode",
       label = "Resumed episode",
-      enabled = canAimAtEpisode,
+      enabled = resumeTargetReady && !resumeFocusClaimed && !returnFocusPending,
     )
+    RequestInitialFocus(
+      target = returnFocus,
+      key = "$returnFocusGeneration:$resolvedReturnFocusKey",
+      label = "Details return target",
+      enabled = returnFocusPending && resolvedReturnFocusKey != null,
+    )
+    RequestInitialFocus(
+      target = returnWaitingFocus,
+      key = "$returnFocusGeneration:$selectedSeason",
+      label = "Details return loading anchor",
+      enabled = returnFocusWaiting,
+    )
+    RequestInitialFocus(
+      target = retryLoadingFocus,
+      key = "$tmdbId:$selectedSeason:retry-loading",
+      label = "Season retry loading anchor",
+      enabled = retryFocusDestination == SeasonRetryFocusDestination.SeasonChip &&
+        !returnFocusPending,
+    )
+    RequestInitialFocus(
+      target = retryResultFocus,
+      key = "$tmdbId:$selectedSeason:$retryFocusDestination",
+      label = "Season retry result",
+      enabled = !returnFocusPending && (
+        retryFocusDestination == SeasonRetryFocusDestination.FirstEpisode ||
+          retryFocusDestination == SeasonRetryFocusDestination.Retry
+        ),
+    )
+
+    LaunchedEffect(primaryFocus.focused, resumeFocus.focused) {
+      if (primaryFocus.focused) primaryFocusClaimed = true
+      if (resumeFocus.focused) resumeFocusClaimed = true
+    }
+    LaunchedEffect(returnFocus.focused, returnFocusGeneration) {
+      if (returnFocusPending && returnFocus.focused) {
+        handledReturnFocusGeneration = returnFocusGeneration
+        // The pending flag clears on the next composition. Latch both arrival paths first so that
+        // neither one treats that transition as a cold Details open and steals focus straight back.
+        primaryFocusClaimed = true
+        resumeFocusClaimed = true
+      }
+    }
+    // Focus loss is handled by SeasonChip's onFocusChanged callback below, not by a
+    // LaunchedEffect. A D-pad move and a network result can land before the next recomposition; an
+    // effect would then observe only the settled load and miss that the viewer left while the old
+    // loading composition still owned the chip. The callback runs in that focus event and makes
+    // the viewer's navigation win before the async result can enable its handoff target.
+    val onReturnLoadingAnchorFocusChanged: (Boolean) -> Unit = { focused ->
+      if (returnFocusWaiting && focused) {
+        returnLoadingAnchorClaimed = true
+      } else if (
+        loadingAnchorWasSuperseded(
+          requestActive = returnFocusPending,
+          stillLoading = returnFocusWaiting,
+          anchorWasFocused = returnLoadingAnchorClaimed,
+          anchorFocused = focused,
+        )
+      ) {
+        // The viewer left the selected-season placeholder while the saved episode was still
+        // loading. Mark this return handled so the eventual row cannot pull them back, and latch
+        // both cold-arrival paths for the same reason.
+        handledReturnFocusGeneration = returnFocusGeneration
+        returnLoadingAnchorClaimed = false
+        primaryFocusClaimed = true
+        resumeFocusClaimed = true
+      }
+    }
+    val onRetryLoadingAnchorFocusChanged: (Boolean) -> Unit = { focused ->
+      val retryStillLoading =
+        retryFocusDestination == SeasonRetryFocusDestination.SeasonChip &&
+          episodeLoadFocusState == EpisodeLoadFocusState.Loading
+      if (retryFocusActive && retryStillLoading && focused) {
+        retryLoadingAnchorClaimed = true
+      } else if (
+        loadingAnchorWasSuperseded(
+          requestActive = retryFocusActive,
+          stillLoading = retryStillLoading,
+          anchorWasFocused = retryLoadingAnchorClaimed,
+          anchorFocused = focused,
+        )
+      ) {
+        retryFocusActive = false
+        retryLoadingAnchorClaimed = false
+      }
+    }
+    // Keep a passive-restoration fallback for a chip that was already focused when its temporary
+    // target modifier attached. Cancellation remains exclusively synchronous in the callback.
+    LaunchedEffect(returnFocusPending, returnFocusWaiting, returnWaitingFocus.focused) {
+      if (!returnFocusPending) {
+        returnLoadingAnchorClaimed = false
+      } else if (returnFocusWaiting && returnWaitingFocus.focused) {
+        returnLoadingAnchorClaimed = true
+      }
+    }
+    LaunchedEffect(
+      retryFocusActive,
+      episodeLoadFocusState,
+      retryLoadingFocus.focused,
+    ) {
+      if (!retryFocusActive) {
+        retryLoadingAnchorClaimed = false
+      } else if (
+        episodeLoadFocusState == EpisodeLoadFocusState.Loading && retryLoadingFocus.focused
+      ) {
+        retryLoadingAnchorClaimed = true
+      }
+    }
+    LaunchedEffect(
+      retryFocusActive,
+      retryFocusDestination,
+      episodeLoadFocusState,
+      retryLoadingFocus.focused,
+      retryResultFocus.focused,
+      resumeFocus.focused,
+    ) {
+      if (!retryFocusActive) return@LaunchedEffect
+      val settled = when (retryFocusDestination) {
+        SeasonRetryFocusDestination.None -> true
+        SeasonRetryFocusDestination.SeasonChip ->
+          episodeLoadFocusState == EpisodeLoadFocusState.Empty && retryLoadingFocus.focused
+        SeasonRetryFocusDestination.ResumeEpisode -> resumeFocus.focused
+        SeasonRetryFocusDestination.FirstEpisode,
+        SeasonRetryFocusDestination.Retry -> retryResultFocus.focused
+      }
+      if (settled) retryFocusActive = false
+    }
 
     LaunchedEffect(media.item.tmdbId, selectedSeason) {
       if (media.item.type == MediaType.Show && media.seasons.isNotEmpty()) {
@@ -627,8 +899,17 @@ fun DetailsScreen(
               HeaderActions(
                 play = headerPlay,
                 focusTarget = primaryFocus,
+                returnFocusKey = resolvedReturnFocusKey,
+                returnFocusTarget = returnFocus,
                 onPlay = { startOver ->
                   headerPlay?.let { playable ->
+                    armReturnFocus(
+                      if (startOver) {
+                        DETAILS_FOCUS_HEADER_START_OVER
+                      } else {
+                        DETAILS_FOCUS_HEADER_PRIMARY
+                      },
+                    )
                     onPlay(media, playable.season, playable.episode, startOver)
                   }
                 },
@@ -677,6 +958,21 @@ fun DetailsScreen(
                       SeasonChip(
                         label = season.label,
                         selected = season.seasonNumber == selectedSeason,
+                        focusTarget = returnWaitingFocus.takeIf {
+                          returnFocusWaiting && season.seasonNumber == selectedSeason
+                        },
+                        secondaryFocusTarget = retryLoadingFocus.takeIf {
+                          retryFocusDestination == SeasonRetryFocusDestination.SeasonChip &&
+                            season.seasonNumber == selectedSeason
+                        },
+                        onReturnLoadingAnchorFocusChanged =
+                          onReturnLoadingAnchorFocusChanged.takeIf {
+                            season.seasonNumber == selectedSeason
+                          },
+                        onRetryLoadingAnchorFocusChanged =
+                          onRetryLoadingAnchorFocusChanged.takeIf {
+                            season.seasonNumber == selectedSeason
+                          },
                         onClick = {
                           pickedSeason = season.seasonNumber
                           resumeAimArmed = false
@@ -713,8 +1009,13 @@ fun DetailsScreen(
                   )
                   NebulaButton(
                     text = stringResource(R.string.action_retry),
-                    onClick = { viewModel.loadSeason(media.item.tmdbId, selectedSeason) },
+                    onClick = retrySeason,
                     icon = Icons.Filled.Refresh,
+                    modifier = Modifier.initialFocusTarget(
+                      retryResultFocus.takeIf {
+                        retryFocusDestination == SeasonRetryFocusDestination.Retry
+                      },
+                    ),
                   )
                 }
               }
@@ -738,10 +1039,27 @@ fun DetailsScreen(
                   // made unfocusable: a whole unaired season would otherwise render as a block the
                   // D-pad cannot enter or read.
                   upcoming = AirDate.isUpcoming(episode.airDate, today),
-                  focusTarget = if (episode.episodeNumber == resumeEpisode) resumeFocus else null,
+                  focusTarget = when {
+                    episode.episodeNumber == resumeEpisode && !resumeFocusClaimed -> resumeFocus
+                    index == 0 &&
+                      retryFocusDestination == SeasonRetryFocusDestination.FirstEpisode ->
+                      retryResultFocus
+                    else -> null
+                  },
+                  returnFocusTarget = returnFocus.takeIf {
+                    resolvedReturnFocusKey == detailsEpisodeFocusKey(
+                      episode.seasonNumber,
+                      episode.episodeNumber,
+                    )
+                  },
                   // Clicking a watched episode replays it: its stored position is 0, so startOver
                   // would change nothing and is left false.
-                  onPlay = { onPlay(media, episode.seasonNumber, episode.episodeNumber, false) },
+                  onPlay = {
+                    armReturnFocus(
+                      detailsEpisodeFocusKey(episode.seasonNumber, episode.episodeNumber),
+                    )
+                    onPlay(media, episode.seasonNumber, episode.episodeNumber, false)
+                  },
                 )
               }
             }
@@ -753,17 +1071,17 @@ fun DetailsScreen(
             item(key = "cast", contentType = "cast") { CastRow(cast, railSpec) }
           }
           if (media.similar.isNotEmpty()) {
-            // The Home rail as-is, so recommendations are browsed with exactly the card, spacing
-            // and focus restoration the viewer already learned one screen back. It brings its own
-            // bring-into-view spec, so the column's vertical rule does not reach it.
             item(key = "similar", contentType = "similar") {
-              Box(modifier = Modifier.padding(top = SECTION_GAP)) {
-                MediaRow(
-                  title = stringResource(R.string.details_more_like_this),
-                  items = similar,
-                  onItemClick = { onItemClick(it.type, it.tmdbId) },
-                )
-              }
+              SimilarRow(
+                items = similar,
+                railSpec = railSpec,
+                returnFocusKey = resolvedReturnFocusKey,
+                returnFocusTarget = returnFocus,
+                onItemClick = {
+                  armReturnFocus(detailsSimilarFocusKey(it.key))
+                  onItemClick(it.type, it.tmdbId)
+                },
+              )
             }
           }
         }
@@ -999,6 +1317,10 @@ private fun MetadataBadges(details: MediaDetails, modifier: Modifier = Modifier)
 private fun SeasonChip(
   label: String,
   selected: Boolean,
+  focusTarget: InitialFocusTarget? = null,
+  secondaryFocusTarget: InitialFocusTarget? = null,
+  onReturnLoadingAnchorFocusChanged: ((Boolean) -> Unit)? = null,
+  onRetryLoadingAnchorFocusChanged: ((Boolean) -> Unit)? = null,
   onClick: () -> Unit,
 ) {
   val shape = NebulaShapes.large
@@ -1023,7 +1345,15 @@ private fun SeasonChip(
   }
   Button(
     onClick = onClick,
-    modifier = Modifier.semantics { this.selected = selected },
+    modifier = Modifier
+      .onFocusChanged { state ->
+        val focused = state.isFocused || state.hasFocus
+        onReturnLoadingAnchorFocusChanged?.invoke(focused)
+        onRetryLoadingAnchorFocusChanged?.invoke(focused)
+      }
+      .initialFocusTarget(focusTarget)
+      .initialFocusTarget(secondaryFocusTarget)
+      .semantics { this.selected = selected },
     colors = colors,
     shape = ButtonDefaults.shape(shape = shape),
     border = nebulaButtonBorder(shape),
@@ -1048,6 +1378,7 @@ private fun EpisodeRow(
   isResumeTarget: Boolean,
   upcoming: Boolean,
   focusTarget: InitialFocusTarget?,
+  returnFocusTarget: InitialFocusTarget?,
   onPlay: () -> Unit,
 ) {
   val airLabel = AirDate.label(episode.airDate)
@@ -1110,6 +1441,7 @@ private fun EpisodeRow(
     .padding(horizontal = NebulaDimens.ScreenEdge)
     .fillMaxWidth(EPISODE_ROW_WIDTH)
     .initialFocusTarget(focusTarget)
+    .initialFocusTarget(returnFocusTarget)
   val rowContent: @Composable () -> Unit = {
     Row(
       modifier = Modifier.padding(NebulaSpace.md),
@@ -1525,6 +1857,47 @@ private fun CastRow(members: StableList<CastMember>, railSpec: DetailsRailSpec) 
 }
 
 /**
+ * Details' recommendation rail, with one addition to the shared browse row: the card that opened a
+ * nested Details route can be named as an explicit return target after this route is rebuilt.
+ * [MediaCard]'s modifier wraps its focusable card, so [initialFocusTarget] observes descendant
+ * focus and its requester enters that card rather than making the wrapper another D-pad stop.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SimilarRow(
+  items: StableList<MediaItem>,
+  railSpec: DetailsRailSpec,
+  returnFocusKey: String?,
+  returnFocusTarget: InitialFocusTarget,
+  onItemClick: (MediaItem) -> Unit,
+) {
+  val cards = items.items
+  if (cards.isEmpty()) return
+  Column(modifier = Modifier.padding(top = SECTION_GAP).fillMaxWidth()) {
+    RailHeading(stringResource(R.string.details_more_like_this))
+    CompositionLocalProvider(LocalBringIntoViewSpec provides railSpec) {
+      LazyRow(
+        modifier = Modifier.restoreRowFocus(),
+        contentPadding = PaddingValues(horizontal = NebulaDimens.ScreenEdge),
+        horizontalArrangement = Arrangement.spacedBy(NebulaDimens.CardGap),
+      ) {
+        items(cards, key = { it.key }, contentType = { "card" }) { item ->
+          MediaCard(
+            item = item,
+            onClick = { onItemClick(item) },
+            modifier = Modifier.initialFocusTarget(
+              returnFocusTarget.takeIf {
+                returnFocusKey == detailsSimilarFocusKey(item.key)
+              },
+            ),
+          )
+        }
+      }
+    }
+  }
+}
+
+/**
  * Whole minutes left in a saved position, or null when there is no position to be part
  * way through: an unstarted or finished record has none, and "45 min left" under a
  * watched episode reads as if it had never been played.
@@ -1573,6 +1946,8 @@ private fun ResumeProgress(entry: WatchEntry?, minutesLeft: Long) {
 private fun HeaderActions(
   play: HeaderPlay?,
   focusTarget: InitialFocusTarget,
+  returnFocusKey: String?,
+  returnFocusTarget: InitialFocusTarget,
   onPlay: (startOver: Boolean) -> Unit,
   onBack: () -> Unit,
   onRetry: (() -> Unit)?,
@@ -1605,7 +1980,11 @@ private fun HeaderActions(
       } else {
         Icons.Filled.PlayArrow
       },
-      modifier = Modifier.initialFocusTarget(focusTarget)
+      modifier = Modifier
+        .initialFocusTarget(focusTarget)
+        .initialFocusTarget(
+          returnFocusTarget.takeIf { returnFocusKey == DETAILS_FOCUS_HEADER_PRIMARY },
+        )
         .then(
           if (spoken == null) {
             Modifier
@@ -1621,6 +2000,9 @@ private fun HeaderActions(
         text = stringResource(R.string.action_start_over),
         onClick = { onPlay(true) },
         icon = Icons.Filled.Refresh,
+        modifier = Modifier.initialFocusTarget(
+          returnFocusTarget.takeIf { returnFocusKey == DETAILS_FOCUS_HEADER_START_OVER },
+        ),
       )
     }
     if (currentPlay == null && onRetry != null) {

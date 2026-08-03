@@ -118,6 +118,31 @@ class StreamFilterPolicyTest {
     assertEquals(keys.size, keys.values.distinct().size)
   }
 
+  @Test
+  fun `filters round trip through activity saved state`() {
+    val filters = StreamFilters(
+      viewMode = StreamViewMode.Recommended,
+      availability = StreamAvailability.Instant,
+      dynamicRange = StreamDynamicRange.DolbyVision,
+      resolution = StreamResolution.Uhd,
+      source = "Comet",
+      sizeLimit = StreamSizeLimit.Under15Gb,
+    )
+
+    assertEquals(filters, StreamFilterState.restore(StreamFilterState.save(filters)))
+  }
+
+  @Test
+  fun `invalid saved filters fall back without crashing`() {
+    assertEquals(StreamFilters.SHOW_ALL, StreamFilterState.restore(listOf("truncated")))
+    assertEquals(
+      StreamFilters.SHOW_ALL,
+      StreamFilterState.restore(
+        listOf("not-an-enum", "not-an-enum", "not-an-enum", "not-an-enum", "", "not-an-enum"),
+      ),
+    )
+  }
+
   private fun releaseKeysByName(rated: List<RatedStream>): Map<String, String> =
     StreamPresentation.rows(rated)
       .filterIsInstance<StreamListItem.Release>()

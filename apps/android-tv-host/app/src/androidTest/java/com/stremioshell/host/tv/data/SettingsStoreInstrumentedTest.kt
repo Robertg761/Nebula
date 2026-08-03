@@ -3,6 +3,7 @@ package com.stremioshell.host.tv.data
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.stremioshell.host.tv.PhysicalTvInstrumentationGuard
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -16,14 +17,14 @@ class SettingsStoreInstrumentedTest {
 
   @Test
   fun configurationRoundTripUsesSanitizedCredentialFreeFixtures() = runBlocking {
+    PhysicalTvInstrumentationGuard.requireExternalBackupOnPhysicalDevice()
     val first = SettingsStore(context)
     val fixtureKey = "instrumentation-key-not-a-secret"
     val fixtureAddon = "https://example.invalid/manifest.json"
     val fixtureSubtitles = "https://subtitles.example.invalid/manifest.json"
 
-    // Snapshot whatever the device already holds and put it back afterwards. This suite also runs
-    // on personal devices, and a finally that wrote blanks here once erased a configured box's
-    // TMDB key and addon list - cleanup must mean "as it was", not "empty".
+    // This snapshot keeps the case self-contained. The guarded physical wrapper owns final
+    // recovery because a disconnect or process death can skip this finally block entirely.
     val previousKey = first.tmdbApiKey.first()
     val previousAddons = first.addonManifestUrls.first()
     val previousSubtitles = first.subtitlesBaseUrl.first()

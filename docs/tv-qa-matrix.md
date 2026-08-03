@@ -197,6 +197,28 @@ or sign off playback hardware. Baseline-profile generation has its own
 device-backed procedure in `docs/baseline-profile.md`; the physical playback
 cases below remain manual.
 
+Do not substitute a direct `:app:connectedDebugAndroidTest` invocation pointed at a personal TV.
+Connected-test cleanup can uninstall the target package after a test-local `@After` has restored
+its configuration, and a disconnect can skip that restoration entirely. The default Gradle
+property now retains connected-test APKs and the tests refuse unguarded physical hardware. When
+device-backed instrumentation is specifically needed, use the guarded wrapper:
+
+```bash
+source scripts/android-env.sh
+export ANDROID_SERIAL="<adb serial>"
+export NEBULA_PHYSICAL_TV_TEST_CONFIRMED=1
+./scripts/run-tv-instrumentation-physical.sh
+```
+
+If Nebula is already installed, the wrapper requires a debuggable build so `run-as` can read its
+private files. It stops the app, creates a mode-600 DataStore snapshot under the host's private
+state directory, explicitly tells Gradle to leave the APK installed, then restores and compares
+the snapshot after Gradle returns. A TV that stays disconnected cannot be restored remotely; the
+wrapper keeps the recovery directory and prints an exact `--restore` command to run after it
+reconnects. A non-debuggable personal/release install is refused before testing. The in-app
+`@After`/`finally` blocks remain useful between cases, but are not claimed as final data
+protection.
+
 Run the manual checklist on a local TV emulator plus hardware. The automated
 harness defaults to the host renderer because emulator 36.6 currently crashes
 during Android TV boot with its bundled SwiftShader on Linux. The renderer

@@ -28,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -164,7 +165,9 @@ fun StreamsScreen(
   // curation only hid releases behind a "26 of 73" it never explained - the viewer asked to
   // simply see everything their source returned. Recommended stays one press away on the
   // View chip for anyone who wants the conservative preset back.
-  var filters by remember(screen) { mutableStateOf(StreamFilters.SHOW_ALL) }
+  var filters by rememberSaveable(screen, stateSaver = StreamFiltersSaver) {
+    mutableStateOf(StreamFilters.SHOW_ALL)
+  }
   var streamListFocusTick by remember(screen) { mutableIntStateOf(0) }
   val sourceOptions = remember(rawList) { StreamFilterPolicy.sources(rawList) }
   // Read once per load, not once per press. Every regex on this screen lives behind this call, and

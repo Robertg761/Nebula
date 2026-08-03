@@ -1,5 +1,6 @@
 package com.stremioshell.host.tv.ui
 
+import android.os.Parcelable
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -72,6 +73,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.delay
+import kotlinx.parcelize.Parcelize
 
 /** Launches playback of a resolved stream; provided by the hosting activity. */
 fun interface StreamLauncher {
@@ -87,16 +89,23 @@ fun interface StreamLauncher {
 private fun stateKeyFor(index: Int, screen: Screen): String = "$index:$screen"
 
 /** A navigation request held while Settings has an unsaved draft. */
-private sealed interface SettingsExit {
-  data object Back : SettingsExit
-  data object Pair : SettingsExit
+private sealed interface SettingsExit : Parcelable {
+  @Parcelize data object Back : SettingsExit
+  @Parcelize data object Pair : SettingsExit
+  @Parcelize
   data class Root(val screen: Screen, val focusSearchField: Boolean = false) : SettingsExit
 }
+
+/** Clears a one-shot request only when the acknowledging screen handled this exact token. */
+internal fun consumeMatchingRequest(current: Int, handled: Int): Int =
+  if (current == handled) 0 else current
 
 /**
  * @param pendingStreams an episode the player handed back because it could not pick a
  *   stream for it on its own. Cleared through [onPendingStreamsHandled] once navigated
  *   to, so a BACK out of the picker does not immediately push it again.
+ * @param pendingLaunchId identity for the external launch request below. Two requests can carry
+ *   equal payloads, so payload equality alone cannot re-arm their one-shot effects.
  * @param pendingDeepLink a title a Watch Next row on the TV home asked to reopen.
  *   Cleared through [onPendingDeepLinkHandled] so a BACK out of Details does not push
  *   it straight back.
@@ -111,6 +120,7 @@ fun TvApp(
   streamLauncher: StreamLauncher = StreamLauncher { _, _ -> },
   pendingStreams: Screen.Streams? = null,
   onPendingStreamsHandled: () -> Unit = {},
+  pendingLaunchId: Long? = null,
   pendingDeepLink: Screen.Details? = null,
   onPendingDeepLinkHandled: () -> Unit = {},
   pendingSearch: SearchLaunch? = null,
@@ -137,12 +147,12 @@ fun TvApp(
       withFrameNanos { }
     }
   }
-  var searchFocusRequest by remember { mutableIntStateOf(0) }
-  var settingsDirty by remember { mutableStateOf(false) }
-  var pendingSettingsExit by remember { mutableStateOf<SettingsExit?>(null) }
-  var leaveAfterSave by remember { mutableStateOf<SettingsExit?>(null) }
-  var settingsSaveRequest by remember { mutableIntStateOf(0) }
-  var settingsResetRequest by remember { mutableIntStateOf(0) }
+  var searchFocusRequest by rememberSaveable { mutableIntStateOf(0) }
+  var settingsDirty by rememberSaveable { mutableStateOf(false) }
+  var pendingSettingsExit by rememberSaveable { mutableStateOf<SettingsExit?>(null) }
+  var leaveAfterSave by rememberSaveable { mutableStateOf<SettingsExit?>(null) }
+  var settingsSaveRequest by rememberSaveable { mutableIntStateOf(0) }
+  var settingsResetRequest by rememberSaveable { mutableIntStateOf(0) }
 
   fun push(screen: Screen) = backstack.add(screen)
 
@@ -244,7 +254,7 @@ fun TvApp(
   // A Watch Next row names a title, not a place in the stack. Rooting it on Home
   // means BACK out of it lands where the launcher icon would have, instead of
   // dropping straight out of the app.
-  LaunchedEffect(pendingDeepLink) {
+  LaunchedEffect(pendingLaunchId, pendingDeepLink) {
     val target = pendingDeepLink ?: return@LaunchedEffect
     openRootDestination(target)
     onPendingDeepLinkHandled()
@@ -255,7 +265,7 @@ fun TvApp(
   // have to reach into SearchScreen. Rooted on Home like the deep link, and through the
   // same drawer helper, so a search key press while already searching keeps the screen the
   // viewer is on rather than resetting it.
-  LaunchedEffect(pendingSearch) {
+  LaunchedEffect(pendingLaunchId, pendingSearch) {
     val request = pendingSearch ?: return@LaunchedEffect
     if (request.query.isNotEmpty()) viewModel.submitVoiceQuery(request.query)
     openRootDestination(Screen.Search, focusSearchField = request.query.isEmpty())
@@ -264,7 +274,7 @@ fun TvApp(
 
   // Through the same drawer helper as the rail's own Settings item, so a dirty draft is
   // guarded by its dialog and a second link while already there keeps the existing entry.
-  LaunchedEffect(pendingOpenSettings) {
+  LaunchedEffect(pendingLaunchId, pendingOpenSettings) {
     if (!pendingOpenSettings) return@LaunchedEffect
     openRootDestination(Screen.Settings)
     onPendingOpenSettingsHandled()
@@ -375,12 +385,18 @@ fun TvApp(
               onItemClick = openDetails,
               onOpenSettings = { push(Screen.Settings) },
               focusQueryRequest = searchFocusRequest,
+              onFocusQueryRequestHandled = { handled ->
+                searchFocusRequest = consumeMatchingRequest(searchFocusRequest, handled)
+              },
             )
             is Screen.Settings -> SettingsScreen(
               viewModel = viewModel,
               onPairWithPhone = ::openPairFromSettings,
               onDirtyChanged = { settingsDirty = it },
               saveRequest = settingsSaveRequest,
+              onSaveRequestHandled = { handled ->
+                settingsSaveRequest = consumeMatchingRequest(settingsSaveRequest, handled)
+              },
               resetRequest = settingsResetRequest,
               onSaveComplete = { success ->
                 val exit = leaveAfterSave

@@ -1,6 +1,7 @@
 package com.stremioshell.host.tv.ui
 
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.saveable.listSaver
 import com.stremioshell.host.tv.data.addon.AddonStream
 import com.stremioshell.host.tv.data.addon.StreamQuality
 
@@ -82,6 +83,40 @@ data class StreamFilters(
     val SHOW_ALL = StreamFilters(viewMode = StreamViewMode.All)
   }
 }
+
+/** Stable, non-secret representation used by Streams' rememberSaveable state. */
+internal object StreamFilterState {
+  fun save(filters: StreamFilters): List<String> = listOf(
+    filters.viewMode.name,
+    filters.availability.name,
+    filters.dynamicRange.name,
+    filters.resolution.name,
+    filters.source.orEmpty(),
+    filters.sizeLimit.name,
+  )
+
+  fun restore(values: List<String>): StreamFilters {
+    if (values.size != 6) return StreamFilters.SHOW_ALL
+    return StreamFilters(
+      viewMode = StreamViewMode.entries.firstOrNull { it.name == values[0] }
+        ?: StreamFilters.SHOW_ALL.viewMode,
+      availability = StreamAvailability.entries.firstOrNull { it.name == values[1] }
+        ?: StreamAvailability.Any,
+      dynamicRange = StreamDynamicRange.entries.firstOrNull { it.name == values[2] }
+        ?: StreamDynamicRange.Any,
+      resolution = StreamResolution.entries.firstOrNull { it.name == values[3] }
+        ?: StreamResolution.Any,
+      source = values[4].takeIf(String::isNotBlank),
+      sizeLimit = StreamSizeLimit.entries.firstOrNull { it.name == values[5] }
+        ?: StreamSizeLimit.Any,
+    )
+  }
+}
+
+internal val StreamFiltersSaver = listSaver<StreamFilters, String>(
+  save = { filters -> StreamFilterState.save(filters) },
+  restore = StreamFilterState::restore,
+)
 
 /**
  * Pure filtering policy so a TV does not have to manufacture addon responses to test it.
