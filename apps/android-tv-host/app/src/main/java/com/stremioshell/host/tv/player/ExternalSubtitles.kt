@@ -94,30 +94,56 @@ internal object SubtitleUrlPolicy {
  * and how far the asking has got.
  */
 sealed interface ExternalSubtitlesState {
-  /** No id to ask an addon with, so the section is not offered at all. */
+  /** Nothing to list and no id to ask an addon with, so the section is not offered at all. */
   data object Unavailable : ExternalSubtitlesState
 
-  /** Nothing asked for yet. */
+  /** An id to ask with, nothing listed yet and nothing asked for yet. */
   data object Idle : ExternalSubtitlesState
 
-  data object Loading : ExternalSubtitlesState
+  /**
+   * A search is out. The rows already on the menu ride along rather than vanishing for the
+   * duration: the stream's own files (and any earlier search's results) are still perfectly
+   * pickable while an addon takes its seconds to answer, and a list that blinks out under the
+   * D-pad drops focus out of the section.
+   */
+  data class Loading(
+    val options: List<ExternalSubtitleOption> = emptyList(),
+  ) : ExternalSubtitlesState
 
-  /** What the addon had, which may legitimately be nothing. */
-  data class Ready(val options: List<ExternalSubtitleOption>) : ExternalSubtitlesState
+  /**
+   * Everything the section is currently offering, which may legitimately be nothing.
+   *
+   * One list rather than one per source. The files a stream response named and the files a
+   * subtitles addon found are the same decision to a viewer, and keeping them in one place is
+   * what stops a search from being able to lose the stream's own list — see
+   * [ExternalSubtitles.merge].
+   */
+  data class Ready(
+    val options: List<ExternalSubtitleOption>,
+    /**
+     * Whether a search can be run at all. False for a stream that named subtitle files but
+     * carries no IMDb id: there is a list worth showing and no way to add to it, and a search row
+     * that is offered but cannot run is the worst of both.
+     */
+    val searchable: Boolean = true,
+  ) : ExternalSubtitlesState
 
   data object Failed : ExternalSubtitlesState
 }
 
 /**
- * The one row that starts a search, and reports how the last one went. Always
- * present and always focusable, whatever the state: it is the row focus is sitting
- * on when the search is started, and a row that stopped being focusable underneath
- * a viewer would drop focus out of a panel the player has taken the D-pad for.
+ * The one row that starts a search, and reports how the last one went. Present and focusable in
+ * every state that offers the section at all: it is the row focus is sitting on when the search is
+ * started, and a row that stopped being focusable underneath a viewer would drop focus out of a
+ * panel the player has taken the D-pad for.
  */
 data class ExternalSubtitlesAction(
   val label: String,
   val detail: String,
-  /** False only while a search is running, when pressing again would do nothing. */
+  /**
+   * False when pressing would do nothing: while a search is already running, and for a list that
+   * has no search behind it to run.
+   */
   val enabled: Boolean,
 )
 
@@ -143,34 +169,79 @@ object ExternalSubtitles {
   /** Enough alternatives to cover twenty languages without creating an unwalkable TV menu. */
   const val MAX_OPTIONS = 60
 
+  /**
+   * How much of an addon's answer is even looked at, the same bound and for the same reason as
+   * [EmbeddedSubtitles.MAX_CANDIDATES]: an addon is a third party, its response length is its own
+   * choice, and normalizing and grouping tens of thousands of rows to then show sixty of them is
+   * work done on the main thread of a set-top box.
+   */
+  const val MAX_CANDIDATES = MAX_OPTIONS * 4
+
   private const val UNKNOWN_LABEL = "Unknown language"
 
   fun options(
     subtitles: List<AddonSubtitle>,
     preferredLanguage: String?,
+    /**
+     * What the menu will actually put on screen for a language code. Defaults to the same
+     * `Locale` path the Android layer renders through, because the list is sorted by it: sorting
+     * by the English name while rendering the viewer's own would leave a French TV showing a list
+     * that is alphabetical in no language on screen. Injectable so the ordering can be tested
+     * without a device's locale data.
+     */
+    displayLabel: (String) -> String = ::menuLabel,
   ): List<ExternalSubtitleOption> {
     val seenUrls = HashSet<String>()
     // Insertion-ordered, so the cap below keeps the addon's own ranking within a
     // language rather than an arbitrary three of them.
     val byLanguage = LinkedHashMap<String, MutableList<String>>()
-    for (subtitle in subtitles) {
+    for (subtitle in subtitles.asSequence().take(MAX_CANDIDATES)) {
       val url = SubtitleUrlPolicy.allowedUrlOrNull(subtitle.url) ?: continue
       if (!seenUrls.add(url)) continue
       val group = byLanguage.getOrPut(LanguageCodes.normalize(subtitle.lang)) { mutableListOf() }
       if (group.size < PER_LANGUAGE) group += url
     }
     val preferred = preferredCode(preferredLanguage)
-    return byLanguage.entries
-      .sortedWith(
-        compareBy(
-          { rank(it.key, preferred) },
-          { label(it.key).lowercase(Locale.ROOT) },
-        ),
-      )
-      .flatMap { (code, urls) ->
-        urls.mapIndexed { index, url -> option(code, url, index + 1, urls.size) }
+    // Resolved once per language rather than once per row: it is the sort key as well as the
+    // label, and on Android it reaches into the platform's locale data to get there.
+    val labels = byLanguage.keys.associateWith(displayLabel)
+    val ordered = byLanguage.entries.sortedWith(
+      compareBy(
+        { rank(it.key, preferred) },
+        { labels.getValue(it.key).lowercase(Locale.ROOT) },
+      ),
+    )
+    val options = ArrayList<ExternalSubtitleOption>(minOf(MAX_OPTIONS, seenUrls.size))
+    for ((code, urls) in ordered) {
+      // Whole languages, never part of one. Each row says "2 of 3", and a cap applied to the
+      // flattened list cuts a group mid-way and leaves two rows both claiming there is a third.
+      if (options.size + urls.size > MAX_OPTIONS) break
+      urls.forEachIndexed { index, url ->
+        options += option(code, labels.getValue(code), url, index + 1, urls.size)
       }
-      .take(MAX_OPTIONS)
+    }
+    return options
+  }
+
+  /**
+   * One list out of the files a stream response named and the files a search found, the stream's
+   * own first.
+   *
+   * The stream's list is the one that cannot be got back: it arrives with the launch intent and is
+   * never fetched again, so a search result that replaced it would take it away for the rest of
+   * the session. Deduplicated by URL, since a stream and an addon quoting the same OpenSubtitles
+   * file is routine, and the copy that keeps its "Included with the stream" wording is the one
+   * that was there first.
+   */
+  fun merge(
+    embedded: List<ExternalSubtitleOption>,
+    online: List<ExternalSubtitleOption>,
+  ): List<ExternalSubtitleOption> {
+    val seenUrls = HashSet<String>()
+    val merged = ArrayList<ExternalSubtitleOption>(embedded.size + online.size)
+    for (option in embedded) if (seenUrls.add(option.url)) merged += option
+    for (option in online) if (seenUrls.add(option.url)) merged += option
+    return merged
   }
 
   /**
@@ -180,14 +251,34 @@ object ExternalSubtitles {
   fun action(state: ExternalSubtitlesState): ExternalSubtitlesAction? = when (state) {
     ExternalSubtitlesState.Unavailable -> null
     ExternalSubtitlesState.Idle -> ExternalSubtitlesAction("Search online subtitles", SOURCE, true)
-    ExternalSubtitlesState.Loading -> ExternalSubtitlesAction("Searching...", "", false)
+    is ExternalSubtitlesState.Loading -> ExternalSubtitlesAction("Searching...", "", false)
     ExternalSubtitlesState.Failed ->
       ExternalSubtitlesAction("Couldn't load subtitles", "OK tries again", true)
-    is ExternalSubtitlesState.Ready -> if (state.options.isEmpty()) {
-      ExternalSubtitlesAction("No subtitles found", "OK searches again", true)
-    } else {
-      ExternalSubtitlesAction("Search again", SOURCE, true)
+    is ExternalSubtitlesState.Ready -> when {
+      // Nothing listed and nothing to search: the section has nothing to be.
+      !state.searchable && state.options.isEmpty() -> null
+      // A list with no search behind it. The row still exists because the section's rows hang off
+      // it, but pressing it can only do nothing, so it says so by being unpressable.
+      !state.searchable -> ExternalSubtitlesAction("Included subtitles", NO_SEARCH, false)
+      state.options.isEmpty() ->
+        ExternalSubtitlesAction("No subtitles found", "OK searches again", true)
+      else -> ExternalSubtitlesAction("Search again", SOURCE, true)
     }
+  }
+
+  /**
+   * The name the menu puts on a language, resolved the way the Android layer resolves it: the
+   * platform's own name for the code in the viewer's locale, falling back to the English name
+   * when the platform has nothing (which is what a three-letter code gets from a plain JVM) and
+   * to the code itself when even that table has never heard of it.
+   */
+  fun menuLabel(code: String): String {
+    val canonical = LanguageCodes.normalize(code)
+    if (canonical.isBlank()) return UNKNOWN_LABEL
+    val localized = Locale.forLanguageTag(canonical).getDisplayLanguage(Locale.getDefault()).trim()
+    return localized.takeUnless {
+      it.isBlank() || it.equals(canonical, ignoreCase = true)
+    } ?: label(canonical)
   }
 
   /**
@@ -208,10 +299,16 @@ object ExternalSubtitles {
   private fun label(code: String): String =
     LanguageCodes.displayName(code).ifBlank { UNKNOWN_LABEL }
 
-  private fun option(code: String, url: String, ordinal: Int, total: Int) = ExternalSubtitleOption(
+  private fun option(
+    code: String,
+    label: String,
+    url: String,
+    ordinal: Int,
+    total: Int,
+  ) = ExternalSubtitleOption(
     url = url,
     lang = code,
-    label = label(code),
+    label = label,
     detail = if (total == 1) SOURCE_LABEL else "$SOURCE_LABEL $ordinal of $total",
     trackTitle = if (total == 1) TRACK_LABEL else "$TRACK_LABEL $ordinal",
     source = ExternalSubtitleSource.Online,
@@ -221,6 +318,9 @@ object ExternalSubtitles {
 
   private const val SOURCE_LABEL = "Online subtitle"
   private const val TRACK_LABEL = "Online"
+
+  /** Why the row is there without being pressable; see [action]. */
+  private const val NO_SEARCH = "Included with the stream"
 
   /** Named because the default addon is the one every Stremio client offers. */
   private const val SOURCE = "OpenSubtitles"

@@ -66,8 +66,16 @@ object UpNextPolicy {
   /**
    * Smooth countdown-bar progress in the closed 0..1 range.
    *
-   * Kept beside [secondsLeft] and [isDue] so all three views of the same timer
-   * agree at negative, zero-length, exact-end and overrun boundaries.
+   * The only implementation, kept beside [secondsLeft] and [isDue] so that all
+   * three views of the same timer agree at the negative, zero-length, exact-end
+   * and overrun boundaries by construction. The player reaches it through
+   * [PlaybackFrameRate.progressRemaining], which is the name its countdown tick
+   * has always used and which now forwards here; there is no second copy of this
+   * arithmetic for the three to drift apart from.
+   *
+   * Double division rather than Float: the countdown is milliseconds and a total
+   * near [Long.MAX_VALUE] (a restored timestamp from a previous process) must
+   * still land on a full bar rather than on a rounded 1.0000001.
    */
   fun progressRemaining(elapsedMs: Long, totalMs: Long): Float {
     if (totalMs <= 0L) return 0f

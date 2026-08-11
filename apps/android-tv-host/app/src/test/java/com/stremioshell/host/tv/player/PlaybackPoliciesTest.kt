@@ -98,6 +98,35 @@ class PlaybackPoliciesTest {
   }
 
   @Test
+  fun `a trailing backslash cannot swallow the comma that separates two headers`() {
+    // mpv drops one backslash off an escaped separator and has no rule for a
+    // doubled one, so escaping by doubling handed the value the joining comma:
+    // `User-Agent: evil\,Accept: video/*` arrives at mpv as a single header whose
+    // value is `evil,Accept: video/*`. The backslash is removed instead.
+    val value = StreamRequestHeaders.mpvValue(
+      linkedMapOf(
+        "User-Agent" to "evil\\",
+        "Accept" to "video/*",
+      ),
+    )
+
+    assertEquals("User-Agent: evil,Accept: video/*", value)
+  }
+
+  @Test
+  fun `backslashes are stripped from values rather than escaped`() {
+    // None of the three allowlisted headers legitimately carries one, and any
+    // count of them that survived would leave the meaning of the following comma
+    // depending on that count.
+    val value = StreamRequestHeaders.mpvValue(
+      linkedMapOf("Accept-Language" to "en\\\\,de\\x"),
+    )
+
+    // What mpv parses back out of this is the one header `en,dex`.
+    assertEquals("Accept-Language: en\\,dex", value)
+  }
+
+  @Test
   fun `all control characters and oversized header input are rejected`() {
     val headers = linkedMapOf(
       "LeadingTab" to "\tBearer secret",
@@ -179,7 +208,27 @@ class PlaybackPoliciesTest {
   }
 
   @Test
-  fun `countdown progress drains smoothly and clamps`() {
+  fun `the name the countdown tick calls is the up-next timer's own arithmetic`() {
+    // One implementation, two names: the activity's tick calls this one, and the
+    // card's seconds and due-check come from UpNextPolicy. They used to be two
+    // copies that agreed by luck, so the boundaries are asserted as equality with
+    // the surviving implementation rather than as literals.
+    listOf(
+      -5_000L to 15_000L,
+      0L to 15_000L,
+      7_500L to 15_000L,
+      15_000L to 15_000L,
+      20_000L to 15_000L,
+      0L to 0L,
+      0L to -1L,
+      0L to Long.MAX_VALUE,
+    ).forEach { (elapsedMs, totalMs) ->
+      assertEquals(
+        UpNextPolicy.progressRemaining(elapsedMs, totalMs),
+        PlaybackFrameRate.progressRemaining(elapsedMs, totalMs),
+        0f,
+      )
+    }
     assertEquals(1f, PlaybackFrameRate.progressRemaining(0, 15_000), 0f)
     assertEquals(0.5f, PlaybackFrameRate.progressRemaining(7_500, 15_000), 0f)
     assertEquals(0f, PlaybackFrameRate.progressRemaining(20_000, 15_000), 0f)

@@ -94,6 +94,17 @@ data class EpisodeItem(
 )
 
 // --- Wire models -----------------------------------------------------------
+//
+// Decoded with `coerceInputValues` (see TmdbClient.JSON), which turns an explicit `null` into the
+// property's declared default. That only works for properties that have one, so the rule below is
+// deliberate rather than incidental:
+//
+//  - anything that is displayed defaults, because a null in it must cost that field and not the
+//    whole page. TMDB genuinely writes `"overview": null`, `"name": null` and friends.
+//  - the numeric ids and the season/episode numbers stay required. They are identity, not display:
+//    a record coerced to id 0 or episode 0 would be indistinguishable from a real one and would go
+//    on to key a watch-state row, a Details navigation or a stream request. TMDB has never omitted
+//    them, and failing loudly is the right answer if it ever does.
 
 @Serializable
 internal data class TmdbPagedResults(
@@ -122,7 +133,7 @@ internal data class TmdbEntry(
 internal data class TmdbExternalIds(@SerialName("imdb_id") val imdbId: String? = null)
 
 @Serializable
-internal data class TmdbGenre(val name: String)
+internal data class TmdbGenre(val name: String = "")
 
 @Serializable
 internal data class TmdbSeason(

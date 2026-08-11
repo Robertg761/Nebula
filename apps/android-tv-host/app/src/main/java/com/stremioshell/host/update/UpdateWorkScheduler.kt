@@ -77,13 +77,44 @@ object UpdateWorkScheduler {
   /**
    * The flag is what keeps this to one cancellation: without it every launch would query the
    * database for a name that has not existed since the update to this build.
+   *
+   * It is written only once the cancellation has actually happened. `cancelUniqueWork` is
+   * asynchronous - it hands back an [androidx.work.Operation] and does the database write on
+   * WorkManager's own executor - so recording the flag beside the call recorded an intention, not
+   * a fact: a process death in the gap left the flag set and v1's hourly spec running forever,
+   * next to v2's six-hourly one. This function already runs off the main thread (see the class
+   * comment), so it can simply wait for the Operation before writing anything.
+   *
+   * The flag itself is written with apply(), and the one way to lose it is a hard kill before the
+   * queued write lands. That costs a redundant cancel of a name that no longer exists on the next
+   * launch, which is the harmless direction of this trade - unlike the old order, whose failure
+   * was hourly work nothing would ever cancel again.
    */
   private fun cancelLegacyWorkOnce(context: Context, workManager: WorkManager) {
     val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     if (prefs.getBoolean(KEY_LEGACY_WORK_CANCELLED, false)) {
       return
     }
-    workManager.cancelUniqueWork(LEGACY_UNIQUE_WORK_NAME)
-    prefs.edit().putBoolean(KEY_LEGACY_WORK_CANCELLED, true).apply()
+
+    val cancelled = try {
+      workManager.cancelUniqueWork(LEGACY_UNIQUE_WORK_NAME)
+        .result
+        .get(CANCEL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+      true
+    } catch (_: InterruptedException) {
+      Thread.currentThread().interrupt()
+      false
+    } catch (_: Exception) {
+      // Timed out, or WorkManager reported a failure. Leaving the flag unset costs one more
+      // cancel attempt on the next launch, which is the cheap half of this trade.
+      false
+    }
+
+    if (cancelled) {
+      prefs.edit().putBoolean(KEY_LEGACY_WORK_CANCELLED, true).apply()
+    }
   }
+
+  /** Long enough for a database write behind a cold WorkManager, short enough not to be a hang. */
+  private const val CANCEL_TIMEOUT_SECONDS = 10L
 }

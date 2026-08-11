@@ -1,6 +1,8 @@
 package com.stremioshell.host.update
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class UpdatePromptPolicyTest {
@@ -117,6 +119,103 @@ class UpdatePromptPolicyTest {
         currentVersionName = "0.4.0",
         needsUnknownSourcesPermission = true,
         dismissedVersionName = null
+      )
+    )
+  }
+
+  @Test
+  fun `the pre-release is not the release, so the release is still offered`() {
+    assertEquals(
+      UpdatePromptPolicy.Prompt.INSTALL,
+      UpdatePromptPolicy.decide(
+        downloadedVersionName = "0.4.1",
+        currentVersionName = "0.4.1-beta.1",
+        needsUnknownSourcesPermission = false,
+        dismissedVersionName = null
+      )
+    )
+  }
+
+  @Test
+  fun `later on the beta does not silence the stable that follows it`() {
+    assertEquals(
+      UpdatePromptPolicy.Prompt.INSTALL,
+      UpdatePromptPolicy.decide(
+        downloadedVersionName = "0.4.1",
+        currentVersionName = "0.4.0",
+        needsUnknownSourcesPermission = false,
+        dismissedVersionName = "0.4.1-beta.1"
+      )
+    )
+  }
+
+  // --- Error retention --------------------------------------------------------------------------
+
+  @Test
+  fun `an error survives a re-evaluation of the same version`() {
+    // Returning from a failed installer fires ON_RESUME, which re-evaluates. The explanation and
+    // its "Check download" button have to still be there.
+    assertTrue(
+      UpdatePromptPolicy.retainsError(
+        previousVersionName = "0.4.1",
+        nextPrompt = UpdatePromptPolicy.Prompt.INSTALL,
+        nextVersionName = "0.4.1",
+      )
+    )
+    assertTrue(
+      UpdatePromptPolicy.retainsError(
+        previousVersionName = "v0.4.1-tv",
+        nextPrompt = UpdatePromptPolicy.Prompt.ENABLE_UNKNOWN_SOURCES,
+        nextVersionName = "0.4.1",
+      )
+    )
+  }
+
+  @Test
+  fun `an error does not survive the prompt resolving to nothing`() {
+    // The dialog is gone but the composable is not, so the message used to sit in state and
+    // re-surface on the next release's prompt.
+    assertFalse(
+      UpdatePromptPolicy.retainsError(
+        previousVersionName = "0.4.1",
+        nextPrompt = UpdatePromptPolicy.Prompt.NONE,
+        nextVersionName = null,
+      )
+    )
+    assertFalse(
+      UpdatePromptPolicy.retainsError(
+        previousVersionName = "0.4.1",
+        nextPrompt = UpdatePromptPolicy.Prompt.INSTALL,
+        nextVersionName = null,
+      )
+    )
+  }
+
+  @Test
+  fun `an error does not follow one version onto another`() {
+    assertFalse(
+      UpdatePromptPolicy.retainsError(
+        previousVersionName = "0.4.1",
+        nextPrompt = UpdatePromptPolicy.Prompt.INSTALL,
+        nextVersionName = "0.4.2",
+      )
+    )
+    assertFalse(
+      UpdatePromptPolicy.retainsError(
+        previousVersionName = "0.4.1-beta.1",
+        nextPrompt = UpdatePromptPolicy.Prompt.INSTALL,
+        nextVersionName = "0.4.1",
+      )
+    )
+  }
+
+  @Test
+  fun `there is nothing to retain before a version has been prompted for`() {
+    assertFalse(
+      UpdatePromptPolicy.retainsError(
+        previousVersionName = null,
+        nextPrompt = UpdatePromptPolicy.Prompt.INSTALL,
+        nextVersionName = "0.4.1",
       )
     )
   }

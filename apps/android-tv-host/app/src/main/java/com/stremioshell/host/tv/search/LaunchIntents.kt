@@ -89,23 +89,38 @@ object LaunchIntents {
    * Collapses a spoken or typed query into something a single-line field and a URL query
    * parameter can both carry: no control characters, no line breaks, no runs of spaces,
    * and never longer than [MAX_QUERY_CHARS].
+   *
+   * Walks code points rather than chars. The cap counts UTF-16 units, because that is what the
+   * field, the ViewModel and the URL builder downstream all measure - but a title with an emoji or
+   * any other astral character in it carries that character as *two* of them, and a cut between the
+   * pair leaves a lone surrogate: not a character at all, and something a URL encoder is free to
+   * mangle or reject. So a code point that would straddle the cap ends the query instead of being
+   * half-admitted.
    */
   fun sanitize(raw: String?): String {
     if (raw.isNullOrEmpty()) return ""
     val flattened = buildString(minOf(raw.length, MAX_QUERY_CHARS * 2)) {
-      for (ch in raw) {
+      var index = 0
+      while (index < raw.length) {
+        val codePoint = Character.codePointAt(raw, index)
+        val width = Character.charCount(codePoint)
+        index += width
         // Tabs, newlines and the C0/C1 ranges all become plain gaps rather than being
-        // dropped, so "dune\npart two" stays two words.
-        val space = ch.isWhitespace() || ch.isISOControl()
+        // dropped, so "dune\npart two" stays two words. isSpaceChar as well as isWhitespace,
+        // which is what Char.isWhitespace did here before: a non-breaking space is a gap too.
+        val space = Character.isWhitespace(codePoint) ||
+          Character.isSpaceChar(codePoint) ||
+          Character.isISOControl(codePoint)
         if (space) {
           if (isNotEmpty() && last() != ' ') append(' ')
         } else {
-          append(ch)
+          // Stopping *before* the character that would overflow is what keeps a pair whole; the
+          // one collapsed space this can leave behind is trimmed off below.
+          if (length + width > MAX_QUERY_CHARS) break
+          appendCodePoint(codePoint)
         }
-        // One char past the cap is enough to know a trailing trim is all that is left.
-        if (length > MAX_QUERY_CHARS) break
       }
     }
-    return flattened.take(MAX_QUERY_CHARS).trim()
+    return flattened.trim()
   }
 }

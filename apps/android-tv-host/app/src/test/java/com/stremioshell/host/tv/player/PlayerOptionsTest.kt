@@ -148,10 +148,53 @@ class PlayerOptionsTest {
     assertEquals(SubtitleBackground.Off, SubtitleBackground.DEFAULT)
     // mpv's transparent default, in mpv's own AARRGGBB spelling.
     assertEquals("#00000000", SubtitleBackground.Off.backColor)
+    // Off names the border style rather than leaving it alone: stepping back to
+    // Off has to take the box away, and the player applies these as plain writes.
     assertEquals(
-      listOf("sub-back-color" to "#00000000"),
+      listOf(
+        "sub-border-style" to "outline-and-shadow",
+        "sub-back-color" to "#00000000",
+      ),
       SubtitleBackground.Off.mpvOptions,
     )
+  }
+
+  @Test
+  fun `a background step asks for the box style, not only the colour`() {
+    // Since mpv 0.38 sub-back-color is ignored under the default border style, so
+    // the colour on its own drew nothing at all - which is what this row used to
+    // send.
+    assertEquals(
+      listOf(
+        "sub-border-style" to "background-box",
+        "sub-back-color" to "#80000000",
+      ),
+      SubtitleBackground.Dim.mpvOptions,
+    )
+    assertEquals(
+      listOf(
+        "sub-border-style" to "background-box",
+        "sub-back-color" to "#FF000000",
+      ),
+      SubtitleBackground.Solid.mpvOptions,
+    )
+  }
+
+  @Test
+  fun `the box is sized by the text, so the edge row stays a separate setting`() {
+    // opaque-box would size the box from sub-border-size and quietly turn the edge
+    // ladder into a padding control.
+    SubtitleBackground.entries.filter { it != SubtitleBackground.Off }.forEach { background ->
+      assertEquals("background-box", background.borderStyle)
+    }
+  }
+
+  @Test
+  fun `every background step names the same properties, so none of them leaves one behind`() {
+    val names = SubtitleBackground.entries
+      .map { background -> background.mpvOptions.map { it.first } }
+      .toSet()
+    assertEquals(1, names.size)
   }
 
   @Test
@@ -224,12 +267,39 @@ class PlayerOptionsTest {
 
   @Test
   fun `passthrough codec resolution keeps mpv canonical order`() {
+    // The set arrives from an Android device query and its iteration order means
+    // nothing; mpv's list is a preference order and has to survive intact.
     val supported = setOf("truehd", "dts-hd", "dts", "eac3", "ac3")
 
     assertEquals(
       AudioOutputMode.Passthrough.spdifCodecs,
       AudioOutputMode.Passthrough.spdifCodecsFor(supported),
     )
+  }
+
+  @Test
+  fun `codec resolution is the value written to audio-spdif`() {
+    // The production path: the player resolves the active route's codecs through
+    // here and writes the result, so `?: ""` is a route with nothing to hand over
+    // and means decode. Nothing may write the candidate list directly.
+    fun spdifValue(mode: AudioOutputMode, sinkCodecs: Set<String>?): String =
+      mode.spdifCodecsFor(sinkCodecs) ?: ""
+
+    // An HDMI receiver taking Dolby but no DTS, as the caller spells it: mpv's
+    // names, with E_AC3_JOC already folded in with E_AC3.
+    assertEquals("ac3,eac3", spdifValue(AudioOutputMode.Passthrough, setOf("ac3", "eac3")))
+    // Route lost, or a route that decodes nothing this player offers.
+    assertEquals("", spdifValue(AudioOutputMode.Passthrough, null))
+    assertEquals("", spdifValue(AudioOutputMode.Passthrough, setOf("aac", "pcm")))
+    // Decode hands mpv the empty list however capable the sink is.
+    assertEquals("", spdifValue(AudioOutputMode.Decode, setOf("ac3", "truehd")))
+  }
+
+  @Test
+  fun `blank sink entries are not codecs`() {
+    // An encoding the caller could not name must not resolve to an empty request
+    // that reads as "passthrough is available".
+    assertEquals(null, AudioOutputMode.Passthrough.spdifCodecsFor(setOf("", "   ")))
   }
 
   @Test

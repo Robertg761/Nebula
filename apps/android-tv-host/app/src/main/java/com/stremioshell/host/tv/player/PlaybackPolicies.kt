@@ -92,8 +92,18 @@ object StreamRequestHeaders {
   private fun isControl(char: Char): Boolean = char.code < 0x20 || char.code == 0x7f
 
   /**
-   * mpv parses this option as a comma-separated string list. Escape the two list metacharacters so
-   * legitimate values containing commas remain one header.
+   * mpv parses this option as a comma-separated string list, so a value carrying a comma has to be
+   * escaped or it becomes a second header — the whole reason this function exists.
+   *
+   * mpv's list splitter (`get_nextsep`) has exactly one rule: a separator directly preceded by a
+   * backslash is not a separator, and that one backslash is removed. There is no `\\` → `\` rule,
+   * which is why doubling backslashes — what this used to do — is not an escape but an injection.
+   * `a\\` was emitted as `a\\\\`, mpv dropped one backslash off the joining comma, ate the comma
+   * and merged the header with the one after it. Backslashes are therefore removed from the value
+   * outright before the comma is escaped: none of the three allowlisted headers legitimately
+   * carries one, so there is nothing to preserve and stripping leaves no sequence whose meaning
+   * depends on how many backslashes precede it. Header names cannot reach either metacharacter —
+   * [NAME] admits neither.
    *
    * Native mpv owns redirects and DNS after the initial URL validation. Until playback is routed
    * through an app-controlled transport, never give that redirect chain credentials, referrers or
@@ -105,8 +115,8 @@ object StreamRequestHeaders {
       .filterKeys { it.lowercase(Locale.ROOT) in NATIVE_PLAYBACK_HEADERS }
       .entries
       .joinToString(",") { (name, value) ->
-      "$name: ${value.replace("\\", "\\\\").replace(",", "\\,")}"
-    }
+        "$name: ${value.replace("\\", "").replace(",", "\\,")}"
+      }
 
   /**
    * Returns stream credentials only when [resourceUrl] has the exact same origin as [streamUrl].
@@ -216,10 +226,16 @@ object PlaybackFrameRate {
     return (contentFps * speed).toFloat().takeIf { it.isFinite() } ?: 0f
   }
 
-  fun progressRemaining(elapsedMs: Long, totalMs: Long): Float {
-    if (totalMs <= 0L) return 0f
-    return ((totalMs - elapsedMs).coerceIn(0L, totalMs).toFloat() / totalMs).coerceIn(0f, 1f)
-  }
+  /**
+   * The up-next countdown bar's fraction, which is not frame-rate arithmetic at all: it lives here
+   * only because the activity's countdown tick calls it by this name. There used to be a second
+   * copy of the same arithmetic in [UpNextPolicy], and the two agreeing at the negative, zero,
+   * exact-end and overrun boundaries was luck rather than structure — production ran this one while
+   * the tests exercised that one. [UpNextPolicy.progressRemaining] is now the only implementation,
+   * beside the [UpNextPolicy.secondsLeft] and [UpNextPolicy.isDue] it has to agree with.
+   */
+  fun progressRemaining(elapsedMs: Long, totalMs: Long): Float =
+    UpNextPolicy.progressRemaining(elapsedMs, totalMs)
 
   /**
    * Starts one bounded discovery cycle per file generation while the content rate is unknown.

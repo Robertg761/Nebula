@@ -30,13 +30,18 @@ import com.stremioshell.host.tv.TvAppActivity
 class WatchNextPublisher(context: Context) {
   private val context = context.applicationContext
 
-  fun publish(desired: List<WatchNextProgramData>) {
-    if (!providerAvailable()) return
+  /**
+   * Whether the provider was actually reached with a plan. A `false` is a no-op
+   * (no provider on this image, or the row query failed) that wrote nothing, so
+   * the caller's throttle window can be handed back rather than spent on it.
+   */
+  fun publish(desired: List<WatchNextProgramData>): Boolean {
+    if (!providerAvailable()) return false
     val resolver = context.contentResolver
     val plan = runCatching { WatchNextDiff.plan(queryOwnRows(), desired) }
       .getOrElse {
         Log.w(TAG, "Watch Next query failed", it)
-        return
+        return false
       }
     for (id in plan.deletes) {
       runCatching {
@@ -73,6 +78,7 @@ class WatchNextPublisher(context: Context) {
         Log.w(TAG, "Watch Next insert failed for ${program.internalProviderId}", it)
       }
     }
+    return true
   }
 
   /**

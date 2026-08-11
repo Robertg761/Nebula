@@ -42,6 +42,21 @@ class UpdateRepositoryTest {
   }
 
   @Test
+  fun `a prerelease tag still selects the numerically named asset`() {
+    // The workflow tags a prerelease v0.6.2-beta.1 but names the file from versionName, so the
+    // asset is StremioShell-tv-0.6.2.apk. The lookup key is the core version, never the tag.
+    val expected = asset("StremioShell-tv-0.6.2.apk")
+
+    assertEquals(
+      expected,
+      UpdateRepository.selectApkAsset(
+        assets = listOf(expected),
+        versionName = SemVer.coreLabel("v0.6.2-beta.1"),
+      ),
+    )
+  }
+
+  @Test
   fun `rejects ambiguous duplicate canonical assets`() {
     val expected = asset("StremioShell-tv-0.6.2.apk")
 

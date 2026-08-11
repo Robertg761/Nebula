@@ -46,7 +46,12 @@ object AddonList {
     if (value.isEmpty()) return ""
     for (scheme in STREMIO_SCHEMES) {
       if (value.startsWith(scheme, ignoreCase = true)) {
-        value = "https://" + value.substring(scheme.length)
+        val remainder = value.substring(scheme.length)
+        // Both spellings of an install link are in the wild, and the bare-`stremio:` one wraps a
+        // whole URL rather than a host: "stremio:https://host/manifest.json" is what an addon's
+        // own Install button hands over. Prefixing that produced "https://https://host/...",
+        // which parses, passes every check below, and is stored as an addon that can never answer.
+        value = if (startsWithHttpScheme(remainder)) remainder else "https://$remainder"
         break
       }
     }
@@ -255,6 +260,17 @@ object AddonList {
     .distinct()
     .take(MAX_ADDONS)
 
+  /**
+   * True when [list] offered something and [sanitized] threw all of it away.
+   *
+   * Empty and unusable produce the same empty list, and until this existed they produced the same
+   * message too - a viewer who mistyped their one addon URL was told "the list was empty", which
+   * describes what the guard did rather than what they did. Anything that survives sanitising is
+   * not reported: a list where one of three URLs was rejected still saved something.
+   */
+  fun allRejected(list: List<String>): Boolean =
+    list.any { it.isNotBlank() } && sanitized(list).isEmpty()
+
   private fun hostOf(url: String): String =
     url.toHttpUrlOrNull()?.host?.lowercase(Locale.ROOT).orEmpty().ifEmpty {
       url
@@ -267,6 +283,10 @@ object AddonList {
         .substringBefore(':')
         .lowercase(Locale.ROOT)
     }
+
+  private fun startsWithHttpScheme(value: String): Boolean =
+    value.startsWith("http://", ignoreCase = true) ||
+      value.startsWith("https://", ignoreCase = true)
 
   private val STREMIO_SCHEMES = listOf("stremio://", "stremio:")
 }

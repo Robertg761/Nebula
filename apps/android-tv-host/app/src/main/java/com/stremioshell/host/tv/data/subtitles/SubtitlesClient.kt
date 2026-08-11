@@ -33,6 +33,11 @@ class SubtitlesClient(
     // Addons disagree on whether the entry id is a string or a number, and the
     // whole response is worth nothing if one of them fails to parse.
     isLenient = true
+    // Same reasoning one step further: `"lang": null` or `"subtitles": null` is an
+    // ordinary answer from a community catalogue, and it used to throw away every
+    // other track in the response along with it. Each field here declares a default
+    // for the null to land on.
+    coerceInputValues = true
   }
 
   suspend fun movieSubtitles(

@@ -68,4 +68,97 @@ class DownloadIntegrityPolicyTest {
     assertFalse(DownloadIntegrityPolicy.isInstallable(DownloadIntegrityPolicy.Verdict.UNVERIFIABLE))
     assertFalse(DownloadIntegrityPolicy.isInstallable(DownloadIntegrityPolicy.Verdict.CORRUPT))
   }
+
+  // --- SHA-256 digest ---------------------------------------------------------------------------
+
+  private val digest = "a".repeat(64)
+
+  @Test
+  fun `a published digest is worth hashing the file for`() {
+    assertTrue(
+      DownloadIntegrityPolicy.requiresDigestVerification(
+        DownloadIntegrityPolicy.Verdict.VERIFIED,
+        digest,
+      ),
+    )
+    // No size was recorded, but the digest can still settle it on its own.
+    assertTrue(
+      DownloadIntegrityPolicy.requiresDigestVerification(
+        DownloadIntegrityPolicy.Verdict.UNVERIFIABLE,
+        digest,
+      ),
+    )
+  }
+
+  @Test
+  fun `a file already known to be the wrong size is not hashed`() {
+    // Reading ~117 MB to confirm what length() already proved would be the most expensive
+    // possible way to say no.
+    assertFalse(
+      DownloadIntegrityPolicy.requiresDigestVerification(
+        DownloadIntegrityPolicy.Verdict.CORRUPT,
+        digest,
+      ),
+    )
+  }
+
+  @Test
+  fun `a release with no digest falls back to the byte count`() {
+    assertFalse(
+      DownloadIntegrityPolicy.requiresDigestVerification(
+        DownloadIntegrityPolicy.Verdict.VERIFIED,
+        null,
+      ),
+    )
+    assertFalse(
+      DownloadIntegrityPolicy.requiresDigestVerification(
+        DownloadIntegrityPolicy.Verdict.VERIFIED,
+        "   ",
+      ),
+    )
+  }
+
+  @Test
+  fun `verified when the downloaded bytes hash to the published digest`() {
+    assertEquals(
+      DownloadIntegrityPolicy.Verdict.VERIFIED,
+      DownloadIntegrityPolicy.verifyDigest(expectedSha256 = digest, actualSha256 = digest),
+    )
+  }
+
+  @Test
+  fun `digest comparison ignores hex casing`() {
+    assertEquals(
+      DownloadIntegrityPolicy.Verdict.VERIFIED,
+      DownloadIntegrityPolicy.verifyDigest(
+        expectedSha256 = digest,
+        actualSha256 = digest.uppercase(),
+      ),
+    )
+  }
+
+  @Test
+  fun `corrupt when the right number of bytes hash to the wrong digest`() {
+    assertEquals(
+      DownloadIntegrityPolicy.Verdict.CORRUPT,
+      DownloadIntegrityPolicy.verifyDigest(expectedSha256 = digest, actualSha256 = "b".repeat(64)),
+    )
+  }
+
+  @Test
+  fun `corrupt when a file with a published digest cannot be hashed`() {
+    // A file we are about to install and cannot read through is not a file we install.
+    assertEquals(
+      DownloadIntegrityPolicy.Verdict.CORRUPT,
+      DownloadIntegrityPolicy.verifyDigest(expectedSha256 = digest, actualSha256 = null),
+    )
+  }
+
+  @Test
+  fun `unverifiable when there was no published digest to compare against`() {
+    assertEquals(
+      DownloadIntegrityPolicy.Verdict.UNVERIFIABLE,
+      DownloadIntegrityPolicy.verifyDigest(expectedSha256 = null, actualSha256 = digest),
+    )
+  }
 }

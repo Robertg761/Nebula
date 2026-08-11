@@ -15,33 +15,30 @@ package com.stremioshell.host.tv.player
  * runs out inside the last tenth is now called finished rather than broken. That
  * is the trade for not asking viewers to sit through credits, and a stream that
  * stops well short of its claimed length is still resumable.
+ *
+ * The fraction is the whole rule. There used to be an absolute "within five
+ * seconds of the end" guard beside it, described as covering a container that
+ * understates its duration by a second or two — but a position that overruns an
+ * understated duration is past 100% of it, which the fraction already catches,
+ * and the guard was additionally held back from ever firing earlier than the
+ * fraction (so that a six-second clip could not be called watched one second in).
+ * Those two together made it unreachable for every duration: at 50 seconds and
+ * above `duration - 5` is inside the last tenth, and below 50 seconds the guard
+ * was skipped. It is gone rather than repaired; the five-second stand-off that
+ * remains real is [SeekCoalescer.END_GUARD_SEC], which is about not seeking into
+ * eof and does not (and cannot) keep a video below this threshold.
  */
 object WatchedThreshold {
-  /**
-   * Absolute guard for a duration a container understates by a second or two
-   * (VBR estimates), where the fraction alone would never be reached.
-   */
-  const val END_GUARD_SEC = 5.0
-
   /** Fraction of the runtime that counts as having watched the whole thing. */
   const val FINISHED_FRACTION = 0.90
 
   fun isFinished(positionSec: Double, durationSec: Double): Boolean {
     // Nothing can be established without a duration, so such a stream is always
-    // treated as stopped short and stays resumable.
+    // treated as stopped short and stays resumable. This is also what keeps a
+    // save taken before mpv has reported a duration - the first seconds of every
+    // file - out of the watched state.
     if (!durationSec.isFinite() || !positionSec.isFinite() || durationSec <= 0 || positionSec < 0) {
       return false
-    }
-    // Never let the absolute guard move the threshold earlier than the watched
-    // fraction. Without this, not only a one-second clip but also a six-second
-    // clip (threshold 1s) can be marked watched almost immediately.
-    val fractionThresholdSec = durationSec * FINISHED_FRACTION
-    val guardThresholdSec = durationSec - END_GUARD_SEC
-    if (
-      guardThresholdSec >= fractionThresholdSec &&
-      positionSec >= guardThresholdSec
-    ) {
-      return true
     }
     return positionSec / durationSec >= FINISHED_FRACTION
   }

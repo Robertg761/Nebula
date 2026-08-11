@@ -34,6 +34,42 @@ class ConfigMergeTest {
   }
 
   @Test
+  fun `interactive addon validation rejects two lines that mean the same addon`() {
+    // The failure this whole validation exists to prevent, and the one form of it that used to get
+    // through: every line is individually usable, so line-by-line checking passed, and then the
+    // list-wide sanitising folded the two into one and the confirmation said "1 saved" for two
+    // submitted lines. A viewer re-pasting a line to correct it produces exactly this.
+    assertEquals(
+      "Two of those addon links are the same addon. Enter each one once.",
+      PairingSubmission.addonInputError(
+        "comet.example\nhttps://comet.example/manifest.json",
+      ),
+    )
+    assertEquals(
+      "Two of those addon links are the same addon. Enter each one once.",
+      PairingSubmission.addonInputError(
+        "https://a.example/manifest.json\nstremio://a.example/manifest.json",
+      ),
+    )
+  }
+
+  @Test
+  fun `a validated addon box arrives whole, with one url per submitted line`() {
+    // The invariant ConfigPairingServer relies on instead of a second defensive check: anything
+    // that would lose a line has already been rejected, so what passes validation is exactly what
+    // gets stored - and the count on the confirmation page is the number the viewer typed.
+    listOf(
+      "comet.example",
+      "https://a.example/manifest.json\nb.example\nstremio://c.example",
+      (1..AddonList.MAX_ADDONS).joinToString("\n") { "https://a$it.example/manifest.json" },
+    ).forEach { raw ->
+      assertNull(raw, PairingSubmission.addonInputError(raw))
+      val lines = raw.split("\n").filter { it.isNotBlank() }
+      assertEquals(raw, lines.size, PairingSubmission.of(null, raw).addonUrls?.size)
+    }
+  }
+
+  @Test
   fun `interactive addon validation rejects overflow instead of truncating`() {
     val raw = (1..AddonList.MAX_ADDONS + 1)
       .joinToString("\n") { "https://a$it.example/manifest.json" }
@@ -96,6 +132,9 @@ class ConfigMergeTest {
 
   @Test
   fun `blank lines and duplicates are dropped, and the list is capped`() {
+    // The storage-shaped contract of [PairingSubmission.of] itself. The pairing form never gets
+    // here with either problem - addonInputError refuses both first - but migration and the debug
+    // launch intent still lean on these invariants.
     val raw = (1..AddonList.MAX_ADDONS + 3).joinToString("\n\n") { "https://a$it.example/manifest.json" }
     val submission = PairingSubmission.of(null, "$raw\n   \nhttps://a1.example/manifest.json")
 

@@ -34,6 +34,7 @@ import com.stremioshell.host.tv.ui.theme.NebulaPalette
 import com.stremioshell.host.tv.ui.theme.NebulaSpace
 import com.stremioshell.host.update.UpdatePromptCoordinator
 import com.stremioshell.host.update.UpdatePromptPolicy
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -69,9 +70,27 @@ fun UpdatePromptHost(currentVersionName: String = BuildConfig.VERSION_NAME) {
   LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { refreshTick++ }
 
   LaunchedEffect(refreshTick, dismissedVersion) {
-    state = withContext(Dispatchers.IO) {
-      coordinator.evaluate(context, currentVersionName, dismissedVersion)
+    val next = withContext(Dispatchers.IO) {
+      try {
+        coordinator.evaluate(context, currentVersionName, dismissedVersion)
+      } catch (cancellation: CancellationException) {
+        throw cancellation
+      } catch (_: Exception) {
+        // Nothing in here is worth taking the app down for. The evaluation touches
+        // SharedPreferences, DownloadManager (a separate process, which can be mid-restart) and
+        // a ~117 MB file; this runs on every return to the foreground, so an unhandled throw
+        // crashed the app on resume. No prompt is the right answer to "we could not tell".
+        UpdatePromptCoordinator.State.None
+      }
     }
+
+    // The error belongs to the prompt that produced it. Without this it survives every
+    // resolution to NONE and re-appears - stale text, and a "Check download" primary button -
+    // on the next release's dialog.
+    if (!UpdatePromptPolicy.retainsError(state.versionName, next.prompt, next.versionName)) {
+      error = null
+    }
+    state = next
   }
 
   val version = state.versionName
@@ -82,6 +101,8 @@ fun UpdatePromptHost(currentVersionName: String = BuildConfig.VERSION_NAME) {
   val dismiss = {
     dismissedVersion = version
     state = UpdatePromptCoordinator.State.None
+    // Same rule as the evaluation above: the sheet is gone, so the report on it is gone with it.
+    error = null
   }
 
   UpdateReadyDialog(

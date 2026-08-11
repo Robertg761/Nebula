@@ -2,6 +2,12 @@ package com.stremioshell.host.tv.pairing
 
 import com.stremioshell.host.tv.data.addon.AddonList
 import fi.iki.elonen.NanoHTTPD
+import java.util.Collections
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -20,6 +26,11 @@ import java.util.concurrent.atomic.AtomicReference
  * write-only, so even a leaked token cannot read the existing config back out.
  * The confirmation page obeys the same rule - it reports how many addons were
  * saved and never which.
+ *
+ * The token gate cannot be the only defence, because it runs after a connection already has a
+ * thread: NanoHTTPD's own runner starts one per accepted socket, without limit, so any host on the
+ * LAN could open connections until the TV ran out of threads or memory while the QR was up. The
+ * bounded runner installed below caps that at [MAX_CONNECTIONS] and closes the rest on arrival.
  */
 class ConfigPairingServer(
   private val token: String,
@@ -28,6 +39,14 @@ class ConfigPairingServer(
 
   private val guard = PairingTokenGuard(token)
   private val submissionState = AtomicReference(SubmissionState.Available)
+  private val connections = BoundedAsyncRunner(MAX_CONNECTIONS)
+
+  init {
+    setAsyncRunner(connections)
+  }
+
+  /** Names this server's worker threads, so a test can see that the cap is real. */
+  internal val connectionThreadPrefix: String get() = connections.threadNamePrefix
 
   override fun serve(session: IHTTPSession): Response {
     val isSubmit = session.method == Method.POST && session.uri == "/config"
@@ -80,6 +99,12 @@ class ConfigPairingServer(
       return badRequest("That form could not be read. Please try again.")
     }
     val rawAddons = session.parameters["addon"]?.firstOrNull()
+    // The single gate on the addon box, and the reason nothing below has to second-guess it: it
+    // rejects any box that would lose a line to sanitising - unusable, duplicated, or more than
+    // the cap - so a box that gets past here always arrives as one URL per line, all of them
+    // saved, and the confirmation's count is the number the viewer typed. Reported before
+    // anything is applied, too: saving the key alone while quietly discarding the URLs would look
+    // like a success the viewer then has to debug on the TV.
     PairingSubmission.addonInputError(rawAddons)?.let { error ->
       submissionState.compareAndSet(SubmissionState.Applying, SubmissionState.Available)
       return html(formPage(error = error))
@@ -88,13 +113,6 @@ class ConfigPairingServer(
       rawTmdbKey = session.parameters["tmdb"]?.firstOrNull(),
       rawAddonUrls = rawAddons,
     )
-    // Typed something into the addon box and none of it survived sanitising. Reported rather than
-    // ignored, and reported before anything is applied: saving the key alone while quietly
-    // discarding the URLs would look like a success the viewer then has to debug on the TV.
-    if (!rawAddons.isNullOrBlank() && submission.addonUrls == null) {
-      submissionState.compareAndSet(SubmissionState.Applying, SubmissionState.Available)
-      return html(formPage(error = "No usable addon link in that box. Paste the manifest URL."))
-    }
     if (submission.isEmpty) {
       submissionState.compareAndSet(SubmissionState.Applying, SubmissionState.Available)
       return html(formPage(error = "Enter at least one value."))
@@ -246,7 +264,85 @@ class ConfigPairingServer(
     /** Query-string key carried by both the QR URL and the form action. */
     const val TOKEN_FIELD = "t"
     const val MAX_FORM_BYTES = 32L * 1024L
+
+    /**
+     * How many connections this server will hold at once.
+     *
+     * One phone browser opens a handful in parallel (the page, a favicon, a speculative preconnect)
+     * and only one of them ever posts, so this is generous for the only client that is supposed to
+     * be here - while a flood from anywhere else costs the TV eight threads instead of as many as
+     * it can allocate. Rejected sockets are closed immediately rather than queued, so a stalled
+     * attacker cannot make legitimate connections wait behind a backlog either; NanoHTTPD's own
+     * five-second read timeout returns each slot soon enough that the phone's retry gets in.
+     */
+    const val MAX_CONNECTIONS = 8
+
+    private val serverIndex = AtomicInteger()
   }
 
   private enum class SubmissionState { Available, Applying, Consumed }
+
+  /**
+   * A [NanoHTTPD.AsyncRunner] with a ceiling, replacing the default one thread per accepted socket.
+   *
+   * Everything else in this class defends the viewer's credentials, and all of it runs after the
+   * connection has already been given a thread. On a 2GB TV box that ordering is the whole attack:
+   * a peer that opens sockets and never speaks costs nothing to sustain and one thread each to
+   * hold, and the server sits on the LAN for as long as the QR is on screen.
+   */
+  private class BoundedAsyncRunner(maxConnections: Int) : NanoHTTPD.AsyncRunner {
+    val threadNamePrefix = "nebula-pairing-${serverIndex.incrementAndGet()}-"
+
+    private val threadIndex = AtomicInteger()
+    private val running = Collections.synchronizedList(mutableListOf<NanoHTTPD.ClientHandler>())
+
+    /**
+     * No queue at all - a [SynchronousQueue] hands off to a waiting thread or rejects on the spot.
+     * A bounded queue would only delay the same exhaustion and make the phone wait behind sockets
+     * that will never send a byte.
+     */
+    private val executor = ThreadPoolExecutor(
+      0,
+      maxConnections,
+      IDLE_THREAD_SECONDS,
+      TimeUnit.SECONDS,
+      SynchronousQueue(),
+    ) { runnable ->
+      Thread(runnable, "$threadNamePrefix${threadIndex.incrementAndGet()}").apply {
+        // Daemon, like NanoHTTPD's own runner: a pairing screen left open must never be the
+        // reason the process refuses to exit.
+        isDaemon = true
+      }
+    }
+
+    override fun exec(handler: NanoHTTPD.ClientHandler) {
+      running.add(handler)
+      try {
+        executor.execute(handler)
+      } catch (_: RejectedExecutionException) {
+        // At the ceiling, or already stopped. Closing the socket is the honest answer: the peer
+        // learns immediately instead of holding an accepted connection that nothing will serve.
+        running.remove(handler)
+        handler.close()
+      }
+    }
+
+    /** Called by every handler's own finally block, including the ones that threw. */
+    override fun closed(handler: NanoHTTPD.ClientHandler) {
+      running.remove(handler)
+    }
+
+    override fun closeAll() {
+      // Sockets first, so the threads blocked reading them are already unwinding when they are
+      // interrupted. This runner is not reused: stop() ends the session, and the next pairing
+      // attempt builds a new server with a new token.
+      val snapshot = synchronized(running) { ArrayList(running) }
+      snapshot.forEach { runCatching { it.close() } }
+      executor.shutdownNow()
+    }
+
+    private companion object {
+      const val IDLE_THREAD_SECONDS = 10L
+    }
+  }
 }

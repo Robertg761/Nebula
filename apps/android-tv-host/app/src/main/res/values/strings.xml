@@ -81,6 +81,10 @@
   <string name="player_menu_no_subtitles_found">No subtitles found</string>
   <string name="player_menu_ok_searches_again">%1$s searches again</string>
   <string name="player_menu_search_again">Search again</string>
+  <!-- The section-anchor row when a stream named subtitle files but carries no IMDb id: there is
+       a list worth showing and no search to run, so the row must not read as pressable. -->
+  <string name="player_menu_included_subtitles">Included subtitles</string>
+  <string name="player_menu_included_subtitles_detail">Online search isn’t available for this stream</string>
   <string name="player_menu_opensubtitles" translatable="false">OpenSubtitles</string>
   <plurals name="player_menu_online_subtitle_position">
     <item quantity="one">Online subtitle</item>
@@ -395,13 +399,11 @@
     <item quantity="one">Your TMDB key and %d stream addon were saved.</item>
     <item quantity="other">Your TMDB key and %d stream addons were saved.</item>
   </plurals>
-  <string name="pair_key_saved_addons_cleared">Your TMDB key was saved, and stream addons were cleared.</string>
   <string name="pair_key_saved_addons_unchanged">Your TMDB key was saved. Stream addons were unchanged.</string>
   <plurals name="pair_addons_saved_key_unchanged">
     <item quantity="one">%d stream addon was saved. Your TMDB key was unchanged.</item>
     <item quantity="other">%d stream addons were saved. Your TMDB key was unchanged.</item>
   </plurals>
-  <string name="pair_addons_cleared_key_unchanged">Stream addons were cleared. Your TMDB key was unchanged.</string>
   <string name="pair_settings_unchanged">Those settings already matched what was saved on this TV.</string>
   <string name="pair_needs_key_and_addon">A TMDB key and stream addon are still needed before setup is complete.</string>
   <string name="pair_needs_key">A TMDB key is still needed to load catalogs and search.</string>

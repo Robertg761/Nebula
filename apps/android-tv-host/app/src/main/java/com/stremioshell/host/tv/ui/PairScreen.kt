@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
@@ -136,12 +137,30 @@ fun PairScreen(viewModel: TvAppViewModel, onPaired: () -> Unit) {
   // Composition survives HOME, app switching and screen-off. Resume scope does not: the LAN
   // listener is live only while the QR screen is actually visible, and every resume gets a fresh
   // one-shot token instead of reviving the URL that was hidden from the TV.
+  //
+  // Except once the phone has answered. A confirmation is the receipt for a config that is already
+  // committed to DataStore, and a screensaver two minutes into reading it is not a reason to
+  // discard it: the pause still takes the server and its spent token down, but the resume leaves
+  // the receipt alone rather than replacing it with a QR that implies nothing was saved. The state
+  // is read live off the flow rather than captured, because this effect block outlives the
+  // composition that set it up.
   val visibilityGate = remember(viewModel) {
-    PairingVisibilityGate(viewModel::startPairing, viewModel::stopPairing)
+    PairingVisibilityGate(
+      startPairing = viewModel::startPairing,
+      stopPairing = viewModel::pausePairing,
+      confirmationShowing = { viewModel.pairing.value is TvAppViewModel.PairingState.Received },
+    )
   }
   LifecycleResumeEffect(visibilityGate) {
     visibilityGate.onVisible()
     onPauseOrDispose { visibilityGate.onHidden() }
+  }
+  // Leaving is the other half of that rule: a receipt kept across a pause must not still be
+  // sitting there the next time this screen is opened, where it would show a stale confirmation
+  // and - because the gate reads it - refuse to start a new pairing at all. Disposal is the
+  // difference between "the viewer is elsewhere for a moment" and "the viewer left".
+  DisposableEffect(viewModel) {
+    onDispose { viewModel.stopPairing() }
   }
 
   val goBack = rememberBackAction()
@@ -344,11 +363,19 @@ private fun PairingValidationFailure(
   }
 }
 
+/**
+ * What the phone's submission actually did, in the TV's own words.
+ *
+ * There is no "addons were cleared" wording here, and there cannot be: a blank box on the phone
+ * form means "keep what you have" (see [com.stremioshell.host.tv.pairing.PairingSubmission]), so
+ * a changed addon list always has at least one URL in it. Removing every addon stays a deliberate
+ * act on the TV's own Settings screen, where the viewer can see what they are removing. Two
+ * branches used to claim otherwise and were unreachable in every state the pairing form can
+ * produce.
+ */
 @Composable
 private fun PairedConfirmation(receipt: TvAppViewModel.PairingState.Received) {
   val summary = when {
-    receipt.tmdbKeyChanged && receipt.addonUrlsChanged && receipt.addonCount == 0 ->
-      stringResource(R.string.pair_key_saved_addons_cleared)
     receipt.tmdbKeyChanged && receipt.addonUrlsChanged ->
       pluralStringResource(
         R.plurals.pair_key_and_addons_saved,
@@ -357,8 +384,6 @@ private fun PairedConfirmation(receipt: TvAppViewModel.PairingState.Received) {
       )
     receipt.tmdbKeyChanged ->
       stringResource(R.string.pair_key_saved_addons_unchanged)
-    receipt.addonUrlsChanged && receipt.addonCount == 0 ->
-      stringResource(R.string.pair_addons_cleared_key_unchanged)
     receipt.addonUrlsChanged ->
       pluralStringResource(
         R.plurals.pair_addons_saved_key_unchanged,

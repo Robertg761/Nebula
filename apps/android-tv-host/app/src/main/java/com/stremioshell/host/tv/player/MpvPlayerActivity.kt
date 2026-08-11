@@ -160,7 +160,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Date
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.util.Locale
@@ -259,6 +261,15 @@ class MpvPlayerActivity : ComponentActivity() {
    * `surfaceCreated` would restart the stream from scratch each time.
    */
   private var fileLoaded = false
+
+  /**
+   * Whether a `loadfile` has ever been issued to this core, and therefore whether
+   * the next one has to replace what is there. Distinct from [fileLoaded], which
+   * is reset by [onNewIntent] so the second selection can go back through
+   * [maybeLoadFile]'s surface/preferences gate: the core's own state does not go
+   * back with it.
+   */
+  private var mpvHoldsFile = false
 
   /**
    * Identity of the file currently being opened or played. Every delayed callback and asynchronous
@@ -591,6 +602,18 @@ class MpvPlayerActivity : ComponentActivity() {
    */
   private var loadFailedRunnable: Runnable? = null
 
+  /** When the armed load watchdog is due, as [SystemClock.uptimeMillis]. */
+  private var loadWatchdogDueAtMs = 0L
+
+  /**
+   * What is left of a load watchdog [onStop] took down, or zero when none is
+   * suspended. A stream can take a minute to open, and a viewer who switches to
+   * another app in that minute would otherwise come back to a player that had
+   * declared the load dead - and stopped it - in the background, on a screen they
+   * were not looking at. See [suspendLoadWatchdog].
+   */
+  private var suspendedLoadWatchdogMs = 0L
+
   /**
    * Fires when a stream that did start playing has been waiting on its cache for
    * [STALL_TIMEOUT_MS] without a byte arriving. mpv's own recovery cannot reach
@@ -921,11 +944,12 @@ class MpvPlayerActivity : ComponentActivity() {
           if (generation != loadGeneration) return@postMpvEvent
           if (!awaitingStartFile && playbackError.value == null) onPlaybackEnded()
         }
-        // Playback has actually resumed at the seek target, so the real
-        // position is trustworthy again and the preview can go away. Restarts
-        // also arrive from initial load, cache-stall recovery and earlier seeks,
-        // so mirror whatever the coalescer keeps rather than blanking: a press
-        // that landed since must stay on screen and still be flushed.
+        // Playback has actually resumed, so the real position is trustworthy
+        // again and the preview for whichever seek this restart reports can go
+        // away. Restarts also arrive from initial load, cache-stall recovery and
+        // track/video reinit, so mirror whatever the coalescer keeps rather than
+        // blanking: a press that landed since must stay on screen and still be
+        // flushed.
         MPVLib.MPV_EVENT_PLAYBACK_RESTART -> postMpvEvent {
           if (
             generation != loadGeneration ||
@@ -935,7 +959,13 @@ class MpvPlayerActivity : ComponentActivity() {
             return@postMpvEvent
           }
           seeking.value = false
-          seeker.settle()
+          // Only a command mpv has confirmed accepting can be the one this
+          // restart is about; see [SeekCoalescer.restartOwner]. Retiring the
+          // oldest outstanding seek regardless - which is what the untagged
+          // settle does - let a stall-recovery restart clear a seek still queued
+          // behind the stall, snapping the OSD back to the pre-seek position and
+          // making every save until the real restart record it.
+          seeker.restartOwner()?.let(seeker::settle)
           seekPreviewSec.doubleValue = seeker.previewSec ?: NO_SEEK
           if (seeker.previewSec == null) {
             cancelSeekSettleTimeout()
@@ -1262,8 +1292,14 @@ class MpvPlayerActivity : ComponentActivity() {
     }
     resetFileRuntime(clearUpNext = true, resetDelays = true, initialPositionMs = resumeMs)
     if (resumeResetRequested) saveWatchState(SaveReason.Paused)
-    fileLoaded = true
-    loadCurrentFile(replace = true, startMs = resumeMs)
+    // Through the same gate as the first load, not straight to [loadCurrentFile].
+    // A second selection can arrive before the stored preferences have been read —
+    // the launcher's Continue Watching row into a player that is still starting is
+    // exactly that — and opening the file then gets the container's default
+    // tracks, permanently: `alang`/`slang` are read at open, and [fileLoaded]
+    // being true means nothing ever loads it again.
+    fileLoaded = false
+    maybeLoadFile()
     publishMediaMetadata()
     showOsd()
   }
@@ -1302,8 +1338,15 @@ class MpvPlayerActivity : ComponentActivity() {
     return EmbeddedSubtitles.sanitize(candidates)
   }
 
-  private fun initialExternalSubtitlesState(): ExternalSubtitlesState {
-    val exact = EmbeddedSubtitles.sanitize(embeddedSubtitles).mapIndexed { index, subtitle ->
+  /**
+   * The subtitle files the stream response itself named, as menu rows.
+   *
+   * Recomputed rather than cached because it is derived entirely from [embeddedSubtitles], which
+   * only changes when a launch intent replaces the whole file: every caller either follows such a
+   * change or is guarded by [loadGeneration], so there is no state here to keep in step.
+   */
+  private fun embeddedSubtitleOptions(): List<ExternalSubtitleOption> =
+    EmbeddedSubtitles.sanitize(embeddedSubtitles).mapIndexed { index, subtitle ->
       val languageCode = LanguageCodes.normalize(subtitle.lang)
       ExternalSubtitleOption(
         url = subtitle.url,
@@ -1315,10 +1358,24 @@ class MpvPlayerActivity : ComponentActivity() {
           ?: getString(R.string.player_stream_subtitle_number, index + 1),
       )
     }
+
+  /**
+   * What the Subtitles section offers before anyone has asked an addon anything.
+   *
+   * The two questions are independent and used to be tangled: whether the stream named any
+   * subtitle files, and whether there is an IMDb id to search with. A stream that named files but
+   * carries no id used to publish a plain `Ready`, which drew an enabled "Search again" row whose
+   * handler returned without doing anything; a stream that named files and *has* an id has to keep
+   * them listed once a search starts returning results. Both are the same fix: the list and the
+   * ability to search are separate fields of one state.
+   */
+  private fun initialExternalSubtitlesState(): ExternalSubtitlesState {
+    val embedded = embeddedSubtitleOptions()
+    val searchable = !imdbId.isNullOrBlank()
     return when {
-      exact.isNotEmpty() -> ExternalSubtitlesState.Ready(exact)
-      imdbId.isNullOrBlank() -> ExternalSubtitlesState.Unavailable
-      else -> ExternalSubtitlesState.Idle
+      embedded.isNotEmpty() -> ExternalSubtitlesState.Ready(embedded, searchable = searchable)
+      searchable -> ExternalSubtitlesState.Idle
+      else -> ExternalSubtitlesState.Unavailable
     }
   }
 
@@ -1521,12 +1578,18 @@ class MpvPlayerActivity : ComponentActivity() {
    * Opens the stream, once there is both a surface to draw it on and a set of
    * preferences for mpv to open it with. Called from both, and idempotent: the
    * one that arrives second is the one that loads.
+   *
+   * Also the way a second launch through [onNewIntent] opens its file, which is
+   * what [mpvHoldsFile] is for: whether this load has to replace one is a fact
+   * about the core, not about which caller reached the gate, and the caller that
+   * finally opens the file may be a surface or a preference read that knows
+   * nothing about the intent that changed the URL.
    */
   private fun maybeLoadFile() {
     if (fileLoaded || !mpvCreated || finishing) return
     if (!surfaceReady || !prefsApplied) return
     fileLoaded = true
-    loadCurrentFile(replace = false, startMs = resumeMs)
+    loadCurrentFile(replace = mpvHoldsFile, startMs = resumeMs)
   }
 
   /**
@@ -1536,6 +1599,7 @@ class MpvPlayerActivity : ComponentActivity() {
    */
   private fun loadCurrentFile(replace: Boolean, startMs: Long) {
     if (!mpvCreated || finishing || url.isBlank()) return
+    mpvHoldsFile = true
     val session = sessionGuard.begin(url)
     loadGeneration = session.generation
     val generation = session.generation
@@ -1653,9 +1717,19 @@ class MpvPlayerActivity : ComponentActivity() {
    * film. The position against the duration is the check that can tell them
    * apart; with no duration reported nothing can be established, so such a
    * stream is always treated as stopped short and stays resumable.
+   *
+   * The position it judges is [resumePositionSec], which is the position the save
+   * that follows this verdict actually records - not `time-pos`. Reading the two
+   * from different places is what let a rewind out of the credits, followed by
+   * BACK before the seek settled, write the Finished save: `time-pos` still said
+   * the credits, so the video was called watched, while the save wrote the seek
+   * target and then had its position cleared by the very verdict that disagreed
+   * with it. The mirror case is now true and intended: a forward seek preview
+   * into the last tenth, backed out of before it lands, counts as finished -
+   * which is exactly what saving that position means.
    */
   private fun reachedEndOfFile(): Boolean =
-    WatchedThreshold.isFinished(timePosSec.doubleValue, durationSec.doubleValue)
+    WatchedThreshold.isFinished(resumePositionSec(), durationSec.doubleValue)
 
   /**
    * The video ran to its end. The watched record is written here rather than on
@@ -1694,6 +1768,15 @@ class MpvPlayerActivity : ComponentActivity() {
   private fun armLoadWatchdog(delayMs: Long) {
     cancelLoadWatchdog()
     if (playbackStarted) return
+    if (!activityStarted) {
+      // Armed while the player is off screen - a START_FILE or an END_FILE that
+      // landed after [onStop]. Keep the budget rather than start counting it:
+      // nobody is waiting on this verdict, and delivered to a stopped activity it
+      // is a stream torn down behind a panel the viewer never saw. [onStart] puts
+      // the clock back exactly as it does for one [suspendLoadWatchdog] took down.
+      suspendedLoadWatchdogMs = delayMs
+      return
+    }
     val generation = loadGeneration
     val runnable = Runnable {
       if (generation != loadGeneration || playbackStarted || playbackError.value != null) {
@@ -1702,12 +1785,47 @@ class MpvPlayerActivity : ComponentActivity() {
       showPlaybackError(playbackErrors.messageOr(getString(R.string.player_stream_open_failed)))
     }
     loadFailedRunnable = runnable
+    loadWatchdogDueAtMs = SystemClock.uptimeMillis() + delayMs
     mainHandler.postDelayed(runnable, delayMs)
   }
 
   private fun cancelLoadWatchdog() {
     loadFailedRunnable?.let(mainHandler::removeCallbacks)
     loadFailedRunnable = null
+    loadWatchdogDueAtMs = 0L
+    // A cancel is the load concluding or being replaced, either of which ends the
+    // suspended budget too - only [suspendLoadWatchdog] may leave one behind.
+    suspendedLoadWatchdogMs = 0L
+  }
+
+  /**
+   * Stops the load watchdog counting while the player is off screen, keeping what
+   * was left of its budget for [resumeLoadWatchdog].
+   *
+   * The watchdog's verdict is a panel and a `stop`, and both are meant for a
+   * viewer who is sitting in front of a spinner. Delivered to a backgrounded
+   * activity they are neither: the stream is torn down unseen, and the viewer
+   * comes back to "Playback failed" for a load that may well have been about to
+   * succeed. Time spent in another app is not time the stream failed to open in.
+   */
+  private fun suspendLoadWatchdog() {
+    if (loadFailedRunnable == null) return
+    val remainingMs = loadWatchdogDueAtMs - SystemClock.uptimeMillis()
+    cancelLoadWatchdog()
+    suspendedLoadWatchdogMs = remainingMs.coerceIn(LOAD_WATCHDOG_RESUME_MIN_MS, LOAD_TIMEOUT_MS)
+  }
+
+  /**
+   * Puts the suspended watchdog back, with whatever budget it had left - floored,
+   * because a load that outlived a long background still deserves a moment on
+   * screen before it is called dead. Nothing to resume once the stream started,
+   * or once a failure has already been reported.
+   */
+  private fun resumeLoadWatchdog() {
+    val remainingMs = suspendedLoadWatchdogMs
+    suspendedLoadWatchdogMs = 0L
+    if (remainingMs <= 0L || finishing || playbackStarted || playbackError.value != null) return
+    armLoadWatchdog(remainingMs)
   }
 
   /**
@@ -1801,28 +1919,65 @@ class MpvPlayerActivity : ComponentActivity() {
     if (shouldRefresh && !imdbId.isNullOrBlank()) {
       retryInFlight = true
       buffering.value = true
+      // The panel this retry came from issued a `stop`, and its END_FILE can land
+      // seconds later - by which time the reset above has cleared the error that
+      // was suppressing it. [onPlaybackEnded] would then treat it as the new
+      // attempt failing before it opened, re-arm the failure watchdog, and put a
+      // panel back over a refresh that is still running: transport gone, retry
+      // guarded out, session over. A refresh is a file transition like any other,
+      // so say so; START_FILE for the reloaded stream clears it.
+      awaitingStartFile = true
+      // And nothing else is watching this window. Without a clock on the refresh
+      // itself, an addon that never answers leaves the spinner up for the evening:
+      // the previous watchdog was cancelled by the reset, and the next one is not
+      // armed until [loadCurrentFile], which this may never reach. The resolve
+      // below carries its own, shorter deadline; this is the backstop for a
+      // blocking call that ignores its cancellation, and gets the same budget as
+      // opening a stream because that is what the window is standing in for.
+      armLoadWatchdog(LOAD_TIMEOUT_MS)
       showOsdMessage(getString(R.string.player_refreshing_stream))
       val forWatchKey = watchKey
       lifecycleScope.launch {
-        val refreshed = suspendRunCatching {
-          withContext(Dispatchers.IO) { resolveCurrentStream() }
-        }.getOrNull()
-        if (
-          finishing ||
-          watchKey != forWatchKey ||
-          loadGeneration != retryGeneration ||
-          url != retryUrl
-        ) {
-          return@launch
+        try {
+          // Bounded rather than open-ended: reloading the link that expired is a
+          // poor answer, but it is an answer, and it comes with the transport and
+          // the Retry button back. A refresh nobody has put a limit on takes both
+          // away for as long as the addon feels like taking.
+          val refreshed = withTimeoutOrNull(STREAM_REFRESH_TIMEOUT_MS) {
+            suspendRunCatching {
+              withContext(Dispatchers.IO) { resolveCurrentStream() }
+            }.getOrNull()
+          }
+          if (
+            finishing ||
+            watchKey != forWatchKey ||
+            loadGeneration != retryGeneration ||
+            url != retryUrl ||
+            // The backstop above ran out and a panel is already on screen. Opening
+            // the refreshed stream behind it would start a file nobody can see or
+            // control: FILE_LOADED and every event after it are dropped while an
+            // error is showing. Abandon the answer; the finally gives Retry back.
+            playbackError.value != null
+          ) {
+            return@launch
+          }
+          retryInFlight = false
+          val refreshedStream = refreshed?.takeIf { !it.url.isNullOrBlank() }
+          if (refreshedStream != null && !applyResolvedStream(refreshedStream)) {
+            showPlaybackError(getString(R.string.player_refreshed_stream_blocked))
+            return@launch
+          }
+          loadCurrentFile(replace = true, startMs = restartMs)
+          showOsd()
+        } finally {
+          // Every way out of this block gives the transport back: the guards
+          // above, a throw, or the scope being cancelled with the activity.
+          // Leaving the flag set disabled play/pause, seek and Retry itself
+          // ([transportAllowed]) for the rest of the session. Skipped once the
+          // reload has taken a new generation, where the flag was already cleared
+          // deliberately and may since have been claimed by a newer retry.
+          if (loadGeneration == retryGeneration) retryInFlight = false
         }
-        retryInFlight = false
-        val refreshedStream = refreshed?.takeIf { !it.url.isNullOrBlank() }
-        if (refreshedStream != null && !applyResolvedStream(refreshedStream)) {
-          showPlaybackError(getString(R.string.player_refreshed_stream_blocked))
-          return@launch
-        }
-        loadCurrentFile(replace = true, startMs = restartMs)
-        showOsd()
       }
       return
     }
@@ -1915,10 +2070,21 @@ class MpvPlayerActivity : ComponentActivity() {
     // The season ran out here, and TMDB's season list is the only place the number
     // of the next one can come from: seasons are not always consecutive.
     val seasons = client.details(MediaType.Show, tmdbId).seasons.map { it.seasonNumber }
-    val nextSeason = NextEpisodeFinder.nextSeason(currentSeason, seasons) ?: return null
-    val episodes = client.season(tmdbId, nextSeason)
-    val first = NextEpisodeFinder.firstOfSeason(episodes.map { it.ref() }, nextSeason) ?: return null
-    return episodes.first { it.ref() == first }.target()
+    // An announced season with no episodes in it is common on TMDB - a renewal is
+    // entered as soon as it is public, months before the episode list exists - and
+    // it used to end the binge outright, even with a fully populated season sitting
+    // behind it. Walk past the empty ones instead. Bounded, because each step is a
+    // season request and the point is to reach the next episode, not to survey the
+    // series: past a couple of empty announcements there is nothing to play on to.
+    var searchFrom = currentSeason
+    repeat(EMPTY_SEASON_PROBES) {
+      val nextSeason = NextEpisodeFinder.nextSeason(searchFrom, seasons) ?: return null
+      val episodes = client.season(tmdbId, nextSeason)
+      val first = NextEpisodeFinder.firstOfSeason(episodes.map { it.ref() }, nextSeason)
+      if (first != null) return episodes.first { it.ref() == first }.target()
+      searchFrom = nextSeason
+    }
+    return null
   }
 
   private fun EpisodeItem.ref() = NextEpisodeFinder.EpisodeRef(seasonNumber, episodeNumber)
@@ -1991,7 +2157,14 @@ class MpvPlayerActivity : ComponentActivity() {
       target = target,
       secondsLeft = countdown?.let { UpNextPolicy.secondsLeft(0L, it.totalMs) },
       resolving = false,
-      progress = 1f,
+      // Led by one tick, exactly as [upNextTickRunnable] publishes it: the bar
+      // tweens toward each value over the tick interval, so a full bar published
+      // at t=0 gives it nowhere to travel for the first second and the countdown
+      // appears to start a second late. An offer with no clock keeps the full bar
+      // it has always had, having nothing to count down.
+      progress = countdown
+        ?.let { PlaybackFrameRate.progressRemaining(UP_NEXT_TICK_MS, it.totalMs) }
+        ?: 1f,
     )
     if (countdown != null) {
       upNextCountdownTotalMs = countdown.totalMs
@@ -3355,6 +3528,10 @@ class MpvPlayerActivity : ComponentActivity() {
       settleSeekRequest(request)
       return
     }
+    // mpv has the command now, so a bare PLAYBACK_RESTART may be attributed to it. Recorded before
+    // the gate check: a request superseded by a newer press loses its timeout but its command still
+    // ran, and its restart is still the one that retires it.
+    seeker.noteCommandAccepted(request)
     // The completion runs on main only after the worker released mpv's core lock. Starting the
     // timeout when the mutation was merely queued made a busy core expire it before mpv saw it.
     if (!seekSettleTimeoutGate.completeMutation(request, succeeded = true)) return
@@ -3965,8 +4142,12 @@ class MpvPlayerActivity : ComponentActivity() {
    */
   private fun fetchExternalSubtitles() {
     val imdb = imdbId?.takeIf { it.isNotBlank() } ?: return
-    if (externalSubtitles.value == ExternalSubtitlesState.Loading) return
-    externalSubtitles.value = ExternalSubtitlesState.Loading
+    if (externalSubtitles.value is ExternalSubtitlesState.Loading) return
+    // Whatever the menu was showing rides through the search. A previous Ready is also kept
+    // whole for the failure path below: a re-search that fails must not cost the results the
+    // last successful one already put on the menu.
+    val before = externalSubtitles.value as? ExternalSubtitlesState.Ready
+    externalSubtitles.value = ExternalSubtitlesState.Loading(before?.options.orEmpty())
     // Captured, so a response that lands after a binge has moved on can be
     // recognised as belonging to the episode before this one.
     val forGeneration = loadGeneration
@@ -4000,13 +4181,25 @@ class MpvPlayerActivity : ComponentActivity() {
       ) {
         return@launch
       }
+      // The stream's own files are not a search result and must survive one either way. They
+      // arrive with the launch intent and are never fetched again, so publishing the online list
+      // on its own — or a bare Failed — would take them off the menu for the rest of the session
+      // over a request that was never load-bearing in the first place. The same holds for a
+      // previous search's results on a failed re-search: the last Ready list comes back exactly
+      // as it was, and Failed is reserved for a search that had nothing behind it to keep.
+      val embedded = embeddedSubtitleOptions()
       if (found == null) {
-        externalSubtitles.value = ExternalSubtitlesState.Failed
+        externalSubtitles.value = when {
+          before != null -> before
+          embedded.isEmpty() -> ExternalSubtitlesState.Failed
+          else -> ExternalSubtitlesState.Ready(embedded)
+        }
         showOsdMessage(getString(R.string.player_subtitle_fetch_failed))
         return@launch
       }
-      externalSubtitles.value =
-        ExternalSubtitlesState.Ready(ExternalSubtitles.options(found, preferred))
+      externalSubtitles.value = ExternalSubtitlesState.Ready(
+        ExternalSubtitles.merge(embedded, ExternalSubtitles.options(found, preferred)),
+      )
     }
   }
 
@@ -4029,6 +4222,7 @@ class MpvPlayerActivity : ComponentActivity() {
       val localFile = suspendRunCatching {
         downloadSubtitle(
           rawUrl = option.url,
+          languageCode = option.lang,
           generation = generation,
           sourceStreamUrl = sourceStreamUrl,
           sourceRequestHeaders = sourceRequestHeaders,
@@ -4095,9 +4289,15 @@ class MpvPlayerActivity : ComponentActivity() {
     }
   }
 
-  /** Downloads one subtitle with cancellation, a strict size ceiling and the stream's safe headers. */
+  /**
+   * Downloads one subtitle with cancellation, a strict size ceiling and the stream's safe headers.
+   *
+   * [languageCode] is carried all the way down because it is the only clue to the file's encoding
+   * that exists before the bytes are read - see [downloadSubtitleBody].
+   */
   private suspend fun downloadSubtitle(
     rawUrl: String,
+    languageCode: String,
     generation: Long,
     sourceStreamUrl: String,
     sourceRequestHeaders: Map<String, String>,
@@ -4134,6 +4334,7 @@ class MpvPlayerActivity : ComponentActivity() {
             downloadSubtitleBody(
               response = response,
               sourceUrl = currentUrl,
+              languageCode = languageCode,
               generation = generation,
             ),
           )
@@ -4149,9 +4350,26 @@ class MpvPlayerActivity : ComponentActivity() {
     }
   }
 
+  /**
+   * The response body as a local file mpv can actually read, which means as UTF-8.
+   *
+   * The transcode is not optional and cannot be delegated. The shipped `dev.jdtech.mpv:libmpv` is
+   * built with iconv disabled and without uchardet, so `sub-codepage` is inert and mpv reads every
+   * subtitle file as UTF-8 - and a large share of what subtitle addons serve is a legacy Windows
+   * code page, which then draws as mojibake with no error anywhere to explain it. [SubtitleCharset]
+   * is where the guessing lives; this is only the plumbing that has to hold the bytes long enough
+   * for it to run.
+   *
+   * Which is why the body is collected in memory before anything is written: deciding whether a
+   * file is valid UTF-8 is a statement about all of its bytes, so there is nothing useful to write
+   * until the last one has arrived. The read stays streamed and stays bounded by the same running
+   * [MAX_SUBTITLE_BYTES] ceiling as before, so a host that answers with an endless body is cut off
+   * at exactly the same point it always was - the ceiling is now what bounds the memory too.
+   */
   private fun downloadSubtitleBody(
     response: okhttp3.Response,
     sourceUrl: String,
+    languageCode: String,
     generation: Long,
   ): File {
     if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
@@ -4163,21 +4381,25 @@ class MpvPlayerActivity : ComponentActivity() {
       ?.takeIf { it in SUBTITLE_EXTENSIONS }
       ?.let { ".$it" }
       ?: ".sub"
+    val downloaded = body.byteStream().use { input ->
+      val collected = ByteArrayOutputStream(DEFAULT_BUFFER_SIZE)
+      val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+      var total = 0L
+      while (true) {
+        val read = input.read(buffer)
+        if (read < 0) break
+        total += read
+        if (total > MAX_SUBTITLE_BYTES) throw IOException("Subtitle is too large")
+        collected.write(buffer, 0, read)
+      }
+      collected.toByteArray()
+    }
+    val utf8 = SubtitleCharset.toUtf8(downloaded, languageCode)
+    // Created only once there is something to put in it, so a body that overran the ceiling or a
+    // connection that dropped leaves no temp file behind at all.
     val destination = File.createTempFile("nebula-sub-$generation-", suffix, cacheDir)
     try {
-      body.byteStream().use { input ->
-        destination.outputStream().use { output ->
-          val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-          var total = 0L
-          while (true) {
-            val read = input.read(buffer)
-            if (read < 0) break
-            total += read
-            if (total > MAX_SUBTITLE_BYTES) throw IOException("Subtitle is too large")
-            output.write(buffer, 0, read)
-          }
-        }
-      }
+      destination.writeBytes(utf8)
     } catch (error: Throwable) {
       destination.delete()
       throw error
@@ -4359,18 +4581,33 @@ class MpvPlayerActivity : ComponentActivity() {
     val encodings = devices
       .map { it.encodings.toSet() }
       .reduce { common, device -> common.intersect(device) }
-    return buildList {
-      if (AudioFormat.ENCODING_AC3 in encodings) add("ac3")
-      if (
-        AudioFormat.ENCODING_E_AC3 in encodings ||
-        AudioFormat.ENCODING_E_AC3_JOC in encodings
-      ) {
-        add("eac3")
-      }
-      if (AudioFormat.ENCODING_DTS in encodings) add("dts")
-      if (AudioFormat.ENCODING_DTS_HD in encodings) add("dts-hd")
-      if (AudioFormat.ENCODING_DOLBY_TRUEHD in encodings) add("truehd")
-    }.joinToString(",")
+    // The intersection to mpv's `audio-spdif` value through [AudioOutputMode],
+    // which is the documented owner of that mapping and the only version of it
+    // with unit tests. There used to be a second copy here, and the two agreeing
+    // on spelling and canonical order was maintenance rather than structure.
+    // Empty, not null, for "no passthrough": every caller here asks whether the
+    // route can carry a bitstream at all, and an empty `audio-spdif` is also
+    // exactly what decoding everything is written as.
+    return AudioOutputMode.Passthrough.spdifCodecsFor(sinkCodecNames(encodings)).orEmpty()
+  }
+
+  /**
+   * Android's encoding constants in mpv's spelling, which is the only form
+   * [AudioOutputMode.spdifCodecsFor] can match against. E-AC-3 with joint object
+   * coding is folded into `eac3`: mpv has no separate name for it, and a sink that
+   * takes Atmos over E-AC-3 takes E-AC-3.
+   */
+  private fun sinkCodecNames(encodings: Set<Int>): Set<String> = buildSet {
+    if (AudioFormat.ENCODING_AC3 in encodings) add("ac3")
+    if (
+      AudioFormat.ENCODING_E_AC3 in encodings ||
+      AudioFormat.ENCODING_E_AC3_JOC in encodings
+    ) {
+      add("eac3")
+    }
+    if (AudioFormat.ENCODING_DTS in encodings) add("dts")
+    if (AudioFormat.ENCODING_DTS_HD in encodings) add("dts-hd")
+    if (AudioFormat.ENCODING_DOLBY_TRUEHD in encodings) add("truehd")
   }
 
   /**
@@ -4719,13 +4956,19 @@ class MpvPlayerActivity : ComponentActivity() {
    *
    * Persisted rather than kept per-session: teaching a viewer the D-pad map is a once-per-install
    * job, and a legend that came back every time they relaunched would never stop being noise.
+   *
+   * On [persistenceScope] like every other preference write, and for a sharper reason than
+   * consistency: [showOsd] is very often the last thing that happens before BACK — a seek, a pause,
+   * a message, then out — and a write on `lifecycleScope` is cancelled at onDestroy. The count that
+   * retires the legend was the one preference that could never be recorded on the way out.
    */
   private fun noteOsdOpened() {
     val seen = osdOpens.intValue
     if (!OsdHintPolicy.showsHint(seen)) return
     val next = OsdHintPolicy.advance(seen)
     osdOpens.intValue = next
-    lifecycleScope.launch { runCatching { playerPrefsStore.setOsdOpens(next) } }
+    val store = playerPrefsStore
+    persistenceScope.launch { runCatching { store.setOsdOpens(next) } }
   }
 
   /**
@@ -4874,6 +5117,19 @@ class MpvPlayerActivity : ComponentActivity() {
     // Read here, not inside the coroutine: these saves run while the activity is
     // finishing, and touching it after onDestroy is what this avoids.
     val appContext = applicationContext
+    // `durationMs` is zero until mpv reports a duration, which is a real state and
+    // not a placeholder: a save taken in the first seconds of a file, or on a live
+    // stream that never reports one, genuinely knows no runtime. Two things make
+    // that harmless. Here, the watched verdict cannot be reached without a
+    // duration - [WatchedThreshold.isFinished] returns false for anything not
+    // positive, so [reachedEndOfFile] is false and nothing is marked watched off a
+    // zero. In the store, [WatchStateStore.upsert] keeps the existing entry's
+    // duration when the incoming one is not positive, which is the contract this
+    // relies on: a record wholesale-replaced by a zero would drop the runtime off
+    // a Continue Watching row that had it, and take the progress bar with it. The
+    // launcher does hold a duration (it reads the same entry to get resumeMs) but
+    // there is no extra carrying it, and inventing one to seed a value the store
+    // already preserves would be plumbing for its own sake.
     val entry = WatchEntry(
       key = key,
       tmdbId = tmdbId,
@@ -4947,6 +5203,8 @@ class MpvPlayerActivity : ComponentActivity() {
     // A countdown must not start an episode into an empty room, but the card stays
     // up: coming back to the offer is exactly what a viewer left it for.
     freezeUpNextCountdown()
+    // Same argument for the clock on a stream that has not opened yet.
+    suspendLoadWatchdog()
     // Pause on onStop rather than onPause: onPause also fires for transient
     // overlays, where stopping playback is just an annoyance. Deliberately not
     // marked as a focus-loss pause: a player the viewer left in the background
@@ -4966,6 +5224,9 @@ class MpvPlayerActivity : ComponentActivity() {
     // refilling, or the first minute of the returning session runs on a background-sized cache.
     applyBackgroundDemuxerCache(background = false)
     syncAudioDeviceCallback(register = true)
+    // The load this activity was waiting on when it went away is being watched
+    // again, so its clock starts again too.
+    resumeLoadWatchdog()
     mediaSession?.isActive = playbackStarted
     publishPlaybackState()
     // Came back to a stream we paused on the way out; surface the OSD so the
@@ -5093,11 +5354,15 @@ class MpvPlayerActivity : ComponentActivity() {
     private const val SEEK_SETTLE_TIMEOUT_MS = 15_000L
 
     /**
-     * How close to the end a seek may land. Shared with the watched verdict on
-     * purpose: a seek that stops short of the same margin cannot accidentally
-     * finish the video, and one that crosses it means to.
+     * How close to the end a seek may land, from the coalescer that enforces it.
+     *
+     * It used to be [WatchedThreshold]'s constant, on the theory that a seek
+     * stopping short of that margin could not accidentally finish the video. It
+     * could and does: five seconds from the end is 99.6% of a feature and well
+     * past the watched fraction. The margin is only about not running a seek into
+     * eof — see [SeekCoalescer.END_GUARD_SEC].
      */
-    private const val END_GUARD_SEC = WatchedThreshold.END_GUARD_SEC
+    private const val END_GUARD_SEC = SeekCoalescer.END_GUARD_SEC
 
     /**
      * How often the up-next countdown redraws; see [upNextTickRunnable]. One second, which is the
@@ -5113,6 +5378,14 @@ class MpvPlayerActivity : ComponentActivity() {
      */
     private const val UP_NEXT_TICK_MS = 1_000L
     private const val UP_NEXT_LOOKUP_ATTEMPTS = 3
+
+    /**
+     * How many announced-but-empty seasons the next-episode lookup will walk past
+     * before giving up; see [resolveNextEpisode]. Three covers the real shape of
+     * the problem (a renewal or two entered ahead of the episode list) at a cost
+     * of at most three season requests, spent once per file while it plays.
+     */
+    private const val EMPTY_SEASON_PROBES = 3
     private const val UP_NEXT_LOOKUP_RETRY_MS = 30_000L
     private const val FRAME_RATE_READ_ATTEMPTS = 3
     private const val FRAME_RATE_READ_RETRY_MS = 1_000L
@@ -5181,6 +5454,23 @@ class MpvPlayerActivity : ComponentActivity() {
      * would kill a stream that was about to play.
      */
     private const val LOAD_TIMEOUT_MS = 60_000L
+
+    /**
+     * The least a load watchdog resumed by [resumeLoadWatchdog] may have left.
+     *
+     * A budget that ran out while the player was in the background says nothing
+     * about the stream — nobody was watching it — so a viewer coming back gets at
+     * least this long in front of the spinner before it is called a failure.
+     */
+    private const val LOAD_WATCHDOG_RESUME_MIN_MS = 10_000L
+
+    /**
+     * How long re-resolving an expired link behind Retry may take. Shorter than
+     * [LOAD_TIMEOUT_MS] because it is a handful of addon requests rather than a
+     * torrent gathering peers, and because the fallback — reloading the link that
+     * expired — is quick to fail and gives the transport back either way.
+     */
+    private const val STREAM_REFRESH_TIMEOUT_MS = 30_000L
 
     /**
      * Grace after an end-of-file that arrived before the stream ever loaded. mpv

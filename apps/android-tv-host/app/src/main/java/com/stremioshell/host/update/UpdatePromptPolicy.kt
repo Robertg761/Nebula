@@ -43,4 +43,30 @@ object UpdatePromptPolicy {
 
     return if (needsUnknownSourcesPermission) Prompt.ENABLE_UNKNOWN_SOURCES else Prompt.INSTALL
   }
+
+  /**
+   * Whether an error message left on screen by the previous evaluation still describes what the
+   * next one resolved to.
+   *
+   * The prompt's error is remembered outside the evaluation, because it has to survive the
+   * evaluation that fires when the user comes back from a failed installer. That made it outlive
+   * too much: a resolution to [Prompt.NONE] hides the dialog without clearing the text, so weeks
+   * later a completely different release raised the dialog still carrying "Install failed" and,
+   * worse, still offering "Check download" as its primary button instead of "Install".
+   *
+   * @param previousVersionName version the error was recorded against, null if none was.
+   */
+  fun retainsError(
+    previousVersionName: String?,
+    nextPrompt: Prompt,
+    nextVersionName: String?,
+  ): Boolean {
+    if (nextPrompt == Prompt.NONE || nextVersionName == null) {
+      return false
+    }
+    if (previousVersionName == null) {
+      return false
+    }
+    return ApkUpdateManager.isSameRelease(previousVersionName, nextVersionName)
+  }
 }

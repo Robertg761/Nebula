@@ -96,6 +96,16 @@ private sealed interface SettingsExit : Parcelable {
   data class Root(val screen: Screen, val focusSearchField: Boolean = false) : SettingsExit
 }
 
+/**
+ * Which external launch request is waiting on the unsaved-settings dialog, if any.
+ *
+ * The request itself stays where it already lives - the activity holds it, and its one-shot
+ * callbacks are the only way to spend it - so all this has to carry across the dialog is which of
+ * the three asked. Saveable, because the dialog it belongs to is: the activity can be recreated
+ * while it is on screen.
+ */
+private enum class ParkedLaunch { DeepLink, Search, Settings }
+
 /** Clears a one-shot request only when the acknowledging screen handled this exact token. */
 internal fun consumeMatchingRequest(current: Int, handled: Int): Int =
   if (current == handled) 0 else current
@@ -114,6 +124,10 @@ internal fun consumeMatchingRequest(current: Int, handled: Int): Int =
  * @param pendingOpenSettings a `stremio-tv://settings` link. Cleared through
  *   [onPendingOpenSettingsHandled]; routed like the drawer's own Settings item, so an
  *   unsaved draft still gets its dialog rather than being silently replaced.
+ *
+ * All three of the launch requests are cleared when they have been *honoured*, not when they have
+ * been read: an unsaved Settings draft turns any of them into a dialog, and a request only that
+ * dialog has seen is still outstanding. See [ParkedLaunch].
  */
 @Composable
 fun TvApp(
@@ -153,6 +167,9 @@ fun TvApp(
   var leaveAfterSave by rememberSaveable { mutableStateOf<SettingsExit?>(null) }
   var settingsSaveRequest by rememberSaveable { mutableIntStateOf(0) }
   var settingsResetRequest by rememberSaveable { mutableIntStateOf(0) }
+  // Which external launch request, if any, the unsaved-settings dialog is currently holding up.
+  // See [resolveParkedLaunch].
+  var parkedLaunch by rememberSaveable { mutableStateOf<ParkedLaunch?>(null) }
 
   fun push(screen: Screen) = backstack.add(screen)
 
@@ -216,13 +233,19 @@ fun TvApp(
     }
   }
 
-  fun openRootDestination(screen: Screen, focusSearchField: Boolean = false) {
+  /**
+   * @return true when the navigation happened. False means it was *parked*: a dirty Settings draft
+   *   turned it into a question for the viewer, and until that dialog resolves nothing has been
+   *   navigated to. A caller holding a one-shot request has to keep holding it on a false.
+   */
+  fun openRootDestination(screen: Screen, focusSearchField: Boolean = false): Boolean {
     val exit = SettingsExit.Root(screen, focusSearchField)
     if (settingsIndex() >= 0 && settingsDirty && screen != Screen.Settings) {
       pendingSettingsExit = exit
-    } else {
-      performSettingsExit(exit)
+      return false
     }
+    performSettingsExit(exit)
+    return true
   }
 
   fun openPairFromSettings() {
@@ -231,6 +254,31 @@ fun TvApp(
     } else {
       performSettingsExit(SettingsExit.Pair)
     }
+  }
+
+  /**
+   * Spends an external launch request that [openRootDestination] parked behind the dialog.
+   *
+   * [performed] says whether the navigation it asked for has just happened. Either way the request
+   * is now spent: the viewer has been asked and has answered, and a "no" is an answer. It used to
+   * be spent at the moment it was *parked*, which read as handled and was not - cancelling the
+   * dialog then dropped a Watch Next title, a spoken query or a settings link on the floor with
+   * nothing on screen to say where it went.
+   */
+  fun resolveParkedLaunch(performed: Boolean) {
+    when (parkedLaunch ?: return) {
+      ParkedLaunch.DeepLink -> onPendingDeepLinkHandled()
+      ParkedLaunch.Search -> {
+        // Loaded into the ViewModel only now, and only for a screen that is actually being opened:
+        // a query submitted for a declined request would sit there waiting to appear under the
+        // viewer the next time they went to Search of their own accord.
+        val query = pendingSearch?.query.orEmpty()
+        if (performed && query.isNotEmpty()) viewModel.submitVoiceQuery(query)
+        onPendingSearchHandled()
+      }
+      ParkedLaunch.Settings -> onPendingOpenSettingsHandled()
+    }
+    parkedLaunch = null
   }
 
   BackHandler(enabled = backstack.size > 1) {
@@ -254,30 +302,47 @@ fun TvApp(
   // A Watch Next row names a title, not a place in the stack. Rooting it on Home
   // means BACK out of it lands where the launcher icon would have, instead of
   // dropping straight out of the app.
+  //
+  // All three of these acknowledge their request only on a navigation that actually happened.
+  // Parked behind the unsaved-settings dialog the request is still outstanding, so it is held and
+  // spent by [resolveParkedLaunch] once the viewer answers.
   LaunchedEffect(pendingLaunchId, pendingDeepLink) {
     val target = pendingDeepLink ?: return@LaunchedEffect
-    openRootDestination(target)
-    onPendingDeepLinkHandled()
+    if (openRootDestination(target)) {
+      onPendingDeepLinkHandled()
+    } else {
+      parkedLaunch = ParkedLaunch.DeepLink
+    }
   }
 
-  // The query runs before the screen exists, so results are already in flight by the time
-  // it paints - and the field seeds itself from the ViewModel, which is why this does not
-  // have to reach into SearchScreen. Rooted on Home like the deep link, and through the
-  // same drawer helper, so a search key press while already searching keeps the screen the
-  // viewer is on rather than resetting it.
+  // The query runs before the screen paints, so results are already in flight by the time it
+  // does - and the field seeds itself from the ViewModel, which is why this does not have to
+  // reach into SearchScreen. It is submitted after the navigation rather than before asking for
+  // it: both land in the same frame, and this way a query is never loaded for a Search screen the
+  // viewer went on to decline. Rooted on Home like the deep link, and through the same drawer
+  // helper, so a search key press while already searching keeps the screen the viewer is on
+  // rather than resetting it.
   LaunchedEffect(pendingLaunchId, pendingSearch) {
     val request = pendingSearch ?: return@LaunchedEffect
-    if (request.query.isNotEmpty()) viewModel.submitVoiceQuery(request.query)
-    openRootDestination(Screen.Search, focusSearchField = request.query.isEmpty())
-    onPendingSearchHandled()
+    if (openRootDestination(Screen.Search, focusSearchField = request.query.isEmpty())) {
+      if (request.query.isNotEmpty()) viewModel.submitVoiceQuery(request.query)
+      onPendingSearchHandled()
+    } else {
+      parkedLaunch = ParkedLaunch.Search
+    }
   }
 
   // Through the same drawer helper as the rail's own Settings item, so a dirty draft is
-  // guarded by its dialog and a second link while already there keeps the existing entry.
+  // guarded by its dialog and a second link while already there keeps the existing entry. A
+  // request *for* Settings is the one destination the dialog never holds up - the draft it guards
+  // is the very screen being asked for - but the verdict is honoured rather than assumed.
   LaunchedEffect(pendingLaunchId, pendingOpenSettings) {
     if (!pendingOpenSettings) return@LaunchedEffect
-    openRootDestination(Screen.Settings)
-    onPendingOpenSettingsHandled()
+    if (openRootDestination(Screen.Settings)) {
+      onPendingOpenSettingsHandled()
+    } else {
+      parkedLaunch = ParkedLaunch.Settings
+    }
   }
 
   val openDetails: (MediaType, Int) -> Unit = { type, id -> push(Screen.Details(type, id)) }
@@ -401,9 +466,16 @@ fun TvApp(
               onSaveComplete = { success ->
                 val exit = leaveAfterSave
                 leaveAfterSave = null
-                if (success && exit != null) {
-                  settingsDirty = false
-                  performSettingsExit(exit)
+                if (exit != null) {
+                  if (success) {
+                    settingsDirty = false
+                    performSettingsExit(exit)
+                  }
+                  // This is where "Save & leave" finally answers a parked launch request. A save
+                  // that failed leaves the viewer in the form with the reason on screen and the
+                  // navigation never happens, which is as final an answer as a cancel: the request
+                  // is spent either way rather than waiting on a trip that is not coming.
+                  resolveParkedLaunch(performed = success)
                 }
               },
             )
@@ -491,9 +563,16 @@ fun TvApp(
           pendingSettingsExit = null
           settingsDirty = false
           performSettingsExit(exit)
+          resolveParkedLaunch(performed = true)
         },
       ),
-      onDismiss = { pendingSettingsExit = null },
+      // Cancel, or BACK out of the dialog: the viewer chose to stay with their draft. An external
+      // request that was waiting on this is dropped here, deliberately and at the moment they said
+      // so, rather than having been quietly discarded when the dialog opened.
+      onDismiss = {
+        pendingSettingsExit = null
+        resolveParkedLaunch(performed = false)
+      },
     )
   }
 }

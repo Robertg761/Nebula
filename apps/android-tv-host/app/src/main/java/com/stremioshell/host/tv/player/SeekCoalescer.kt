@@ -101,10 +101,19 @@ internal class SeekSettleTimeoutGate {
  */
 class SeekCoalescer(
   /**
-   * How far short of the end a forward seek stops. Seeking into eof ends the
-   * session and marks the video watched, which is not what a seek should do.
+   * How far short of the end a forward seek stops.
+   *
+   * This is an eof guard and nothing more: running a seek into eof ends the
+   * session outright — mpv raises `eof-reached`, the player treats it as the end
+   * of the video and the up-next card takes the screen — which is not what a
+   * press of FFWD asked for. Landing here still leaves the video *watched*, and
+   * deliberately so: five seconds from the end is past
+   * [WatchedThreshold.FINISHED_FRACTION] for anything longer than fifty seconds,
+   * and a viewer who seeks there has finished it. The claim this KDoc used to
+   * make — that a clamped seek "cannot accidentally finish the video" — was
+   * never true; the clamp landed exactly on the watched threshold.
    */
-  private val endGuardSec: Double = 5.0,
+  private val endGuardSec: Double = END_GUARD_SEC,
   /** Floor on the interval between accepted repeats, so held keys scrub at a sane rate. */
   private val repeatMinIntervalMs: Long = 120L,
   /**
@@ -119,10 +128,28 @@ class SeekCoalescer(
 ) {
   private var target = NO_TARGET
   private var pending = false
-  private var lastAcceptedMs = Long.MIN_VALUE
+
+  /**
+   * When the last press was accepted, or null when none ever has been.
+   *
+   * Null rather than a numeric sentinel: `nowMs - Long.MIN_VALUE` overflows to a
+   * negative interval, so the very first press of a session was measured as
+   * arriving *before* the floor had elapsed. A held key whose first event already
+   * carries `isRepeat` — which is what a remote that was down before this file
+   * opened delivers — was dropped, and so was every repeat after it, until the
+   * viewer let go and pressed again.
+   */
+  private var lastAcceptedMs: Long? = null
   private var generation = 0L
   private var nextSequence = 1L
   private val inFlight = mutableListOf<SeekRequest>()
+
+  /**
+   * Sequences whose command mpv has confirmed taking delivery of, out of those in
+   * [inFlight]. A restart can only be reporting a seek mpv has actually been
+   * handed; see [restartOwner].
+   */
+  private val acceptedSequences = mutableSetOf<Long>()
 
   /**
    * Where an outstanding seek is heading, or null when the position should come
@@ -159,7 +186,8 @@ class SeekCoalescer(
     nowMs: Long,
   ): Double? {
     if (!deltaSec.isFinite() || deltaSec == 0.0) return null
-    if (isRepeat && nowMs - lastAcceptedMs < repeatMinIntervalMs) return null
+    val sinceAccepted = lastAcceptedMs?.let { nowMs - it }
+    if (isRepeat && sinceAccepted != null && sinceAccepted < repeatMinIntervalMs) return null
     lastAcceptedMs = nowMs
 
     val reportedPosition = positionSec.takeIf(Double::isFinite)?.coerceAtLeast(0.0)
@@ -233,6 +261,41 @@ class SeekCoalescer(
   }
 
   /**
+   * Records that mpv has taken delivery of [request]'s command — that the native
+   * call returned, not that playback has resumed at the target.
+   *
+   * Until this is called the request is outstanding on this side only: it has
+   * been consumed and is queued behind whatever the mpv worker is already doing,
+   * which on a stalled network stream can be seconds of waiting on the core lock.
+   * A playback restart arriving in that window cannot possibly be reporting it.
+   */
+  fun noteCommandAccepted(request: SeekRequest) {
+    if (request.generation != generation) return
+    if (inFlight.none { it.sequence == request.sequence }) return
+    acceptedSequences += request.sequence
+  }
+
+  /**
+   * Which outstanding request an untagged playback restart belongs to, or null
+   * when it belongs to none of ours.
+   *
+   * Restarts also arrive from the initial load, from cache-stall recovery and
+   * from a track or video reinit, and they carry no user data to tell them apart
+   * by. The oldest command mpv has confirmed accepting (see [noteCommandAccepted])
+   * is the only one a restart can plausibly be reporting; with none, the restart
+   * is somebody else's and the preview must survive it untouched.
+   *
+   * One ordering is deliberately given up: if the acceptance callback and the
+   * restart cross on their way to the main thread — sub-millisecond scheduling
+   * jitter, since the restart follows the native call by a decode — the restart
+   * is attributed to nobody and the seek waits for the caller's settle timeout.
+   * The alternative, treating an unaccepted command as a restart candidate,
+   * re-opens the whole bug for the case it matters in: a restart during the stall
+   * the command is queued behind.
+   */
+  fun restartOwner(): SeekRequest? = inFlight.firstOrNull { it.sequence in acceptedSequences }
+
+  /**
    * Compatibility form that discards the request's identity and always asks for keyframes.
    *
    * No longer on the player's path: it issues [consumePendingRequest] with
@@ -262,6 +325,7 @@ class SeekCoalescer(
     inFlight.removeAll {
       it.generation == request.generation && it.sequence <= request.sequence
     }
+    acceptedSequences.retainAll(inFlight.mapTo(mutableSetOf()) { it.sequence })
 
     val newerIssued = inFlight.any {
       it.generation == generation && it.sequence > request.sequence
@@ -276,8 +340,12 @@ class SeekCoalescer(
    * Compatibility form for an untagged playback-restart callback.
    *
    * Requests are retired in issue order. Crucially, a restart for A no longer
-   * clears B merely because B was consumed before A's callback arrived. New
-   * integrations should prefer [settle] with the exact [SeekRequest].
+   * clears B merely because B was consumed before A's callback arrived.
+   *
+   * It retires the oldest outstanding request whether or not mpv has been handed
+   * it yet, which is what makes it wrong for a caller that receives restarts it
+   * did not cause: the player therefore settles [restartOwner] by identity
+   * instead. New integrations should do the same.
    *
    * Returns true only when the newest target was retired and the preview was
    * handed back to mpv, preserving the method's original contract.
@@ -297,10 +365,21 @@ class SeekCoalescer(
     target = NO_TARGET
     pending = false
     inFlight.clear()
+    acceptedSequences.clear()
     generation++
   }
 
-  private companion object {
-    const val NO_TARGET = -1.0
+  companion object {
+    /**
+     * The default [endGuardSec], and the player's own: how far short of the end a
+     * forward seek is allowed to land. It lives here rather than beside
+     * [WatchedThreshold] because stopping short of eof is a property of seeking,
+     * not of what counts as watched — the two were one constant while
+     * [WatchedThreshold] had a matching absolute guard, and that guard turned out
+     * to be unreachable.
+     */
+    const val END_GUARD_SEC = 5.0
+
+    private const val NO_TARGET = -1.0
   }
 }

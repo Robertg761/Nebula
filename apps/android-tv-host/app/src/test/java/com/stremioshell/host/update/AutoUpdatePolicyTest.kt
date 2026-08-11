@@ -54,4 +54,53 @@ class AutoUpdatePolicyTest {
     assertEquals(AutoUpdatePolicy.Decision.START_DOWNLOAD, decision)
   }
 
+  @Test
+  fun `does not re-download a release this device already rejected`() {
+    // The ~117 MB loop: a release that fails the archive check is deleted, and without this the
+    // six-hourly worker fetched the identical file again, forever.
+    val decision = AutoUpdatePolicy.decide(
+      updateInfo = sampleUpdate,
+      hasDownloadedForVersion = false,
+      hasActiveDownload = false,
+      isRejectedRelease = true
+    )
+
+    assertEquals(AutoUpdatePolicy.Decision.REJECTED_RELEASE, decision)
+  }
+
+  @Test
+  fun `an active download still outranks a remembered rejection`() {
+    // The rejection is keyed on the version, and a download in flight is the more specific fact.
+    assertEquals(
+      AutoUpdatePolicy.Decision.DOWNLOAD_IN_PROGRESS,
+      AutoUpdatePolicy.decide(
+        updateInfo = sampleUpdate,
+        hasDownloadedForVersion = false,
+        hasActiveDownload = true,
+        isRejectedRelease = true
+      )
+    )
+    assertEquals(
+      AutoUpdatePolicy.Decision.ALREADY_DOWNLOADED,
+      AutoUpdatePolicy.decide(
+        updateInfo = sampleUpdate,
+        hasDownloadedForVersion = true,
+        hasActiveDownload = false,
+        isRejectedRelease = true
+      )
+    )
+  }
+
+  @Test
+  fun `a rejection cannot invent an update out of nothing`() {
+    assertEquals(
+      AutoUpdatePolicy.Decision.NO_UPDATE,
+      AutoUpdatePolicy.decide(
+        updateInfo = null,
+        hasDownloadedForVersion = false,
+        hasActiveDownload = false,
+        isRejectedRelease = true
+      )
+    )
+  }
 }

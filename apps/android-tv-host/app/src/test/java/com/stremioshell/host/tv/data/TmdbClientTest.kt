@@ -394,6 +394,50 @@ class TmdbClientTest {
   }
 
   @Test
+  fun `an explicit null in a catalog page costs its own field, not the page`() = runBlocking {
+    // TMDB writes `"overview": null` for a title nobody has written a synopsis for, which is an
+    // everyday answer - and it used to fail the decode of the whole page, so one such title took
+    // nineteen good cards down with it.
+    val page = client(
+      """
+      {"page":1,"total_pages":3,
+       "results":[
+         {"id":42,"title":"Obsession","overview":null,"poster_path":null,
+          "release_date":null,"vote_average":null},
+         {"id":43,"title":null,"name":"A Show","overview":"Fine."}
+       ]}
+      """.trimIndent(),
+    ).trending(MediaType.Movie)
+
+    assertEquals(2, page.items.size)
+    assertEquals("", page.items.first().overview)
+    assertNull(page.items.first().posterUrl)
+    assertNull(page.items.first().year)
+    assertEquals("A Show", page.items.last().title)
+  }
+
+  @Test
+  fun `an explicit null in a details response costs its own field, not the details screen`() =
+    runBlocking {
+      val details = client(
+        """
+        {"id":9,"title":"Film","overview":null,"genres":[{"name":null},{"name":"Drama"}],
+         "episode_run_time":null,"seasons":null,"credits":{"cast":null},
+         "images":{"logos":null},"videos":{"results":null}}
+        """.trimIndent(),
+      ).details(MediaType.Movie, 9)
+
+      assertEquals("", details.item.overview)
+      // A null genre name coerces to blank and is then dropped: an empty chip says less than no
+      // chip, and neither is worth losing the whole screen over.
+      assertEquals(listOf("Drama"), details.genres)
+      assertEquals(emptyList<Any>(), details.seasons)
+      assertEquals(emptyList<Any>(), details.cast)
+      assertNull(details.logoUrl)
+      assertNull(details.runtimeMinutes)
+    }
+
+  @Test
   fun `catalog and metadata loads propagate stale fallback provenance`() = runBlocking {
     val fetcher = object : HttpFetcher {
       override suspend fun get(url: String): String = error("unexpected direct request")

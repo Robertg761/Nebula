@@ -152,6 +152,44 @@ class AddonClientTest {
   }
 
   @Test
+  fun `an explicit null costs its own field, not the whole response`() = runBlocking {
+    // Addons send nulls where the protocol implies a default. Without coerceInputValues kotlinx
+    // throws on the first one, and a single `"subtitles": null` cost every stream that addon
+    // returned - the viewer sees "no streams found" for a title the addon answered for.
+    val client = AddonClient(fetcher = {
+      """
+      {"streams":[
+        {"name":"Comet 1080p","title":null,"description":null,
+         "url":"https://rd.example/v.mkv","subtitles":null,
+         "behaviorHints":{"filename":null,"countryWhitelist":null,"bingeGroup":"comet|1080p"}},
+        {"name":"Comet 720p","url":"https://rd.example/w.mkv",
+         "subtitles":[{"id":null,"url":"https://subs.example/a.srt","lang":null}]}
+      ]}
+      """.trimIndent()
+    })
+
+    val streams = client.movieStreams("https://comet.example/cfg/manifest.json", "tt1")
+
+    assertEquals(2, streams.size)
+    assertEquals(emptyList<Any>(), streams.first().subtitles)
+    assertEquals(emptyList<String>(), streams.first().behaviorHints?.countryWhitelist)
+    assertEquals("comet|1080p", streams.first().bingeGroup)
+    // Already-nullable fields keep taking the null; coercion is only for the defaulted ones.
+    assertEquals(null, streams.last().subtitles.single().id)
+    assertEquals("https://subs.example/a.srt", streams.last().subtitles.single().url)
+  }
+
+  @Test
+  fun `a null streams array is an empty list of streams, not a failed load`() = runBlocking {
+    val client = AddonClient(fetcher = { """{"streams":null}""" })
+
+    assertEquals(
+      emptyList<Any>(),
+      client.movieStreams("https://comet.example/cfg/manifest.json", "tt1"),
+    )
+  }
+
+  @Test
   fun `cleartext manifest url is rejected before a request path is built`() {
     assertThrows(IllegalArgumentException::class.java) {
       AddonClient.streamUrl("http://comet.example/abc123/manifest.json", "movie", "tt1")

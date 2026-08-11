@@ -6,11 +6,14 @@ import com.stremioshell.host.tv.data.readUtf8Limited
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Locale
 
 internal data class GitHubAssetDto(
   val name: String,
   val browserDownloadUrl: String,
-  val size: Long?
+  val size: Long?,
+  /** Lower-case hex SHA-256 from the asset's `digest` field, null when the release omits it. */
+  val sha256: String? = null
 )
 
 internal data class GitHubLatestReleaseDto(
@@ -50,37 +53,69 @@ class GitHubReleaseApi {
       text
     }
 
-    val json = JSONObject(body)
-    val assets = parseAssets(json.optJSONArray("assets"))
-    return GitHubLatestReleaseDto(
-      tagName = json.optString("tag_name").orEmpty(),
-      htmlUrl = json.optString("html_url").takeIf { it.isNotBlank() },
-      body = json.optString("body").takeIf { it.isNotBlank() },
-      publishedAt = json.optString("published_at").takeIf { it.isNotBlank() },
-      assets = assets
-    )
+    return parseRelease(JSONObject(body))
   }
 
-  private fun parseAssets(rawAssets: JSONArray?): List<GitHubAssetDto> {
-    if (rawAssets == null || rawAssets.length() == 0) {
-      return emptyList()
+  internal companion object {
+    /** GitHub prefixes the asset digest with its algorithm, e.g. `sha256:9f86d0...`. */
+    private const val SHA256_DIGEST_PREFIX = "sha256:"
+
+    internal fun parseRelease(json: JSONObject): GitHubLatestReleaseDto = GitHubLatestReleaseDto(
+      tagName = json.optTrimmedOrNull("tag_name").orEmpty(),
+      htmlUrl = json.optTrimmedOrNull("html_url"),
+      body = json.optTrimmedOrNull("body"),
+      publishedAt = json.optTrimmedOrNull("published_at"),
+      assets = parseAssets(json.optJSONArray("assets"))
+    )
+
+    internal fun parseAssets(rawAssets: JSONArray?): List<GitHubAssetDto> {
+      if (rawAssets == null || rawAssets.length() == 0) {
+        return emptyList()
+      }
+
+      val parsed = mutableListOf<GitHubAssetDto>()
+      for (index in 0 until rawAssets.length()) {
+        val assetJson = rawAssets.optJSONObject(index) ?: continue
+        val name = assetJson.optTrimmedOrNull("name") ?: continue
+        val downloadUrl = assetJson.optTrimmedOrNull("browser_download_url") ?: continue
+        val size = assetJson.optLong("size").takeIf { it > 0L }
+        parsed += GitHubAssetDto(
+          name = name,
+          browserDownloadUrl = downloadUrl,
+          size = size,
+          // Already in the JSON this call fetched. Ignoring it left the updater checking a
+          // ~117 MB download by byte count alone; see DownloadIntegrityPolicy.
+          sha256 = parseSha256Digest(assetJson.optTrimmedOrNull("digest"))
+        )
+      }
+      return parsed
     }
 
-    val parsed = mutableListOf<GitHubAssetDto>()
-    for (index in 0 until rawAssets.length()) {
-      val assetJson = rawAssets.optJSONObject(index) ?: continue
-      val name = assetJson.optString("name").orEmpty().trim()
-      val downloadUrl = assetJson.optString("browser_download_url").orEmpty().trim()
-      if (name.isBlank() || downloadUrl.isBlank()) {
-        continue
+    /**
+     * The hex body of a `sha256:` digest, or null for any other algorithm, a truncated value, or
+     * a field GitHub did not send. Nothing downstream guesses at a malformed digest: an absent
+     * one falls back to the release asset's byte size.
+     */
+    internal fun parseSha256Digest(raw: String?): String? {
+      val value = raw?.trim().orEmpty()
+      if (!value.startsWith(SHA256_DIGEST_PREFIX, ignoreCase = true)) {
+        return null
       }
-      val size = assetJson.optLong("size").takeIf { it > 0L }
-      parsed += GitHubAssetDto(
-        name = name,
-        browserDownloadUrl = downloadUrl,
-        size = size
-      )
+      val hex = value.substring(SHA256_DIGEST_PREFIX.length).trim().lowercase(Locale.ROOT)
+      return hex.takeIf { it.length == 64 && it.all { char -> char in '0'..'9' || char in 'a'..'f' } }
     }
-    return parsed
+
+    /**
+     * org.json has no nullable string accessor: on Android `optString` renders a JSON null as the
+     * four-character string "null", which is how a release published with no body once became an
+     * update prompt whose release notes read `null`. [JSONObject.isNull] is the only way to tell
+     * an absent or null field from a present one.
+     */
+    private fun JSONObject.optTrimmedOrNull(key: String): String? {
+      if (isNull(key)) {
+        return null
+      }
+      return optString(key).trim().takeIf { it.isNotEmpty() }
+    }
   }
 }

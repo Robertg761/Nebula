@@ -151,10 +151,31 @@ class ConfigPairingServerTest {
     // stolen token still cannot read the Real-Debrid-bearing Comet URL off the TV.
     assertTrue(reply.body, reply.body.contains("""placeholder="Leave empty to keep current key""""))
     assertTrue(reply.body, reply.body.contains("></textarea>"))
-    assertFalse(reply.body, reply.body.contains("""<input name="tmdb" value="""))
+    // Checked as "no field on this page carries a value at all", not as one exact attribute
+    // spelling. The assertion used to be `<input name="tmdb" value=`, which this form does not and
+    // never did emit - it writes `<input id="tmdb" name="tmdb"` - so it held whatever the page
+    // contained. A pre-filled key would arrive as a `value=` on either input, in whichever
+    // attribute order, and none of them is allowed.
+    assertFalse(reply.body, reply.body.contains("value="))
     // ...and it carries the token onward in the action, where the server can authenticate before
     // parsing the credential-bearing body.
     assertTrue(reply.body, reply.body.contains("""action="/config?t=$token""""))
+  }
+
+  @Test
+  fun `the form re-served after an error does not echo what was submitted`() {
+    // The one page that has a credential in hand while it renders: a rejected submission. Echoing
+    // the key back to "help the viewer correct it" would put it in a cleartext response - and in
+    // the browser cache and history of a phone that may not be the TV owner's.
+    val reply = request(
+      "/config?t=$token",
+      form = "tmdb=submitted-secret-key&addon=stremio%3A%2F%2F",
+    )
+
+    assertEquals(200, reply.code)
+    assertTrue(reply.body, reply.body.contains("No usable addon link in that box."))
+    assertFalse(reply.body, reply.body.contains("submitted-secret-key"))
+    assertFalse(reply.body, reply.body.contains("value="))
   }
 
   @Test
@@ -334,6 +355,58 @@ class ConfigPairingServerTest {
   }
 
   @Test
+  fun `two lines naming the same addon are rejected rather than quietly merged`() {
+    // Both lines normalise to https://comet.example/manifest.json. Sanitising would have collapsed
+    // them and the confirmation would have said "1 saved" for two submitted lines - the silent
+    // discard this form exists to refuse.
+    val form = "addon=comet.example%0Ahttps%3A%2F%2Fcomet.example%2Fmanifest.json"
+
+    val reply = request("/config?t=$token", form = form)
+
+    assertEquals(200, reply.code)
+    assertTrue(reply.body, reply.body.contains("Two of those addon links are the same addon."))
+    assertNull(nextSubmission())
+  }
+
+  @Test
+  fun `a flood of idle LAN connections cannot spawn a thread each`() {
+    // The token gate runs after the connection already has a thread, so it cannot be what protects
+    // the TV here: these sockets never send a byte, let alone a token.
+    val sockets = (1..FLOOD_CONNECTIONS).map { Socket("127.0.0.1", server.listeningPort) }
+    try {
+      val peak = (1..20).maxOf {
+        Thread.sleep(25L)
+        workerThreadCount()
+      }
+
+      assertTrue(
+        "peaked at $peak worker threads",
+        peak in 1..ConfigPairingServer.MAX_CONNECTIONS,
+      )
+    } finally {
+      sockets.forEach { runCatching { it.close() } }
+    }
+
+    // ...and the slots come back, so a flood is a nuisance rather than a lockout.
+    assertEquals(200, awaitServedForm().code)
+  }
+
+  private fun workerThreadCount(): Int = Thread.getAllStackTraces().keys.count {
+    it.isAlive && it.name.startsWith(server.connectionThreadPrefix)
+  }
+
+  /** Retries while the flood's sockets finish unwinding and give their worker threads back. */
+  private fun awaitServedForm(): Reply {
+    var last: Reply? = null
+    repeat(40) {
+      last = runCatching { request("/?t=$token") }.getOrNull()
+      if (last?.code == 200) return last!!
+      Thread.sleep(100L)
+    }
+    return last ?: Reply(-1, "no reply")
+  }
+
+  @Test
   fun `more than the supported addon count is rejected instead of truncated`() {
     val addons = (1..AddonList.MAX_ADDONS + 1)
       .joinToString("%0A") { "https%3A%2F%2Fa$it.example%2Fmanifest.json" }
@@ -343,5 +416,10 @@ class ConfigPairingServerTest {
     assertEquals(200, reply.code)
     assertTrue(reply.body, reply.body.contains("Enter no more than ${AddonList.MAX_ADDONS}"))
     assertNull(nextSubmission())
+  }
+
+  private companion object {
+    /** Comfortably past the cap, and past any accept backlog the OS would absorb quietly. */
+    const val FLOOD_CONNECTIONS = 40
   }
 }

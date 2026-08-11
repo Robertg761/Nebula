@@ -1,5 +1,6 @@
 package com.stremioshell.host.tv.player
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -18,7 +19,9 @@ class WatchedThresholdTest {
 
   @Test
   fun `a duration understated by a couple of seconds still finishes`() {
-    // The fraction alone can never be reached when time-pos overruns the estimate.
+    // A position that overruns a VBR estimate is past 100% of it, which is past
+    // the fraction by a wide margin - this is the case the departed absolute
+    // guard was written for, and the fraction had always been covering it.
     assertTrue(WatchedThreshold.isFinished(positionSec = 3_601.0, durationSec = 3_600.0))
   }
 
@@ -53,18 +56,71 @@ class WatchedThresholdTest {
   }
 
   @Test
-  fun `a short video is carried by the absolute guard, not the fraction`() {
-    // 90% of two minutes is twelve seconds short of the end; five is not.
+  fun `the watched fraction is the whole rule, at its exact boundary`() {
+    // Nothing else decides this any more: the absolute guard that used to sit
+    // beside the fraction could not fire at any duration, and is gone.
+    assertFalse(WatchedThreshold.isFinished(positionSec = 107.999, durationSec = 120.0))
+    assertTrue(WatchedThreshold.isFinished(positionSec = 108.0, durationSec = 120.0))
     assertTrue(WatchedThreshold.isFinished(positionSec = 116.0, durationSec = 120.0))
+  }
+
+  @Test
+  fun `five seconds from the end is not special, short or long`() {
+    // Where the old guard claimed to act. Under fifty seconds of runtime the last
+    // five are still inside the first 90% and stay resumable; at fifty they land
+    // exactly on the fraction; above it they are well past it.
+    assertFalse(WatchedThreshold.isFinished(positionSec = 35.0, durationSec = 40.0))
+    assertTrue(WatchedThreshold.isFinished(positionSec = 45.0, durationSec = 50.0))
+    assertTrue(WatchedThreshold.isFinished(positionSec = 3_595.0, durationSec = 3_600.0))
+  }
+
+  @Test
+  fun `a forward seek clamped to the end guard still counts as finished`() {
+    val seeker = SeekCoalescer()
+    // Holding FFWD into the end of a twenty-minute episode. The clamp keeps mpv
+    // out of eof; it does not, and is not able to, keep the episode unwatched -
+    // the SeekCoalescer KDoc used to claim otherwise. Backing out here marks it
+    // watched, which is the honest reading of seeking to five seconds from the
+    // end of something.
+    val target = seeker.press(
+      600.0,
+      positionSec = 1_100.0,
+      durationSec = 1_200.0,
+      isRepeat = false,
+      nowMs = 0L,
+    )!!
+
+    assertEquals(1_200.0 - SeekCoalescer.END_GUARD_SEC, target, 0.001)
+    assertTrue(WatchedThreshold.isFinished(positionSec = target, durationSec = 1_200.0))
+  }
+
+  @Test
+  fun `a clamped seek in a very short clip stays resumable`() {
+    val seeker = SeekCoalescer()
+    // The other side of the same clamp: five seconds from the end of a
+    // forty-second clip is only 87.5% of it, so this one is not finished.
+    val target = seeker.press(
+      60.0,
+      positionSec = 10.0,
+      durationSec = 40.0,
+      isRepeat = false,
+      nowMs = 0L,
+    )!!
+
+    assertEquals(35.0, target, 0.001)
+    assertFalse(WatchedThreshold.isFinished(positionSec = target, durationSec = 40.0))
   }
 
   @Test
   fun `tiny clips are not finished before playback starts`() {
     assertFalse(WatchedThreshold.isFinished(positionSec = 0.0, durationSec = 1.0))
+    assertFalse(WatchedThreshold.isFinished(positionSec = 0.0, durationSec = 5.0))
+    // The case that ruled out treating the seek guard as a watched threshold: at
+    // five seconds of runtime it would have called this finished on the first frame.
     assertFalse(
       WatchedThreshold.isFinished(
         positionSec = 0.0,
-        durationSec = WatchedThreshold.END_GUARD_SEC,
+        durationSec = SeekCoalescer.END_GUARD_SEC,
       ),
     )
   }

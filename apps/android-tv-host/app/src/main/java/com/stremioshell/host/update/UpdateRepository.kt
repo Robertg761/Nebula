@@ -1,7 +1,5 @@
 package com.stremioshell.host.update
 
-import java.util.Locale
-
 class UpdateRepository(
   private val api: GitHubReleaseApi = GitHubReleaseApi()
 ) {
@@ -22,7 +20,10 @@ class UpdateRepository(
 
     val selectedApk = selectApkAsset(
       assets = latest.assets,
-      versionName = normalizeVersionLabel(latestTag),
+      // The asset name carries the numeric version only. A prerelease is tagged `v0.6.2-beta.1`
+      // but still ships `StremioShell-tv-0.6.2.apk`, because the workflow names the file from
+      // versionName rather than from the tag.
+      versionName = SemVer.coreLabel(latestTag),
     ) ?: return null
     return UpdateInfo(
       latestVersionName = latestTag.removePrefix("v").removePrefix("V"),
@@ -31,10 +32,17 @@ class UpdateRepository(
       releaseNotes = latest.body.orEmpty().trim(),
       releaseUrl = latest.htmlUrl.orEmpty().trim(),
       apkSizeBytes = selectedApk.size,
+      apkSha256 = selectedApk.sha256,
       publishedAt = latest.publishedAt?.trim()
     )
   }
 
+  /**
+   * Full semver ordering, pre-release included: the stable `v0.6.2` is newer than `0.6.2-beta.1`
+   * and has to be offered to whoever is running the beta. The string fallback below only runs for
+   * a tag no version parser can read, and it compares the normalized labels rather than the bare
+   * cores for the same reason.
+   */
   private fun isNewerVersion(latestTag: String, currentVersionName: String): Boolean {
     val latestSemVer = SemVer.parseOrNull(latestTag)
     val currentSemVer = SemVer.parseOrNull(currentVersionName)
@@ -42,18 +50,7 @@ class UpdateRepository(
       return latestSemVer > currentSemVer
     }
 
-    val normalizedLatest = normalizeVersionLabel(latestTag)
-    val normalizedCurrent = normalizeVersionLabel(currentVersionName)
-    return normalizedLatest != normalizedCurrent
-  }
-
-  private fun normalizeVersionLabel(value: String): String {
-    return value
-      .trim()
-      .removePrefix("v")
-      .removePrefix("V")
-      .substringBefore('-')
-      .lowercase(Locale.ROOT)
+    return SemVer.normalizeLabel(latestTag) != SemVer.normalizeLabel(currentVersionName)
   }
 
   companion object {

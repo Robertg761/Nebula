@@ -231,6 +231,28 @@ class SubtitlesClientTest {
     assertEquals("${SubtitlesClient.OPENSUBTITLES_V3_BASE}/subtitles/movie/tt1.json", requested)
   }
 
+  @Test
+  fun `a null field does not throw away every other track in the response`() = runBlocking {
+    val subtitles = client {
+      """
+      {"subtitles":[
+        {"id":null,"url":"https://subs.example/a.srt","lang":null},
+        {"id":"2","url":"https://subs.example/b.srt","lang":"eng"}
+      ]}
+      """.trimIndent()
+    }.movieSubtitles("tt1")
+
+    assertEquals(2, subtitles.size)
+    assertEquals("", subtitles.first().id)
+    assertEquals("", subtitles.first().lang)
+    assertEquals("eng", subtitles.last().lang)
+  }
+
+  @Test
+  fun `a null subtitles array is no tracks rather than a failed search`() = runBlocking {
+    assertTrue(client { """{"subtitles":null}""" }.movieSubtitles("tt1").isEmpty())
+  }
+
   private fun fetcher(body: (String) -> String) = object : HttpFetcher {
     override suspend fun get(url: String): String = body(url)
     override suspend fun getAllowingStale(url: String): String = body(url)

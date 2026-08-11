@@ -20,6 +20,39 @@ class AddonListTest {
   }
 
   @Test
+  fun `a stremio link that wraps a whole url unwraps it instead of doubling it`() {
+    // This is the form an addon's own Install button produces. Prefixing it blindly built
+    // "https://https://comet.example/..." - which parses, passes every check, and is stored as an
+    // addon that can never answer.
+    assertEquals(
+      "https://comet.example/cfg/manifest.json",
+      AddonList.normalize("stremio:https://comet.example/cfg/manifest.json"),
+    )
+    assertEquals(
+      "https://comet.example/cfg/manifest.json",
+      AddonList.normalize("stremio://https://comet.example/cfg/manifest.json"),
+    )
+    // The wrapped URL is still held to the same rules: addon credentials do not travel cleartext.
+    assertEquals("", AddonList.normalize("stremio:http://comet.example/cfg/manifest.json"))
+    // And a bare host after the scheme still gets completed.
+    assertEquals(
+      "https://comet.example/manifest.json",
+      AddonList.normalize("stremio://comet.example"),
+    )
+  }
+
+  @Test
+  fun `a list of nothing but rejects is distinguishable from an empty one`() {
+    // "Kept your saved addons - the list was empty" described what the guard did rather than what
+    // the viewer did, and left a mistyped URL looking like a blank field.
+    assertTrue(AddonList.allRejected(listOf("http://cleartext.example")))
+    assertTrue(AddonList.allRejected(listOf("  ", "nonsense://x")))
+    assertTrue(!AddonList.allRejected(emptyList()))
+    assertTrue(!AddonList.allRejected(listOf("", "   ")))
+    assertTrue(!AddonList.allRejected(listOf("nonsense://x", "comet.example")))
+  }
+
+  @Test
   fun `a base url gains the manifest path the addon client requires`() {
     assertEquals(
       "https://comet.example/cfg/manifest.json",

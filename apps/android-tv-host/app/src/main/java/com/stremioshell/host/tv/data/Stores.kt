@@ -1,6 +1,8 @@
 package com.stremioshell.host.tv.data
 
 import android.content.Context
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -48,11 +50,30 @@ private val Context.tvDataStore by preferencesDataStore(
  */
 val persistenceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+/**
+ * How every store below decodes its own JSON blob.
+ *
+ * [Json.coerceInputValues] for the same reason the network clients set it: an explicit null on a
+ * defaulted field should cost that field, not the list it is in. These blobs are written by this
+ * app rather than by a service, so the case that matters is version skew - a build that wrote a
+ * field this one has since given a default, or the other way round after a downgrade.
+ */
+private fun storeJson(): Json = Json {
+  ignoreUnknownKeys = true
+  coerceInputValues = true
+}
+
 /** User configuration for the native TV app. */
-class SettingsStore(private val context: Context) {
-  private val json = Json { ignoreUnknownKeys = true }
-  private val store = context.tvDataStore
-  private val data = store.recoveringData(TV_STORE_NAME)
+class SettingsStore internal constructor(
+  private val store: DataStore<Preferences>,
+  /** Seam so the degraded-read path can be exercised without android.util.Log. */
+  readLog: (String, Throwable) -> Unit = ::logPersistenceFailure,
+) {
+  constructor(context: Context) : this(context.tvDataStore)
+
+  private val json = storeJson()
+  private val snapshots = store.recoveringSnapshots(TV_STORE_NAME, readLog)
+  private val data = snapshots.map { it.preferences }
 
   val tmdbApiKey: Flow<String> = data
     .map { it[KEY_TMDB].orEmpty() }
@@ -117,6 +138,43 @@ class SettingsStore(private val context: Context) {
       prefs[KEY_TMDB] = tmdbKey.trim()
       prefs[KEY_ADDONS] = json.encodeToString(AddonList.sanitized(addonUrls))
       prefs[KEY_SUBTITLES] = subtitlesBaseUrl.trim()
+    }
+  }
+
+  /**
+   * Everything [SettingsSaveGuard] needs about what is already on disk, read as one snapshot.
+   *
+   * One emission rather than a `first()` per field, because the fields have to agree with each
+   * other and with [StoredSettings.readable]: pairing a key from a healthy read with an addon list
+   * from a failed one is exactly the state the guard exists to refuse to act on.
+   */
+  suspend fun storedSnapshot(): StoredSettings {
+    val snapshot = snapshots.first()
+    return withContext(Dispatchers.Default) {
+      val prefs = snapshot.preferences
+      StoredSettings(
+        tmdbKey = prefs[KEY_TMDB].orEmpty(),
+        addonUrls = AddonList.migrated(decodeUrls(prefs[KEY_ADDONS]), prefs[KEY_ADDON].orEmpty()),
+        readable = !snapshot.degraded,
+      )
+    }
+  }
+
+  /**
+   * Commits a guarded Save, still as one indivisible edit.
+   *
+   * A value the guard held back is not written *at all*, rather than written back as itself. When
+   * the stored read succeeded those are the same thing. When it failed they are not, and the
+   * difference is whether a Save leaves a working TMDB key alone or replaces it with the empty
+   * string that the failed read handed the guard.
+   */
+  suspend fun persist(resolved: ResolvedSettings) {
+    store.edit { prefs ->
+      if (!resolved.keptTmdbKey) prefs[KEY_TMDB] = resolved.tmdbKey.trim()
+      if (!resolved.keptAddonUrls) {
+        prefs[KEY_ADDONS] = json.encodeToString(AddonList.sanitized(resolved.addonUrls))
+      }
+      prefs[KEY_SUBTITLES] = resolved.subtitlesBaseUrl.trim()
     }
   }
 
@@ -206,9 +264,14 @@ private data class WatchRemoval(
  * per finish with a window where a video was neither. [WatchStateRetention] is
  * what keeps them from crowding each other out.
  */
-class WatchStateStore(private val context: Context) {
-  private val json = Json { ignoreUnknownKeys = true }
-  private val store = context.tvDataStore
+class WatchStateStore internal constructor(
+  private val store: DataStore<Preferences>,
+  /** Seam so the refuse-to-write path can be asserted on without android.util.Log. */
+  private val log: (String) -> Unit = { logPersistence(it) },
+) {
+  constructor(context: Context) : this(context.tvDataStore)
+
+  private val json = storeJson()
   private val data = store.recoveringData(TV_STORE_NAME)
 
   /**
@@ -229,19 +292,41 @@ class WatchStateStore(private val context: Context) {
 
   suspend fun upsert(entry: WatchEntry) {
     store.edit { prefs ->
-      val stored = decode(prefs[KEY_WATCH])
+      val stored = decodeOrNull(prefs[KEY_WATCH]) ?: return@edit refuse("upsert ${entry.key}")
       val existing = stored.firstOrNull { it.key == entry.key }
       if (!PersistenceOrdering.accepts(existing?.updatedAtMs, entry.updatedAtMs)) return@edit
-      val removals = decodeRemovals(prefs[KEY_WATCH_REMOVALS])
+      val removals = decodeRemovalsOrNull(prefs[KEY_WATCH_REMOVALS])
+        ?: return@edit refuse("upsert ${entry.key}")
       val removedAt = removals.firstOrNull { it.key == entry.key }?.removedAtMs
       if (!PersistenceOrdering.acceptsAfterRemoval(removedAt, entry.updatedAtMs)) return@edit
       val rest = stored.filterNot { it.key == entry.key }
-      prefs[KEY_WATCH] = json.encodeToString(WatchStateRetention.prune(rest + entry))
+      prefs[KEY_WATCH] = json.encodeToString(
+        WatchStateRetention.prune(rest + preservingDuration(entry, existing)),
+      )
       if (removedAt != null) {
         prefs[KEY_WATCH_REMOVALS] = json.encodeToString(removals.filterNot { it.key == entry.key })
       }
     }
   }
+
+  /**
+   * Keeps a known duration when the incoming save does not carry one.
+   *
+   * The player saves progress on a timer and on the way out, and both can fire before mpv has
+   * reported a duration - a save during the first seconds of playback, or one from a session that
+   * never finished loading. Taking the incoming zero at face value replaced a good duration with
+   * nothing, and a Continue Watching row whose duration is zero draws a progress bar of zero
+   * however far into the film the viewer got.
+   *
+   * Only ever fills a gap: a save that does carry a duration is authoritative, because a duration
+   * genuinely changes when the viewer switches to a different release of the same title.
+   */
+  private fun preservingDuration(entry: WatchEntry, existing: WatchEntry?): WatchEntry =
+    if (entry.durationMs <= 0 && existing != null) {
+      entry.copy(durationMs = existing.durationMs)
+    } else {
+      entry
+    }
 
   /**
    * Writes [entry] only when nothing is stored for its key, so seeding the next
@@ -250,9 +335,11 @@ class WatchStateStore(private val context: Context) {
    */
   suspend fun upsertIfAbsent(entry: WatchEntry) {
     store.edit { prefs ->
-      val stored = decode(prefs[KEY_WATCH])
+      val stored = decodeOrNull(prefs[KEY_WATCH])
+        ?: return@edit refuse("seed ${entry.key}")
       if (stored.any { it.key == entry.key }) return@edit
-      val removals = decodeRemovals(prefs[KEY_WATCH_REMOVALS])
+      val removals = decodeRemovalsOrNull(prefs[KEY_WATCH_REMOVALS])
+        ?: return@edit refuse("seed ${entry.key}")
       val removedAt = removals.firstOrNull { it.key == entry.key }?.removedAtMs
       if (!PersistenceOrdering.acceptsAfterRemoval(removedAt, entry.updatedAtMs)) return@edit
       prefs[KEY_WATCH] = json.encodeToString(WatchStateRetention.prune(stored + entry))
@@ -269,7 +356,7 @@ class WatchStateStore(private val context: Context) {
    */
   suspend fun markWatched(key: String, watchedAtMs: Long) {
     store.edit { prefs ->
-      val stored = decode(prefs[KEY_WATCH])
+      val stored = decodeOrNull(prefs[KEY_WATCH]) ?: return@edit refuse("mark $key watched")
       val entry = stored.firstOrNull { it.key == key } ?: return@edit
       if (!PersistenceOrdering.accepts(entry.updatedAtMs, watchedAtMs)) return@edit
       val marked = entry.copy(positionMs = 0, updatedAtMs = watchedAtMs, watchedAtMs = watchedAtMs)
@@ -281,11 +368,12 @@ class WatchStateStore(private val context: Context) {
 
   suspend fun remove(key: String, removedAtMs: Long = System.currentTimeMillis()) {
     store.edit { prefs ->
-      val stored = decode(prefs[KEY_WATCH])
+      val stored = decodeOrNull(prefs[KEY_WATCH]) ?: return@edit refuse("remove $key")
+      val storedRemovals = decodeRemovalsOrNull(prefs[KEY_WATCH_REMOVALS])
+        ?: return@edit refuse("remove $key")
       val existing = stored.firstOrNull { it.key == key }
       if (existing != null && existing.updatedAtMs > removedAtMs) return@edit
       prefs[KEY_WATCH] = json.encodeToString(stored.filterNot { it.key == key })
-      val storedRemovals = decodeRemovals(prefs[KEY_WATCH_REMOVALS])
       val effectiveRemovedAtMs = PersistenceOrdering.latestRemoval(
         existingRemovedAtMs = storedRemovals.firstOrNull { it.key == key }?.removedAtMs,
         incomingRemovedAtMs = removedAtMs,
@@ -299,15 +387,35 @@ class WatchStateStore(private val context: Context) {
     }
   }
 
-  private fun decode(raw: String?): List<WatchEntry> {
+  /**
+   * The stored list, or null when there are bytes there that will not decode.
+   *
+   * The distinction is the whole point. Every mutator above is read-modify-write, so a blob that
+   * decodes to "empty" because it is corrupt is not a harmless read failure: the next thirty-second
+   * progress save would write back a one-entry list and the viewer's entire history would be gone,
+   * silently, with nothing left to recover it from. Null means "do not write", and the bytes stay
+   * on disk for a future version - or a future look at the file - to make sense of.
+   */
+  private fun decodeOrNull(raw: String?): List<WatchEntry>? {
     if (raw.isNullOrBlank()) return emptyList()
-    return runCatching { json.decodeFromString<List<WatchEntry>>(raw) }.getOrDefault(emptyList())
+    return runCatching { json.decodeFromString<List<WatchEntry>>(raw) }.getOrNull()
   }
 
-  private fun decodeRemovals(raw: String?): List<WatchRemoval> {
+  private fun decodeRemovalsOrNull(raw: String?): List<WatchRemoval>? {
     if (raw.isNullOrBlank()) return emptyList()
-    return runCatching { json.decodeFromString<List<WatchRemoval>>(raw) }
-      .getOrDefault(emptyList())
+    return runCatching { json.decodeFromString<List<WatchRemoval>>(raw) }.getOrNull()
+  }
+
+  /**
+   * What a reader sees: an unreadable blob presents as an empty list.
+   *
+   * Safe here in a way it is not in a mutator - a rail with nothing in it is a poor screen, but it
+   * is recoverable, and it is a great deal better than an exception on every Home composition.
+   */
+  private fun decode(raw: String?): List<WatchEntry> = decodeOrNull(raw) ?: emptyList()
+
+  private fun refuse(action: String) {
+    log("watch state is unreadable; refused to $action rather than overwrite it")
   }
 
   private companion object {
@@ -376,15 +484,19 @@ data class WatchlistEntry(
 }
 
 /** "My List": titles saved for later, newest first. */
-class WatchlistStore(private val context: Context) {
-  private val json = Json { ignoreUnknownKeys = true }
-  private val store = context.tvDataStore
+class WatchlistStore internal constructor(
+  private val store: DataStore<Preferences>,
+  private val log: (String) -> Unit = { logPersistence(it) },
+) {
+  constructor(context: Context) : this(context.tvDataStore)
+
+  private val json = storeJson()
   private val data = store.recoveringData(TV_STORE_NAME)
 
   val entries: Flow<List<WatchlistEntry>> = data
     .map { it[KEY_LIST] }
     .distinctUntilChanged()
-    .map { raw -> WatchlistRetention.ordered(decode(raw)) }
+    .map { raw -> WatchlistRetention.ordered(decodeOrNull(raw).orEmpty()) }
     .flowOn(Dispatchers.Default)
 
   /**
@@ -393,20 +505,26 @@ class WatchlistStore(private val context: Context) {
    */
   suspend fun toggle(entry: WatchlistEntry) {
     store.edit { prefs ->
-      val next = WatchlistRetention.toggled(decode(prefs[KEY_LIST]), entry)
-      prefs[KEY_LIST] = json.encodeToString(next)
+      val stored = decodeOrNull(prefs[KEY_LIST]) ?: return@edit refuse("toggle ${entry.key}")
+      prefs[KEY_LIST] = json.encodeToString(WatchlistRetention.toggled(stored, entry))
     }
   }
 
   suspend fun remove(key: String) {
     store.edit { prefs ->
-      prefs[KEY_LIST] = json.encodeToString(WatchlistRetention.remove(decode(prefs[KEY_LIST]), key))
+      val stored = decodeOrNull(prefs[KEY_LIST]) ?: return@edit refuse("remove $key")
+      prefs[KEY_LIST] = json.encodeToString(WatchlistRetention.remove(stored, key))
     }
   }
 
-  private fun decode(raw: String?): List<WatchlistEntry> {
+  /** Null for an unreadable blob; see [WatchStateStore.decodeOrNull] for why that matters. */
+  private fun decodeOrNull(raw: String?): List<WatchlistEntry>? {
     if (raw.isNullOrBlank()) return emptyList()
-    return runCatching { json.decodeFromString<List<WatchlistEntry>>(raw) }.getOrDefault(emptyList())
+    return runCatching { json.decodeFromString<List<WatchlistEntry>>(raw) }.getOrNull()
+  }
+
+  private fun refuse(action: String) {
+    log("watchlist is unreadable; refused to $action rather than overwrite it")
   }
 
   private companion object {
@@ -422,24 +540,32 @@ class WatchlistStore(private val context: Context) {
  * series' remembered release is worth less than the space it takes in a
  * preferences file that is rewritten on every watch-state save.
  */
-class StreamPickStore(private val context: Context) {
-  private val json = Json { ignoreUnknownKeys = true }
-  private val store = context.tvDataStore
+class StreamPickStore internal constructor(
+  private val store: DataStore<Preferences>,
+  private val log: (String) -> Unit = { logPersistence(it) },
+) {
+  constructor(context: Context) : this(context.tvDataStore)
+
+  private val json = storeJson()
   private val data = store.recoveringData(TV_STORE_NAME)
 
   val selections: Flow<Map<String, StreamSelection>> = data
     .map { it[KEY_PICKS] }
     .distinctUntilChanged()
-    .map { raw -> decode(raw).associateBy { it.seriesId } }
+    .map { raw -> decodeOrNull(raw).orEmpty().associateBy { it.seriesId } }
     .flowOn(Dispatchers.Default)
 
-  suspend fun get(seriesId: String): StreamSelection? {
-    return decode(data.first()[KEY_PICKS]).firstOrNull { it.seriesId == seriesId }
+  // Off the caller's dispatcher for the decode, for the same reason as WatchStateStore.get: this
+  // is read from the main thread on the way into playback, and it parses the whole remembered-pick
+  // list rather than the one entry that was asked for.
+  suspend fun get(seriesId: String): StreamSelection? = withContext(Dispatchers.Default) {
+    decodeOrNull(data.first()[KEY_PICKS]).orEmpty().firstOrNull { it.seriesId == seriesId }
   }
 
   suspend fun remember(selection: StreamSelection) {
     store.edit { prefs ->
-      val stored = decode(prefs[KEY_PICKS])
+      val stored = decodeOrNull(prefs[KEY_PICKS])
+        ?: return@edit refuse("remember ${selection.seriesId}")
       val existing = stored.firstOrNull { it.seriesId == selection.seriesId }
       if (!PersistenceOrdering.accepts(existing?.updatedAtMs, selection.updatedAtMs)) return@edit
       val rest = stored.filterNot { it.seriesId == selection.seriesId }
@@ -448,9 +574,14 @@ class StreamPickStore(private val context: Context) {
     }
   }
 
-  private fun decode(raw: String?): List<StreamSelection> {
+  /** Null for an unreadable blob; see [WatchStateStore.decodeOrNull] for why that matters. */
+  private fun decodeOrNull(raw: String?): List<StreamSelection>? {
     if (raw.isNullOrBlank()) return emptyList()
-    return runCatching { json.decodeFromString<List<StreamSelection>>(raw) }.getOrDefault(emptyList())
+    return runCatching { json.decodeFromString<List<StreamSelection>>(raw) }.getOrNull()
+  }
+
+  private fun refuse(action: String) {
+    log("stream picks are unreadable; refused to $action rather than overwrite them")
   }
 
   private companion object {

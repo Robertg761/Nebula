@@ -45,6 +45,36 @@ class StreamQualityTest {
   }
 
   @Test
+  fun `hdr is a word, not a substring - a rip is not a transfer function`() {
+    // "HDRip" is a DVD/cam-era rip and about as far from HDR as a release gets. Badging it HDR
+    // poisoned the HDR filter and made auto-pick carry a false HDR flag into the next episode.
+    assertFalse(StreamQuality.of("Movie.2019.HDRip.XviD").hdr)
+    assertFalse(StreamQuality.of("Movie 2019 UHDRip x264").hdr)
+    assertFalse(StreamQuality.of("Movie hdrip 720p").hdr)
+
+    // Every spelling that does mean HDR still does.
+    assertTrue(StreamQuality.of("Movie 2160p HDR WEB-DL").hdr)
+    assertTrue(StreamQuality.of("Movie.2160p.HDR10.WEB-DL").hdr)
+    assertTrue(StreamQuality.of("Movie.2160p.DV.HDR10+.REMUX").hdr)
+    assertTrue(StreamQuality.of("Movie 2160p PQ10").hdr)
+    assertTrue(StreamQuality.of("Movie 2160p HLG").hdr)
+  }
+
+  @Test
+  fun `a bit depth after the pixel height does not hide the pixel height`() {
+    // "1080p10" and "2160p10bit" are ordinary spellings of a 10-bit encode. Rejecting them left
+    // those rows ranked unknown, sorted below every labelled row and skipped by auto-pick.
+    assertEquals(1080, StreamQuality.of("Show.S01E01.1080p10.WEB-DL").resolutionHeight)
+    assertEquals(2160, StreamQuality.of("Show.S01E01.2160p10.HDR").resolutionHeight)
+    assertEquals(2160, StreamQuality.of("Show.S01E01.2160p10bit.HDR").resolutionHeight)
+    assertEquals(1080, StreamQuality.of("Show 1080p8 x265").resolutionHeight)
+    assertEquals(1080, StreamQuality.of("Show 1080p12 x265").resolutionHeight)
+
+    // Still not a licence to read a height out of arbitrary trailing text.
+    assertNull(StreamQuality.of("[RD+] 1080price drop").resolutionHeight)
+  }
+
+  @Test
   fun `dolby vision is only read as a marker of its own`() {
     assertTrue(StreamQuality.of("Movie 2160p DV HDR WEB-DL").dolbyVision)
     assertTrue(StreamQuality.of("Movie 2160p DoVi").dolbyVision)

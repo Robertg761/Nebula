@@ -119,6 +119,31 @@ class HttpCachePolicyTest {
   }
 
   @Test
+  fun `each reach puts its own promise on the wire`() {
+    val url = "https://comet.example/cfg/stream/movie/tt1.json"
+
+    val direct = HttpCachePolicy.requestFor(url, HttpReach.Direct)
+    // The whole point of Direct: OkHttp checks the request's no-store on both sides of the cache,
+    // so an addon's signed link is neither read from disk nor left there for the next resolve.
+    assertTrue(direct.cacheControl.noStore)
+    assertNull(direct.header(HttpCachePolicy.CACHEABLE_HEADER))
+
+    val cacheable = HttpCachePolicy.requestFor(url, HttpReach.Cacheable)
+    assertTrue(!cacheable.cacheControl.noStore)
+    assertEquals("1", cacheable.header(HttpCachePolicy.CACHEABLE_HEADER))
+
+    val revalidated = HttpCachePolicy.requestFor(url, HttpReach.Revalidated)
+    assertTrue(revalidated.cacheControl.noCache)
+    assertNull(revalidated.header(HttpCachePolicy.CACHEABLE_HEADER))
+
+    val cacheOnly = HttpCachePolicy.requestFor(url, HttpReach.CacheOnly)
+    assertTrue(cacheOnly.cacheControl.onlyIfCached)
+    // A cache-only read must not be marked cacheable, or its synthetic 504 - a retryable status -
+    // would send the interceptor back to the cache it was just told is empty.
+    assertNull(cacheOnly.header(HttpCachePolicy.CACHEABLE_HEADER))
+  }
+
+  @Test
   fun `freshness is stamped on successful responses only`() {
     val ok = HttpCachePolicy.stampFreshness(response(cacheableRequest, 200, pragma = "no-cache"), 300)
     assertEquals("public, max-age=300", ok.header("Cache-Control"))
@@ -167,7 +192,7 @@ class HttpCachePolicyTest {
       if (request.cacheControl.onlyIfCached) response(request, 200) else throw IOException("offline")
     }
 
-    val response = StaleOnNetworkFailureInterceptor(maxStaleSeconds = 60) { logged += it }
+    val response = interceptor(maxStaleSeconds = 60) { logged += it }
       .intercept(chain)
 
     assertEquals(200, response.code)
@@ -187,7 +212,7 @@ class HttpCachePolicyTest {
     }
 
     val error = assertThrows(IOException::class.java) {
-      StaleOnNetworkFailureInterceptor(log = {}).intercept(chain)
+      interceptor().intercept(chain)
     }
     assertEquals("offline", error.message)
   }
@@ -203,7 +228,7 @@ class HttpCachePolicyTest {
       }
     }
 
-    val result = StaleOnNetworkFailureInterceptor(log = {}).intercept(chain)
+    val result = interceptor().intercept(chain)
 
     assertEquals("stale", requireNotNull(result.body).string())
     assertEquals("network-body", result.header(HttpCachePolicy.STALE_PROVENANCE_HEADER))
@@ -230,7 +255,7 @@ class HttpCachePolicyTest {
       }
     }
 
-    val result = StaleOnNetworkFailureInterceptor(log = { logged += it }).intercept(chain)
+    val result = interceptor { logged += it }.intercept(chain)
 
     assertEquals(200, result.code)
     assertEquals("http-429", result.header(HttpCachePolicy.STALE_PROVENANCE_HEADER))
@@ -240,12 +265,101 @@ class HttpCachePolicyTest {
   }
 
   @Test
+  fun `a retry-after answer opens a window that later requests never leave the device for`() {
+    var nowMillis = 0L
+    val gate = RetryAfterGate { nowMillis }
+    val rateLimited = FakeChain(cacheableRequest) { request ->
+      if (request.cacheControl.onlyIfCached) {
+        response(request, 200)
+      } else {
+        response(request, 429).newBuilder().header("Retry-After", "120").build()
+      }
+    }
+    interceptor(gate = gate).intercept(rateLimited)
+    assertEquals(120L, gate.remainingSeconds("api.themoviedb.org"))
+
+    val logged = mutableListOf<String>()
+    val insideWindow = FakeChain(cacheableRequest) { request ->
+      // Parsing Retry-After and then ignoring it meant every rail refresh re-asked, was refused
+      // again, and fell back to the same stale body it already had.
+      assertTrue("network was reached inside the window", request.cacheControl.onlyIfCached)
+      response(request, 200)
+    }
+
+    val result = interceptor(gate = gate) { logged += it }
+      .intercept(insideWindow)
+
+    assertEquals(200, result.code)
+    assertEquals("retry-after", result.header(HttpCachePolicy.STALE_PROVENANCE_HEADER))
+    assertEquals(1, insideWindow.attempts.size)
+    assertTrue(logged.single().contains("Retry-After window"))
+    assertTrue(!logged.single().contains("secret"))
+  }
+
+  @Test
+  fun `a rate limited host with nothing cached is refused without a socket`() {
+    var nowMillis = 0L
+    val gate = RetryAfterGate { nowMillis }
+    gate.record("api.themoviedb.org", 90)
+    val chain = FakeChain(cacheableRequest) { request ->
+      assertTrue("network was reached inside the window", request.cacheControl.onlyIfCached)
+      // `only-if-cached` with nothing stored yields a synthetic 504.
+      response(request, 504)
+    }
+
+    val result = interceptor(gate = gate).intercept(chain)
+
+    // Restating the rate limit is what the caller can act on; a synthetic cache 504 would be read
+    // as a plain network failure and retried immediately.
+    assertEquals(429, result.code)
+    assertEquals("90", result.header("Retry-After"))
+    assertEquals(1, chain.attempts.size)
+  }
+
+  @Test
+  fun `a window is bounded and reopens once it has passed`() {
+    var nowMillis = 0L
+    val gate = RetryAfterGate { nowMillis }
+
+    // A server does not get to suppress refreshes for a day, however sincerely it asks.
+    gate.record("api.themoviedb.org", 24L * 60 * 60)
+    assertEquals(RetryAfterGate.MAX_WINDOW_SECONDS, gate.remainingSeconds("api.themoviedb.org"))
+    // Another host's limit is its own business.
+    assertNull(gate.remainingSeconds("comet.example"))
+
+    nowMillis += RetryAfterGate.MAX_WINDOW_SECONDS * 1_000L
+    assertNull(gate.remainingSeconds("api.themoviedb.org"))
+
+    // A zero-second hint means "ask again now" rather than "wait a moment".
+    gate.record("api.themoviedb.org", 0)
+    assertNull(gate.remainingSeconds("api.themoviedb.org"))
+  }
+
+  @Test
+  fun `an oversized successful body is reported as too large, not as a stale hit`() {
+    val chain = FakeChain(cacheableRequest) { request ->
+      if (request.cacheControl.onlyIfCached) {
+        response(request, 200).newBuilder().body("stale".toResponseBody(null)).build()
+      } else {
+        response(request, 200).newBuilder().body("far too much json".toResponseBody(null)).build()
+      }
+    }
+
+    // HttpResponseTooLargeException is an IOException, so the stale fallback used to swallow it and
+    // hand back a day-old catalog - with nothing to say that the live response is unusable.
+    assertThrows(HttpResponseTooLargeException::class.java) {
+      interceptor(maxBodyBytes = 4).intercept(chain)
+    }
+    assertEquals(1, chain.attempts.size)
+  }
+
+  @Test
   fun `retryable status is preserved when no stale body exists`() {
     val chain = FakeChain(cacheableRequest) { request ->
       if (request.cacheControl.onlyIfCached) response(request, 504) else response(request, 503)
     }
 
-    val result = StaleOnNetworkFailureInterceptor(log = {}).intercept(chain)
+    val result = interceptor().intercept(chain)
 
     assertEquals(503, result.code)
     assertNull(result.header(HttpCachePolicy.STALE_PROVENANCE_HEADER))
@@ -255,7 +369,7 @@ class HttpCachePolicyTest {
   fun `non retryable status never attempts stale cache`() {
     val chain = FakeChain(cacheableRequest) { request -> response(request, 404) }
 
-    val result = StaleOnNetworkFailureInterceptor(log = {}).intercept(chain)
+    val result = interceptor().intercept(chain)
 
     assertEquals(404, result.code)
     assertEquals(1, chain.attempts.size)
@@ -267,7 +381,7 @@ class HttpCachePolicyTest {
     val chain = FakeChain(plainRequest) { throw IOException("offline") }
 
     assertThrows(IOException::class.java) {
-      StaleOnNetworkFailureInterceptor(log = {}).intercept(chain)
+      interceptor().intercept(chain)
     }
     assertEquals(1, chain.attempts.size)
   }
@@ -359,7 +473,7 @@ class HttpCachePolicyTest {
       response(request, 200).newBuilder().body("""{"ok":true}""".toResponseBody(null)).build()
     }
 
-    val body = requireNotNull(StaleOnNetworkFailureInterceptor(log = {}).intercept(chain).body)
+    val body = requireNotNull(interceptor().intercept(chain).body)
 
     // The interceptor has to hold the whole body anyway so that it can still retry against cache.
     // Streaming those bytes back out through an Okio buffer to build the String left a response
@@ -382,6 +496,19 @@ class HttpCachePolicyTest {
       UnknownLengthBody("123456").readUtf8Limited(5)
     }
   }
+
+  /**
+   * A fresh [RetryAfterGate] per interceptor unless a test brings its own.
+   *
+   * The production default is a process-wide gate, which is right for the app and wrong here: the
+   * 429 one test feeds in would otherwise silence the network in whichever test JUnit runs next.
+   */
+  private fun interceptor(
+    maxStaleSeconds: Int = HttpCachePolicy.MAX_STALE_SECONDS,
+    maxBodyBytes: Long = MAX_JSON_RESPONSE_BYTES,
+    gate: RetryAfterGate = RetryAfterGate(),
+    log: (String) -> Unit = {},
+  ) = StaleOnNetworkFailureInterceptor(maxStaleSeconds, maxBodyBytes, gate, log)
 
   private fun response(request: Request, code: Int, pragma: String? = null): Response {
     val builder = Response.Builder()

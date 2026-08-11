@@ -212,9 +212,15 @@ private fun HomeBrowseBody(
   val watchlistCards = remember(watchlist) { StableList(watchlist) }
 
   val railList = (rails as? LoadState.Ready)?.value.orEmpty()
+  // The day the billboard is picked for, read once and then carried. Read inside the pick below it
+  // was re-read on every railList identity change - a page append, a rails re-emission after a save
+  // - so a session that spanned a UTC midnight swapped the banner out from under a viewer who was
+  // looking at it. Saveable, so activity recreation and the back stack keep the same day too; a
+  // fresh session tomorrow reads tomorrow's number, which is the whole point of the rotation.
+  val heroDay = rememberSaveable { System.currentTimeMillis() / DAY_MS }
   // Recomputed only when the rail list changes identity, which a page append does - but the pick
   // only ever reads the head of each rail, which an append never touches.
-  val hero = remember(railList) { pickHero(railList) }
+  val hero = remember(railList, heroDay) { pickHero(railList, heroDay) }
   // The billboard is the top of the screen, so it owns first focus when it exists: landing on a
   // rail below it would scroll it off before the user ever saw it.
   val hasHero = hero != null
@@ -751,17 +757,23 @@ private const val DAY_MS = 86_400_000L
  * [HeroPick] alone takes the head of the first rail, which changes about weekly - so the owner
  * opens the app to an identical banner for days on end and learns to scroll past it. This takes the
  * first artwork-bearing title from each of the first [HERO_CANDIDATES] rails and indexes them by
- * the day number: deterministic, stable for the whole session (so the banner never swaps under the
- * viewer), free to compute, and a different face every morning. Falls back to [HeroPick] when no
- * rail has artwork at all, which is the only case it still has to answer for.
+ * the day number: deterministic, free to compute, and a different face every morning. Falls back to
+ * [HeroPick] when no rail has artwork at all, which is the only case it still has to answer for.
+ *
+ * @param day the day number, passed in rather than read from the clock here. Reading it inside made
+ *   the pick a function of *when it ran*, and it runs again whenever the rail list changes identity
+ *   - so the banner could change mid-session, which is exactly what "the day's title" must not do.
+ *   The caller captures it once per session; see the call site.
  */
-private fun pickHero(rails: List<HomeRail>): MediaItem? {
+private fun pickHero(rails: List<HomeRail>, day: Long): MediaItem? {
   val candidates = rails.asSequence()
     .mapNotNull { rail -> rail.items.firstOrNull { !it.backdropUrl.isNullOrBlank() } }
     .take(HERO_CANDIDATES)
     .toList()
   if (candidates.isEmpty()) return HeroPick.from(rails.map { it.items })
-  return candidates[((System.currentTimeMillis() / DAY_MS) % candidates.size).toInt()]
+  // mod, not %: a device whose clock is set before the epoch hands this a negative day number, and
+  // a negative remainder would index off the front of the list.
+  return candidates[day.mod(candidates.size)]
 }
 
 /** True for the four D-pad arrows, which is all we need to detect deliberate navigation. */

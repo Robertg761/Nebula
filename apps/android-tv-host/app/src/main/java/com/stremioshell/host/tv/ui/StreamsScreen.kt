@@ -196,7 +196,18 @@ fun StreamsScreen(
 
   // A LazyColumn only composes what is on screen, so a preselected row further down the
   // list has no node for the focus request to reach until it has been scrolled to.
-  LaunchedEffect(rows, preselectedRow) {
+  //
+  // Once per preselect target, not once per `rows` identity. Every filter chip press rebuilds that
+  // list, and keying the scroll on it meant each press hauled the viewer back to the remembered
+  // release - over whatever they had just narrowed the list down to find. The scroll belongs to the
+  // arrival of a target: the list loading, or the remembered pick landing after it. Once it has
+  // been honoured the position is the viewer's, including when a filter hides the target (matched
+  // goes null, which is not a new target) and a later press brings it back.
+  var scrolledForPreselect by remember(screen) { mutableStateOf<AddonStream?>(null) }
+  LaunchedEffect(matched, preselectedRow) {
+    val target = matched ?: return@LaunchedEffect
+    if (scrolledForPreselect == target) return@LaunchedEffect
+    scrolledForPreselect = target
     // Stops one row short so something ranked *above* the remembered one stays visible. Flush
     // against the top the picker looked like a list that begins at the viewer's old choice, with
     // every better release StreamOrder had put above it off screen and nothing saying so.

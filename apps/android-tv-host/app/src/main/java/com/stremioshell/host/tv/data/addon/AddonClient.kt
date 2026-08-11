@@ -12,13 +12,23 @@ import kotlinx.serialization.json.Json
  * Client for the open Stremio addon protocol, as implemented by Comet and
  * other debrid resolvers: `<base>/manifest.json`, `<base>/stream/{type}/{id}.json`.
  *
- * Uses plain [HttpFetcher.get] (default cache semantics, no stale fallback): debrid stream URLs
- * are short-lived, and replaying a cached one hands the player a dead link.
+ * Uses plain [HttpFetcher.get], which sends `no-store` and so is neither answered from the shared
+ * disk cache nor written into it: debrid stream URLs are signed for an hour or less, and replaying
+ * a cached one hands the player a dead link.
  */
 class AddonClient(
   private val fetcher: HttpFetcher = OkHttpFetcher,
 ) {
-  private val json = Json { ignoreUnknownKeys = true }
+  /**
+   * [coerceInputValues] because addons send explicit nulls where the protocol implies a default:
+   * `"streams": null` for a title they have nothing for, `"subtitles": null`, `"countryWhitelist":
+   * null`. Without it kotlinx throws and one null costs the whole response - every stream from that
+   * addon - rather than one field.
+   */
+  private val json = Json {
+    ignoreUnknownKeys = true
+    coerceInputValues = true
+  }
 
   suspend fun manifest(manifestUrl: String): AddonManifest {
     val body = fetcher.get(manifestUrl.trim())

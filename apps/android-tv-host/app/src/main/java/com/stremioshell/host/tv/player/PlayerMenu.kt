@@ -323,7 +323,7 @@ private fun localizedExternalSubtitlesAction(
       detail = source,
       enabled = enabled,
     )
-    ExternalSubtitlesState.Loading -> LocalizedExternalSubtitlesAction(
+    is ExternalSubtitlesState.Loading -> LocalizedExternalSubtitlesAction(
       label = stringResource(R.string.player_menu_searching_subtitles),
       detail = "",
       enabled = enabled,
@@ -336,8 +336,15 @@ private fun localizedExternalSubtitlesAction(
       ),
       enabled = enabled,
     )
-    is ExternalSubtitlesState.Ready -> if (state.options.isEmpty()) {
-      LocalizedExternalSubtitlesAction(
+    is ExternalSubtitlesState.Ready -> when {
+      // A list with no search behind it (files but no IMDb id). The row anchors the section and
+      // cannot run anything, so it must not read as an invitation to press it.
+      !state.searchable -> LocalizedExternalSubtitlesAction(
+        label = stringResource(R.string.player_menu_included_subtitles),
+        detail = stringResource(R.string.player_menu_included_subtitles_detail),
+        enabled = enabled,
+      )
+      state.options.isEmpty() -> LocalizedExternalSubtitlesAction(
         label = stringResource(R.string.player_menu_no_subtitles_found),
         detail = stringResource(
           R.string.player_menu_ok_searches_again,
@@ -345,8 +352,7 @@ private fun localizedExternalSubtitlesAction(
         ),
         enabled = enabled,
       )
-    } else {
-      LocalizedExternalSubtitlesAction(
+      else -> LocalizedExternalSubtitlesAction(
         label = stringResource(R.string.player_menu_search_again),
         detail = source,
         enabled = enabled,
@@ -379,6 +385,40 @@ private fun localizedExternalSubtitleOption(
   )
 }
 
+/**
+ * How a track row's language and title become one line, out here so the
+ * de-duplication is testable without a composition.
+ */
+internal object TrackLabelText {
+  /**
+   * "Spanish - Latino", or "Español" on its own when the container's title is
+   * only the language over again.
+   *
+   * Muxers routinely name a track after its language, and the row already leads
+   * with the language, so the title has to be dropped when it repeats it. It can
+   * repeat either spelling: [sourceLanguage] is the English name the track model
+   * carries, [language] is that name in the viewer's own locale, and the title
+   * came from whoever muxed the file. Comparing against the English name alone —
+   * which this used to do — let a Spanish "Español" straight through on a Spanish
+   * device and drew "Español - Español", the exact duplicate the check exists to
+   * remove.
+   *
+   * Blank when there is neither a language nor a usable title, which is the
+   * caller's cue to fall back to the track number.
+   */
+  fun line(language: String, sourceLanguage: String, title: String): String {
+    val trimmed = title.trim()
+    val repeatsLanguage = trimmed.equals(sourceLanguage, ignoreCase = true) ||
+      trimmed.equals(language, ignoreCase = true)
+    return listOfNotNull(
+      language.ifBlank { null },
+      trimmed.takeIf { it.isNotEmpty() && !repeatsLanguage },
+    ).joinToString(SEPARATOR)
+  }
+
+  private const val SEPARATOR = " - "
+}
+
 @Composable
 private fun localizedTrackLabel(row: TrackRow): String {
   val track = row.track ?: return stringResource(R.string.player_menu_subtitles_off)
@@ -388,15 +428,12 @@ private fun localizedTrackLabel(row: TrackRow): String {
   } else {
     localizedLanguageName(track.lang, sourceLanguage)
   }
-  val title = track.title.trim()
-    .takeIf { it.isNotEmpty() && !it.equals(sourceLanguage, ignoreCase = true) }
-  val label = listOfNotNull(language.ifBlank { null }, title)
-    .joinToString(" - ")
-  return if (label.isBlank()) {
-    stringResource(R.string.player_menu_track_number, track.id)
-  } else {
-    label
-  }
+  val label = TrackLabelText.line(
+    language = language,
+    sourceLanguage = sourceLanguage,
+    title = track.title,
+  )
+  return label.ifBlank { stringResource(R.string.player_menu_track_number, track.id) }
 }
 
 @Composable
@@ -626,7 +663,13 @@ private fun SubtitleSection(
           onClick = { if (externalAction.enabled) onFetch() },
         )
       }
-      val options = (external as? ExternalSubtitlesState.Ready)?.options.orEmpty()
+      // Loading carries the rows that were already on screen, so a running search never blanks
+      // the list under the D-pad - the files stay pickable while the addon takes its time.
+      val options = when (external) {
+        is ExternalSubtitlesState.Ready -> external.options
+        is ExternalSubtitlesState.Loading -> external.options
+        else -> emptyList()
+      }
       items(options, key = { "external:${it.url}" }) { option ->
         val localizedOption = localizedExternalSubtitleOption(option)
         LabelledRow(

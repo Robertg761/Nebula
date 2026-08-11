@@ -45,6 +45,32 @@ class SeekCoalescerTest {
   }
 
   @Test
+  fun `the very first press is accepted even when it arrives as a repeat`() {
+    val seeker = coalescer()
+
+    // A remote already held down when the file opens delivers its first event
+    // with the repeat flag set. Measured against a "never accepted" sentinel of
+    // Long.MIN_VALUE the interval since underflowed to a negative number, so this
+    // press - and every repeat behind it - was dropped as too fast.
+    val target = seeker.press(10.0, positionSec = 0.0, durationSec = 3600.0, isRepeat = true, nowMs = 1_000L)
+
+    assertEquals(10.0, target!!, 0.001)
+  }
+
+  @Test
+  fun `a first repeat at time zero is accepted, and the floor applies from there`() {
+    val seeker = coalescer()
+
+    val first = seeker.press(10.0, positionSec = 0.0, durationSec = 3600.0, isRepeat = true, nowMs = 0L)
+    val tooSoon = seeker.press(10.0, positionSec = 0.0, durationSec = 3600.0, isRepeat = true, nowMs = 50L)
+    val accepted = seeker.press(10.0, positionSec = 0.0, durationSec = 3600.0, isRepeat = true, nowMs = 200L)
+
+    assertEquals(10.0, first!!, 0.001)
+    assertNull(tooSoon)
+    assertEquals(20.0, accepted!!, 0.001)
+  }
+
+  @Test
   fun `a deliberate press is never dropped, however soon it lands`() {
     val seeker = coalescer()
 
@@ -228,6 +254,83 @@ class SeekCoalescerTest {
 
     assertEquals(110.0, seeker.previewSec!!, 0.001)
     assertEquals(110.0, seeker.consumePending()!!, 0.001)
+  }
+
+  @Test
+  fun `a restart belongs to no seek until mpv has been handed one`() {
+    val seeker = coalescer()
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 0L)
+    val request = seeker.consumePendingRequest()!!
+
+    // Consumed, but still queued behind whatever the mpv worker is doing - on a
+    // stalled stream, behind the stall itself. The restart that stall recovery
+    // raises is not this seek's, and retiring the seek on it would snap the OSD
+    // and every saved position back to where the viewer seeked away from.
+    assertNull(seeker.restartOwner())
+    assertEquals(110.0, seeker.previewSec!!, 0.001)
+
+    seeker.noteCommandAccepted(request)
+
+    assertEquals(request, seeker.restartOwner())
+    assertEquals(SeekSettleResult.Complete, seeker.settle(request))
+    assertNull(seeker.previewSec)
+    assertNull("nothing is left for a second restart to retire", seeker.restartOwner())
+  }
+
+  @Test
+  fun `a restart is attributed to the oldest accepted seek, not the newest`() {
+    val seeker = coalescer()
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 0L)
+    val first = seeker.consumePendingRequest()!!
+    seeker.noteCommandAccepted(first)
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 500L)
+    val second = seeker.consumePendingRequest()!!
+
+    // One worker, so B reaches mpv after A: the restart in front of us is A's,
+    // and B still owns the preview afterwards.
+    assertEquals(first, seeker.restartOwner())
+    assertEquals(SeekSettleResult.Superseded, seeker.settle(first))
+    assertEquals(120.0, seeker.previewSec!!, 0.001)
+
+    assertNull("B has not reached mpv yet", seeker.restartOwner())
+    seeker.noteCommandAccepted(second)
+    assertEquals(second, seeker.restartOwner())
+    assertEquals(SeekSettleResult.Complete, seeker.settle(second))
+    assertNull(seeker.previewSec)
+  }
+
+  @Test
+  fun `an unpressed player attributes a restart to nothing at all`() {
+    val seeker = coalescer()
+
+    // The initial load raises one of these before any press exists.
+    assertNull(seeker.restartOwner())
+
+    // As does a press that has not been flushed yet: there is no command out.
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 0L)
+    assertNull(seeker.restartOwner())
+    assertEquals(110.0, seeker.previewSec!!, 0.001)
+  }
+
+  @Test
+  fun `acceptance cannot be claimed for a retired or replaced request`() {
+    val seeker = coalescer()
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 0L)
+    val settled = seeker.consumePendingRequest()!!
+    seeker.noteCommandAccepted(settled)
+    seeker.settle(settled)
+
+    // A completion callback that lands after its own restart already retired the
+    // request must not resurrect it as a restart candidate.
+    seeker.noteCommandAccepted(settled)
+    assertNull(seeker.restartOwner())
+
+    // Nor may one from the file the reload replaced.
+    seeker.press(10.0, positionSec = 100.0, durationSec = 3600.0, isRepeat = false, nowMs = 500L)
+    val oldFile = seeker.consumePendingRequest()!!
+    seeker.reset()
+    seeker.noteCommandAccepted(oldFile)
+    assertNull(seeker.restartOwner())
   }
 
   @Test

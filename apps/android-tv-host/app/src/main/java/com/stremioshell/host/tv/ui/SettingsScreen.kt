@@ -425,11 +425,24 @@ fun SettingsScreen(
   //
   // The lazy list states the same position as two numbers rather than one, and both have to be
   // watched: an item-sized nudge and a sub-item one are equally capable of cutting the heading.
-  var userNavigated by remember { mutableStateOf(false) }
+  //
+  // Saveable, because the position it argues with is saveable: the lazy list restores its offset
+  // through SaveableStateProvider on a Settings -> Pair -> BACK round trip, and through the whole
+  // saved hierarchy when the activity is recreated behind the player's display-mode switch. A
+  // plainly remembered flag came back false in both cases, so the hold re-armed over a scroll
+  // position the viewer had already chosen and snapped the page to item 0 under them. HomeScreen
+  // keeps its own one-shot flags saveable for exactly this reason; see the comment there.
+  var userNavigated by rememberSaveable { mutableStateOf(false) }
   LaunchedEffect(userNavigated) {
     if (userNavigated) return@LaunchedEffect
     snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
       .collect { (index, offset) ->
+        // Re-read the flag rather than trusting this effect's key alone. Releasing the hold cancels
+        // this collector, but only once the composition has run again - and the scroll that
+        // released it (the save verdict below) is already moving by then. Without the check, an
+        // emission from that first frame would snap the page back to the top and take the verdict
+        // off screen.
+        if (userNavigated) return@collect
         if (index != 0 || offset != 0) listState.scrollToItem(0)
       }
   }
@@ -512,9 +525,16 @@ fun SettingsScreen(
   // the press, from anywhere on the page - so focus is handed to Save when the form had it and
   // lost it on the way down. A save started from the leave dialog is left alone: the form never
   // held focus, so nothing here takes it away from the dialog.
+  //
+  // It also ends the hold-at-top. That hold exists to survive the opening frames, when the initial
+  // focus request is still dragging a settling layout about; a save verdict is the page moving
+  // because the viewer pressed something, which is the same evidence a D-pad press gives. Leaving
+  // the hold armed would put the two in a tug of war over the scroll position and the hold would
+  // win, taking the verdict straight back off screen.
   LaunchedEffect(saveStatus) {
     if (saveStatus.isBlank()) return@LaunchedEffect
     val hadFocus = formFocused
+    userNavigated = true
     listState.animateScrollToItem(SettingsItem.Save.ordinal)
     if (hadFocus && !formFocused) focusJumper.jump(saveFocus)
   }

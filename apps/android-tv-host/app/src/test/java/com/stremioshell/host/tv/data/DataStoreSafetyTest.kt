@@ -59,6 +59,43 @@ class DataStoreSafetyTest {
   }
 
   @Test
+  fun `a failed read is tagged so a caller can tell it from a first run`() = runBlocking {
+    val degraded = FailingDataStore(IOException("disk unavailable"))
+      .recoveringSnapshots("test-store") { _, _ -> }
+      .first()
+
+    // The preferences are the same empty ones a brand-new TV has. Only the tag separates "nothing
+    // configured" from "nothing readable", and a Save that confuses the two erases credentials.
+    assertTrue(degraded.preferences.asMap().isEmpty())
+    assertTrue(degraded.degraded)
+
+    val healthy = object : DataStore<Preferences> {
+      override val data: Flow<Preferences> = flow {
+        emit(androidx.datastore.preferences.core.emptyPreferences())
+      }
+
+      override suspend fun updateData(
+        transform: suspend (t: Preferences) -> Preferences,
+      ): Preferences = throw UnsupportedOperationException()
+    }.recoveringSnapshots("test-store") { _, _ -> }.first()
+
+    assertTrue(!healthy.degraded)
+  }
+
+  @Test
+  fun `the read retry backoff grows past a few seconds and then stops growing`() {
+    // It used to settle at a four-second floor and stay there for the life of the process, with a
+    // Log.e on every attempt - a wakeup every four seconds, for days, for an answer that is not
+    // going to change once the storage is genuinely gone.
+    assertEquals(250L, preferencesReadRetryBackoffMillis(0))
+    assertEquals(4_000L, preferencesReadRetryBackoffMillis(4))
+    assertEquals(256_000L, preferencesReadRetryBackoffMillis(10))
+    assertEquals(300_000L, preferencesReadRetryBackoffMillis(11))
+    // Bounded rather than shifted into nonsense, however long the failure lasts.
+    assertEquals(300_000L, preferencesReadRetryBackoffMillis(5_000))
+  }
+
+  @Test
   fun `non io read failure still propagates`() {
     val failure = IllegalStateException("programmer error")
 

@@ -152,35 +152,64 @@ enum class SubtitleEdge(
   }
 }
 
+/** mpv's own default border style: an outline around each letter, and no box. */
+private const val OUTLINE_AND_SHADOW = "outline-and-shadow"
+
+/** A box the size of the text, drawn in `sub-back-color` including its alpha. */
+private const val BACKGROUND_BOX = "background-box"
+
 /**
- * A box behind the subtitles, as mpv's `sub-back-color`.
+ * A box behind the subtitles, as mpv's `sub-border-style` and `sub-back-color`
+ * together.
  *
  * [Off] is mpv's default and therefore the shipped look, for the same reason
  * [SubtitleEdge.Outline] is: a viewer who never opens these rows keeps the
  * subtitles this player has always drawn.
  *
- * A box that is not fully transparent changes what [SubtitleEdge] does: mpv
- * hands libass its box border style as soon as this has any alpha, and the
- * edge's border becomes the padding around the box rather than an outline around
- * each letter. The two rows stay independent settings — the edge is what shows
- * through while this is [Off], and how much room the box leaves once it is not.
+ * The colour alone draws nothing. Since mpv 0.38 — which is what the bundled
+ * libmpv is — the border style is its own option, and `sub-back-color` is only
+ * consulted for the two box styles; under the default `outline-and-shadow` the
+ * value is set and then ignored, which is precisely what this row used to do.
+ * Every step therefore names both properties.
+ *
+ * The box style is `background-box`, whose box is the size of the text, rather
+ * than `opaque-box`, whose box is the size of the border: with the latter the
+ * edge row would silently become a padding control, and [SubtitleEdge.None]
+ * would leave the letters with a box that touches them. `background-box` also
+ * draws the box in the colour's alpha, which is the whole of [Dim].
+ *
+ * The two rows therefore stay independent settings — the edge draws around each
+ * letter either way, and this one decides what is behind them.
  */
 enum class SubtitleBackground(
   val storageName: String,
   val label: String,
   /** `sub-back-color`, as mpv's `#AARRGGBB`, where alpha `FF` is opaque. */
   val backColor: String,
+  /** `sub-border-style`: which of mpv's border styles draws (or does not draw) the box. */
+  val borderStyle: String,
 ) {
-  Off("off", "Off", "#00000000"),
+  Off("off", "Off", "#00000000", OUTLINE_AND_SHADOW),
   // Half alpha: enough that the text sits on something, little enough that the
   // part of the picture it covers is still being watched through it.
-  Dim("dim", "Dim", "#80000000"),
-  Solid("solid", "Solid", "#FF000000"),
+  Dim("dim", "Dim", "#80000000", BACKGROUND_BOX),
+  Solid("solid", "Solid", "#FF000000", BACKGROUND_BOX),
   ;
 
-  /** As [SubtitleEdge.mpvOptions]: the property name lives here and nowhere else. */
+  /**
+   * As [SubtitleEdge.mpvOptions]: the property names live here and nowhere else.
+   *
+   * [Off] states `outline-and-shadow` rather than leaving the property alone, so
+   * that the player can keep applying these pairs as plain name/value writes.
+   * A step that named only the properties it needed would leave the box style
+   * from the step before it standing, and stepping back to [Off] would clear the
+   * colour while the box remained.
+   */
   val mpvOptions: List<Pair<String, String>>
-    get() = listOf("sub-back-color" to backColor)
+    get() = listOf(
+      "sub-border-style" to borderStyle,
+      "sub-back-color" to backColor,
+    )
 
   companion object {
     val DEFAULT = Off
@@ -210,9 +239,11 @@ enum class SubtitleBackground(
  * only when the Android device, active route and sink all advertise the codec;
  * an unsupported candidate can be silence.
  *
- * [spdifCodecs] is therefore a candidate list, not proof of support. A playback
- * integration that can inspect the active route should call [spdifCodecsFor]
- * and decline passthrough when it returns null.
+ * [spdifCodecs] is therefore a candidate list, not proof of support: it is what
+ * this player is willing to ask for, and never what it asks for. The value that
+ * reaches mpv is always [spdifCodecsFor] resolved against the codecs the active
+ * route reports, and passthrough is declined for the session when that returns
+ * null. Nothing else may write `audio-spdif`.
  */
 enum class AudioOutputMode(
   val storageName: String,
@@ -238,11 +269,27 @@ enum class AudioOutputMode(
     }
 
   /**
-   * The mpv codec list that is safe to request for a known active sink.
+   * The mpv codec list that is safe to request for a known active sink — the
+   * value the player writes to `audio-spdif`, once it has resolved [sinkCodecs]
+   * from the route Android actually selected for media.
    *
-   * Names use mpv's `audio-spdif` spelling. Null means support is unknown or
-   * there is no supported candidate, so the conservative action is to remain in
-   * [Decode]. Decode itself always resolves to an empty list.
+   * The contract the call site depends on:
+   * - Names on both sides use mpv's `audio-spdif` spelling, not Android's
+   *   encoding constants. Folding `E_AC3_JOC` in with `E_AC3` into one `eac3`
+   *   is the caller's job, because only the caller can see the encodings.
+   * - The result keeps the order of [spdifCodecs], not the iteration order of
+   *   [sinkCodecs]: mpv's list is a preference order, and a set built from an
+   *   Android query has no meaningful order to inherit.
+   * - Names the ladder does not offer are ignored rather than passed through, so
+   *   nothing this player never validated can reach mpv.
+   * - Null means support is unknown (no set at all) or nothing survived the
+   *   intersection, so the conservative action is to remain in [Decode] — a
+   *   caller writing the property directly wants `?: ""`, which is what Decode
+   *   itself always resolves to.
+   *
+   * A sink that reports more than one route must be intersected before it gets
+   * here: a union would make the least-capable route silent as soon as a richer
+   * AVR happened to be selected beside it.
    */
   fun spdifCodecsFor(sinkCodecs: Set<String>?): String? {
     if (this == Decode) return ""

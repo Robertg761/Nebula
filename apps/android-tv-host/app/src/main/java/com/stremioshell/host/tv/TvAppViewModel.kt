@@ -19,8 +19,8 @@ import com.stremioshell.host.tv.data.SettingsSaveGuard
 import com.stremioshell.host.tv.data.SettingsStatus
 import com.stremioshell.host.tv.data.SettingsStore
 import com.stremioshell.host.tv.data.StalenessPolicy
-import com.stremioshell.host.tv.data.StoredSettings
 import com.stremioshell.host.tv.data.StreamPickStore
+import com.stremioshell.host.tv.data.TmdbProbeResult
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.WatchStateStore
 import com.stremioshell.host.tv.data.WatchlistEntry
@@ -80,6 +80,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 
 /**
@@ -102,12 +103,17 @@ data class PlayerPrefsMutationResult(
 /** Network answers shared by Settings' connection test and phone pairing's save gate. */
 private data class ConfigurationProbe(
   val hasTmdbKey: Boolean,
-  val tmdbConnected: Boolean,
+  /**
+   * The kind of answer, not just whether there was one: a dead network and a rejected key both
+   * used to collapse to `false`, and the status line then told a viewer whose Wi-Fi had dropped
+   * to go retype a key that was fine.
+   */
+  val tmdbResult: TmdbProbeResult,
   val addons: List<AddonProbe>,
 ) {
   fun pairingValidation(): PairingValidation = PairingValidation(
     hasTmdbKey = hasTmdbKey,
-    tmdbConnected = tmdbConnected,
+    tmdbConnected = tmdbResult.connected,
     addons = addons.map { PairingConnectionCheck(it.label, it.name != null) },
   )
 }
@@ -495,46 +501,70 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   /**
    * Called on a NanoHTTPD worker thread. It deliberately blocks that one request through connection
    * validation and the atomic DataStore edit: the phone must never receive a success page for
-   * untested, queued or partially-written configuration. The bounded wait also prevents a dead
-   * network or storage backend from pinning the server worker indefinitely.
+   * untested, queued or partially-written configuration.
+   *
+   * Nothing here is wrapped in a timeout any more, and that is the point. The whole apply - probes
+   * and DataStore commit alike - used to run inside one 50-second window, so a slow set of addon
+   * probes could burn 40 of those seconds and leave the timeout to fire while the write was in
+   * flight. The phone was then shown a failure for configuration that had persisted, the one-shot
+   * token was released, and the obvious next move was to submit the same credentials again. The
+   * bound now sits on the cancellable work only (see [applyPairedConfigChecked]); the commit runs
+   * outside it and its real outcome is what gets reported.
    */
   private fun applyPairedConfig(
     session: PairingSession,
     submission: PairingSubmission,
   ): PairingApplyResult =
     runCatching {
-      runBlocking { withTimeout(PAIRING_APPLY_TIMEOUT_MS) { applyPairedConfigChecked(session, submission) } }
+      runBlocking { applyPairedConfigChecked(session, submission) }
     }.getOrElse {
-      val message = "The connection checks did not finish. Check the TV's network and try again."
+      // Never a timeout: an expired budget is returned as an ordinary result from inside, before
+      // anything is written. What reaches here is a storage backend that threw, and DataStore's
+      // edit is atomic, so "could not save" is the truth rather than a guess.
       if (pairingSession === session) {
-        _pairing.value = PairingState.ValidationFailed(message, checks = emptyList())
+        _pairing.value = PairingState.ValidationFailed(PAIRING_SAVE_FAILED_MESSAGE, checks = emptyList())
       }
-      PairingApplyResult.Failed(message)
+      PairingApplyResult.Failed(PAIRING_SAVE_FAILED_MESSAGE)
     }
 
   /**
    * Probes outside [settingsMutationMutex], then confirms the values did not move before writing.
    * A pairing POST can stay in flight while the viewer backs out to Settings; holding the mutex
    * across a 40-second network timeout would otherwise make every settings button appear broken.
+   *
+   * Two phases, and the split is deliberate:
+   *  - everything up to the verdict is cancellable and shares one [PAIRING_PROBE_BUDGET_MS] budget,
+   *    measured from entry so that a retry around the loop cannot extend the phone's wait and a
+   *    dead network or wedged storage read cannot pin this server worker for good;
+   *  - the commit is [NonCancellable] and unbounded. A write that has begun cannot be un-begun, so
+   *    the only honest thing to do is wait for its outcome and report that. An expiring budget can
+   *    therefore only ever be reported before a single byte has been written, which is what makes
+   *    "did not finish, try again" safe advice rather than an invitation to save the same
+   *    configuration twice.
    */
   private suspend fun applyPairedConfigChecked(
     session: PairingSession,
     submission: PairingSubmission,
   ): PairingApplyResult {
+    val budgetEndNs = System.nanoTime() + PAIRING_PROBE_BUDGET_MS * NANOS_PER_MS
     while (true) {
       if (!pairingActive(session)) return PairingApplyResult.Failed(PAIRING_CLOSED_MESSAGE)
-      val candidate = settingsMutationMutex.withLock {
-        ConfigMerge.merge(
-          submission,
-          currentTmdbKey = settings.tmdbApiKey.first(),
-          currentAddonUrls = settings.addonManifestUrls.first(),
-        )
-      }
+      val candidate = withinBudget(budgetEndNs) {
+        settingsMutationMutex.withLock {
+          ConfigMerge.merge(
+            submission,
+            currentTmdbKey = settings.tmdbApiKey.first(),
+            currentAddonUrls = settings.addonManifestUrls.first(),
+          )
+        }
+      } ?: return pairingTimedOut(session, PAIRING_STORAGE_TIMEOUT_MESSAGE)
       if (pairingSession === session) {
         _pairing.value = PairingState.Validating(candidate.addonUrls.size)
       }
 
-      val probe = probeConfiguration(candidate.tmdbKey, candidate.addonUrls)
+      val probe = withinBudget(budgetEndNs) {
+        probeConfiguration(candidate.tmdbKey, candidate.addonUrls)
+      } ?: return pairingTimedOut(session, PAIRING_PROBE_TIMEOUT_MESSAGE)
       if (!pairingActive(session)) return PairingApplyResult.Failed(PAIRING_CLOSED_MESSAGE)
       val validation = probe.pairingValidation()
       val displayChecks = listOf(
@@ -551,18 +581,24 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       // Values from a phone's blank field come from storage. If one changed while the network was
       // being tested, discard this verdict and test the newly-merged candidate instead of saving
       // an untested value or overwriting the viewer's newer Settings edit.
-      val committed = settingsMutationMutex.withLock {
-        if (!pairingActive(session)) return@withLock null
-        val latest = ConfigMerge.merge(
-          submission,
-          currentTmdbKey = settings.tmdbApiKey.first(),
-          currentAddonUrls = settings.addonManifestUrls.first(),
-        )
-        if (latest.tmdbKey != candidate.tmdbKey || latest.addonUrls != candidate.addonUrls) {
-          null
-        } else {
-          if (latest.changed) settings.setPairedConfiguration(latest.tmdbKey, latest.addonUrls)
-          latest
+      //
+      // NonCancellable from the re-read through the write: once this block is entered its result
+      // is the only thing that may be reported to the phone, and nothing outside it is allowed to
+      // decide the answer while the edit is in flight.
+      val committed = withContext(NonCancellable) {
+        settingsMutationMutex.withLock {
+          if (!pairingActive(session)) return@withLock null
+          val latest = ConfigMerge.merge(
+            submission,
+            currentTmdbKey = settings.tmdbApiKey.first(),
+            currentAddonUrls = settings.addonManifestUrls.first(),
+          )
+          if (latest.tmdbKey != candidate.tmdbKey || latest.addonUrls != candidate.addonUrls) {
+            null
+          } else {
+            if (latest.changed) settings.setPairedConfiguration(latest.tmdbKey, latest.addonUrls)
+            latest
+          }
         }
       }
       if (committed == null) {
@@ -596,9 +632,48 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
+  /**
+   * Runs [block] with whatever is left of the pre-commit budget, or null if it ran out.
+   *
+   * One shared deadline rather than a fresh timeout per step: the phone is holding a request open
+   * and the retry loop must not be able to extend that wait a step at a time.
+   */
+  private suspend fun <T> withinBudget(budgetEndNs: Long, block: suspend () -> T): T? {
+    val remainingMs = (budgetEndNs - System.nanoTime()) / NANOS_PER_MS
+    if (remainingMs <= 0L) return null
+    return withTimeoutOrNull(remainingMs) { block() }
+  }
+
+  /** Nothing has been written when this is reported - see [applyPairedConfigChecked]. */
+  private fun pairingTimedOut(session: PairingSession, message: String): PairingApplyResult {
+    if (pairingSession === session) {
+      _pairing.value = PairingState.ValidationFailed(message, checks = emptyList())
+    }
+    return PairingApplyResult.Failed(message)
+  }
+
+  /** The viewer left the pairing screen: the session ends and the screen's state ends with it. */
   fun stopPairing() {
     shutdownPairing()
     _pairing.value = PairingState.Idle
+  }
+
+  /**
+   * The pairing screen stopped being visible without the viewer leaving it - a screensaver, HOME,
+   * another app taking the foreground.
+   *
+   * The server still goes down, and the token with it: it was published as a QR code on a screen
+   * nobody is watching now, and a one-shot credential is never revived. What must not go down with
+   * it is a [PairingState.Received]. That is the receipt for configuration already committed to
+   * DataStore, and discarding it meant the resume minted a fresh token and a fresh QR - so a
+   * viewer who came back from a screensaver saw no evidence their phone submission had landed and
+   * typed their keys in again. Every other state is stale the moment the listener closes (a QR
+   * nobody scanned, a failure, a half-finished validation), so those return to Idle and the next
+   * resume starts a clean attempt.
+   */
+  fun pausePairing() {
+    shutdownPairing()
+    if (_pairing.value !is PairingState.Received) _pairing.value = PairingState.Idle
   }
 
   /**
@@ -646,10 +721,22 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     !session.stopped && pairingSession === session
 
   private companion object {
-    /** One shared HTTP call is capped at 40s; every source is probed in parallel. */
-    const val PAIRING_APPLY_TIMEOUT_MS = 50_000L
+    /**
+     * The bound on everything a pairing apply does *before* it commits: the storage reads and the
+     * connection probes. One shared HTTP call is capped at 40s and every source is probed in
+     * parallel, so this leaves room for the slowest of them plus the reads around it. The commit
+     * itself is deliberately outside this - see [applyPairedConfigChecked].
+     */
+    const val PAIRING_PROBE_BUDGET_MS = 50_000L
+    const val NANOS_PER_MS = 1_000_000L
     const val SETTINGS_SAVE_TIMEOUT_MS = 60_000L
     const val PAIRING_CLOSED_MESSAGE = "Pairing was closed before the settings could be saved."
+    const val PAIRING_PROBE_TIMEOUT_MESSAGE =
+      "The connection checks did not finish. Check the TV's network and try again."
+    const val PAIRING_STORAGE_TIMEOUT_MESSAGE =
+      "The TV could not read its current settings in time. Please try again."
+    const val PAIRING_SAVE_FAILED_MESSAGE =
+      "The TV could not save those settings. Please try again."
     const val SEARCH_KEY_REQUIRED_MESSAGE = "Add your TMDB API key in Settings to search."
 
     /**
@@ -1541,11 +1628,10 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     addonUrls: List<String>,
   ): ConfigurationProbe = coroutineScope {
     val tmdbProbe = async {
-      if (tmdbKey.isBlank()) {
-        false
-      } else {
-        catchingFailure { TmdbClient(tmdbKey).probeCredentials() }.isSuccess
-      }
+      TmdbProbeResult.of(
+        tmdbKey,
+        catchingFailure { TmdbClient(tmdbKey).probeCredentials() }.exceptionOrNull(),
+      )
     }
     val labels = AddonList.labels(addonUrls)
     val addonProbes = addonUrls.mapIndexed { index, url ->
@@ -1558,7 +1644,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     }
     ConfigurationProbe(
       hasTmdbKey = tmdbKey.isNotBlank(),
-      tmdbConnected = tmdbProbe.await(),
+      tmdbResult = tmdbProbe.await(),
       addons = addonProbes.awaitAll(),
     )
   }
@@ -1614,20 +1700,17 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
           }
 
           val resolved = settingsMutationMutex.withLock {
-            // Add/remove/reorder persist immediately. Read that list inside the same lock instead
-            // of accepting a compositional snapshot: a rapid Save after a list edit must not
-            // overwrite the edit with the previous frame's value.
-            val currentAddons = settings.addonManifestUrls.first()
+            // Add/remove/reorder persist immediately. Read the stored state inside the same lock
+            // instead of accepting a compositional snapshot: a rapid Save after a list edit must
+            // not overwrite the edit with the previous frame's value. One snapshot rather than
+            // two flow reads, because the fields must agree with each other and with whether the
+            // read succeeded at all - a degraded read presents as empty, and a Save built on that
+            // emptiness used to erase the stored key and addon list.
+            val stored = settings.storedSnapshot()
             SettingsSaveGuard.resolve(
-              SettingsDraft(tmdbKey, currentAddons, subtitlesBaseUrl),
-              StoredSettings(settings.tmdbApiKey.first(), currentAddons),
-            ).also { result ->
-              settings.setConfiguration(
-                result.tmdbKey,
-                result.addonUrls,
-                result.subtitlesBaseUrl,
-              )
-            }
+              SettingsDraft(tmdbKey, stored.addonUrls, subtitlesBaseUrl),
+              stored,
+            ).also { result -> settings.persist(result) }
           }
           persisted = true
           // Persisting the key is what makes Home load its rails, so start that load here, with the
@@ -1643,7 +1726,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
           publishSettingsSave(operation)
 
           val probe = probeConfiguration(resolved.tmdbKey, resolved.addonUrls)
-          val status = SettingsStatus.tmdbStatus(resolved.tmdbKey, probe.tmdbConnected) +
+          val status = SettingsStatus.tmdbStatus(resolved.tmdbKey, probe.tmdbResult) +
             "   |   " + SettingsStatus.addonStatus(probe.addons)
           publishSettingsSave(
             operation.copy(

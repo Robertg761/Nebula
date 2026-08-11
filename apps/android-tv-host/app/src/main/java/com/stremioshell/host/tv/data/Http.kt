@@ -7,6 +7,7 @@ import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
@@ -18,6 +19,7 @@ import okhttp3.Callback
 import okhttp3.Interceptor
 import okhttp3.MediaType
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody
@@ -41,7 +43,12 @@ data class HttpFetchResult(
 
 /** Seam for HTTP GETs so clients stay unit-testable without a server. */
 fun interface HttpFetcher {
-  /** Returns the response body for a 2xx response; throws [HttpStatusException] otherwise. */
+  /**
+   * Returns the response body for a 2xx response; throws [HttpStatusException] otherwise.
+   *
+   * The disk cache is not involved in either direction - see [HttpReach.Direct]. This is the path
+   * addon stream responses take, and they must never be replayed from disk.
+   */
   suspend fun get(url: String): String
 
   /**
@@ -81,6 +88,37 @@ fun interface HttpFetcher {
    * path exactly as they do today.
    */
   suspend fun getCachedOnly(url: String): String? = null
+}
+
+/**
+ * Where a GET is allowed to be answered from. One enum rather than a row of booleans, because the
+ * combinations are not independent: a cache-only read must not be marked cacheable, and a forced
+ * revalidation is the opposite of both.
+ *
+ * Top-level and internal rather than private to [OkHttpFetcher] so that [HttpCachePolicy.requestFor]
+ * - the one place a reach turns into request headers - can be exercised without a socket.
+ */
+internal enum class HttpReach {
+  /**
+   * Genuinely uncached, in both directions: the request carries `no-store`, so OkHttp neither
+   * answers it from the disk cache nor writes its response into one.
+   *
+   * This is the reach addon `/stream` responses use, and the header is not decoration. Those bodies
+   * carry debrid links that are signed for an hour or less, while the origin in front of them
+   * routinely marks its JSON publicly cacheable. Left to the origin's own Cache-Control the shared
+   * disk cache would replay an expired link every time the player re-resolves a stream, which the
+   * viewer sees as a title that will not start.
+   */
+  Direct,
+
+  /** A network round trip even when a fresh copy is on disk. */
+  Revalidated,
+
+  /** Fresh cache, else network, else whatever the cache still holds. */
+  Cacheable,
+
+  /** Disk or nothing. */
+  CacheOnly,
 }
 
 /**
@@ -170,6 +208,55 @@ object HttpCachePolicy {
     request.newBuilder().cacheControl(CacheControl.FORCE_NETWORK).build()
 
   /**
+   * Takes the disk cache out of the picture entirely for one request.
+   *
+   * `no-store` rather than `no-cache`, because the two halves of the problem are different:
+   * `no-cache` would still let the response be *written*, leaving an expired debrid link on disk
+   * for some later reader to find. OkHttp checks the request's own `no-store` on both sides of the
+   * cache (it refuses to serve a stored body for the request, and refuses to store the response),
+   * which is exactly the pair of guarantees [HttpReach.Direct] claims.
+   */
+  fun neverStored(request: Request): Request =
+    request.newBuilder().cacheControl(CacheControl.Builder().noStore().build()).build()
+
+  /**
+   * The exact request one [HttpReach] sends, in one place so the policy can be asserted on without
+   * a server: a reach is only ever as good as the headers it ends up putting on the wire.
+   */
+  internal fun requestFor(url: String, reach: HttpReach): Request {
+    val builder = Request.Builder().url(url).header("Accept", "application/json")
+    // The marker opts a response into being stored and into the stale fallback. A cache-only read
+    // must not carry it: the miss it expects is a synthetic 504, which is a retryable status, so
+    // the interceptor would search the cache a second time for the body it was just told is absent.
+    if (reach == HttpReach.Cacheable) builder.header(CACHEABLE_HEADER, "1")
+    val built = builder.build()
+    return when (reach) {
+      HttpReach.Direct -> neverStored(built)
+      HttpReach.Revalidated -> requiringNetwork(built)
+      HttpReach.CacheOnly -> cacheOnlyRequest(built)
+      HttpReach.Cacheable -> built
+    }
+  }
+
+  /**
+   * The answer a request gets while its host's own Retry-After window is still open and the cache
+   * has nothing to offer.
+   *
+   * Synthesised locally: an interceptor has to return a response, and the honest one here is the
+   * service's own rate limit restated, which [OkHttpFetcher] turns back into an
+   * [HttpStatusException] and the UI renders as "try again in a moment". No socket is opened.
+   */
+  fun rateLimitedResponse(request: Request, retryAfterSeconds: Long): Response =
+    Response.Builder()
+      .request(request)
+      .protocol(Protocol.HTTP_1_1)
+      .code(429)
+      .message("Too Many Requests")
+      .header("Retry-After", retryAfterSeconds.toString())
+      .body(ByteArray(0).toResponseBody(null))
+      .build()
+
+  /**
    * Stamps a freshness window on a response so the cache will store it. TMDB's own headers are
    * not reliably storable, and without this there would be nothing on disk to fall back on.
    */
@@ -193,24 +280,89 @@ object HttpCachePolicy {
 }
 
 /**
+ * Remembers a host's own "come back later" and honours it, so a rate limit is answered once rather
+ * than argued with.
+ *
+ * Retry-After used to be parsed and then dropped on the floor: every rail refresh inside the window
+ * re-asked TMDB, was refused again, and quietly fell back to the same stale body it already had -
+ * a round trip per rail per refresh, spent entirely on being told to stop. Remembering the deadline
+ * turns that into a disk read.
+ *
+ * Deliberately per host and deliberately narrow:
+ *  - only cacheable GETs consult it (see [StaleOnNetworkFailureInterceptor]), because those are the
+ *    ones with a stale body worth serving instead; a viewer pressing Play must still be allowed to
+ *    ask an addon that rate-limited us a minute ago;
+ *  - the window is capped well below what [HttpCachePolicy.retryAfterSeconds] will parse. A
+ *    misconfigured origin answering "Retry-After: 86400" gets a scheduling hint honoured, not the
+ *    power to put Home into cache-only mode for a day.
+ */
+internal class RetryAfterGate(
+  /** Seam so a window can be opened, waited out and reopened inside one unit test. */
+  private val nowMillis: () -> Long = System::currentTimeMillis,
+) {
+  private val openAgainAtMillis = ConcurrentHashMap<String, Long>()
+
+  /** Starts (or extends) [host]'s window. A zero/negative hint means "ask again now". */
+  fun record(host: String, retryAfterSeconds: Long) {
+    val window = retryAfterSeconds.coerceAtMost(MAX_WINDOW_SECONDS)
+    if (window <= 0L) {
+      openAgainAtMillis.remove(host)
+      return
+    }
+    val until = nowMillis() + window * 1_000L
+    openAgainAtMillis.merge(host, until) { existing, incoming -> maxOf(existing, incoming) }
+  }
+
+  /** Whole seconds still to wait, or null when [host] may be asked again. */
+  fun remainingSeconds(host: String): Long? {
+    val until = openAgainAtMillis[host] ?: return null
+    val remainingMillis = until - nowMillis()
+    if (remainingMillis <= 0L) {
+      openAgainAtMillis.remove(host, until)
+      return null
+    }
+    return (remainingMillis + 999L) / 1_000L
+  }
+
+  companion object {
+    /** Long enough to stop a refresh loop, short enough that nobody has to reboot the TV. */
+    const val MAX_WINDOW_SECONDS = 10L * 60
+
+    /** The one the real client uses; tests build their own with a fake clock. */
+    val shared = RetryAfterGate()
+  }
+}
+
+/**
  * Application interceptor: when the network fails on a cacheable GET, retry the same request
  * against the disk cache, so a cold start on flaky Wi-Fi still paints rails instead of an error.
+ * It is also where a host's Retry-After is both recorded and obeyed.
  *
  * Sits above the cache in the chain, which is what lets the retry be served from it.
  */
 internal class StaleOnNetworkFailureInterceptor(
   private val maxStaleSeconds: Int = HttpCachePolicy.MAX_STALE_SECONDS,
+  private val maxBodyBytes: Long = MAX_JSON_RESPONSE_BYTES,
+  private val retryAfterGate: RetryAfterGate = RetryAfterGate.shared,
   /** Seam so the fallback path is unit-testable without android.util.Log. */
   private val log: (String) -> Unit = { Log.i(HTTP_TAG, it) },
 ) : Interceptor {
   override fun intercept(chain: Interceptor.Chain): Response {
     val request = chain.request()
     if (!HttpCachePolicy.isCacheable(request)) return chain.proceed(request)
+    retryAfterGate.remainingSeconds(request.url.host)?.let { waiting ->
+      return withinRetryAfterWindow(chain, request, waiting)
+    }
     var responseStarted = false
     val networkResponse = try {
       val response = chain.proceed(request)
       responseStarted = true
       eagerlyBufferSuccessfulBody(response)
+    } catch (tooLarge: HttpResponseTooLargeException) {
+      // An oversized *successful* body is not a network failure, and the stale fallback below would
+      // report it as one - the viewer would be shown a day-old catalog with no hint that the live
+      // one is unusable. It is an IOException only because that is what the read path can throw.
+      throw tooLarge
     } catch (error: IOException) {
       val cached = cachedResponse(chain, request)
       if (cached == null) throw error
@@ -223,6 +375,9 @@ internal class StaleOnNetworkFailureInterceptor(
     if (!HttpCachePolicy.isRetryableStatus(networkResponse.code)) return networkResponse
     val status = networkResponse.code
     val retryAfter = HttpCachePolicy.retryAfterSeconds(networkResponse.header("Retry-After"))
+    // Any retryable status may carry the header, and a 503 that names a deadline means it as
+    // literally as a 429 does; both are the service asking to be left alone for a while.
+    if (retryAfter != null) retryAfterGate.record(request.url.host, retryAfter)
     // OkHttp requires an application interceptor to close one response before calling proceed
     // again. Keep a bodyless copy for the no-cache case: callers only need its status/headers and
     // must still receive the service failure rather than a synthetic cache 504.
@@ -236,6 +391,25 @@ internal class StaleOnNetworkFailureInterceptor(
       "HTTP $status$retryHint; serving cached ${redactSecrets(request.url.toString())}",
     )
     return HttpCachePolicy.markStaleFallback(cached, "http-$status")
+  }
+
+  /**
+   * Answers from disk, or restates the rate limit, without opening a socket. Nothing here calls
+   * proceed with a network-capable request, which is the entire point of the gate.
+   */
+  private fun withinRetryAfterWindow(
+    chain: Interceptor.Chain,
+    request: Request,
+    waitingSeconds: Long,
+  ): Response {
+    val cached = cachedResponse(chain, request)
+    val outcome = if (cached == null) "nothing cached for" else "serving cached"
+    log(
+      "inside ${request.url.host}'s Retry-After window (${waitingSeconds}s left); " +
+        "$outcome ${redactSecrets(request.url.toString())}",
+    )
+    return cached?.let { HttpCachePolicy.markStaleFallback(it, "retry-after") }
+      ?: HttpCachePolicy.rateLimitedResponse(request, waitingSeconds)
   }
 
   private fun cachedResponse(chain: Interceptor.Chain, request: Request): Response? {
@@ -262,7 +436,7 @@ internal class StaleOnNetworkFailureInterceptor(
     val body = response.body ?: return response
     val contentType = body.contentType()
     val bytes = try {
-      body.readByteArrayLimited(MAX_JSON_RESPONSE_BYTES)
+      body.readByteArrayLimited(maxBodyBytes)
     } finally {
       body.close()
     }
@@ -346,34 +520,15 @@ object SharedHttpClient {
 }
 
 object OkHttpFetcher : HttpFetcher {
-  /**
-   * Where a GET is allowed to be answered from. One enum rather than a row of booleans, because the
-   * combinations are not independent: a cache-only read must not be marked cacheable, and a forced
-   * revalidation is the opposite of both.
-   */
-  private enum class Reach {
-    /** Uncached in practice: nothing stamps the response as storable on its way past the cache. */
-    Direct,
+  override suspend fun get(url: String): String = execute(url, HttpReach.Direct)
 
-    /** A network round trip even when a fresh copy is on disk. */
-    Revalidated,
-
-    /** Fresh cache, else network, else whatever the cache still holds. */
-    Cacheable,
-
-    /** Disk or nothing. */
-    CacheOnly,
-  }
-
-  override suspend fun get(url: String): String = execute(url, Reach.Direct)
-
-  override suspend fun getFresh(url: String): String = execute(url, Reach.Revalidated)
+  override suspend fun getFresh(url: String): String = execute(url, HttpReach.Revalidated)
 
   override suspend fun getAllowingStale(url: String): String =
     getAllowingStaleResult(url).body
 
   override suspend fun getAllowingStaleResult(url: String): HttpFetchResult =
-    executeResult(url, Reach.Cacheable)
+    executeResult(url, HttpReach.Cacheable)
 
   /**
    * An empty cache is the expected answer here, not an error: it is what a first run looks like,
@@ -382,30 +537,21 @@ object OkHttpFetcher : HttpFetcher {
    */
   override suspend fun getCachedOnly(url: String): String? =
     try {
-      execute(url, Reach.CacheOnly)
+      execute(url, HttpReach.CacheOnly)
     } catch (_: IOException) {
       null
     }
 
-  private suspend fun execute(url: String, reach: Reach): String = executeResult(url, reach).body
+  private suspend fun execute(url: String, reach: HttpReach): String =
+    executeResult(url, reach).body
 
-  private suspend fun executeResult(url: String, reach: Reach): HttpFetchResult {
-    val builder = Request.Builder().url(url).header("Accept", "application/json")
-    // The marker opts a response into being stored and into the stale fallback. A cache-only read
-    // must not carry it: the miss it expects is a synthetic 504, which is a retryable status, so
-    // the interceptor would search the cache a second time for the body it was just told is absent.
-    if (reach == Reach.Cacheable) builder.header(HttpCachePolicy.CACHEABLE_HEADER, "1")
-    val built = builder.build()
-    val request = when (reach) {
-      Reach.Revalidated -> HttpCachePolicy.requiringNetwork(built)
-      Reach.CacheOnly -> HttpCachePolicy.cacheOnlyRequest(built)
-      Reach.Direct, Reach.Cacheable -> built
-    }
+  private suspend fun executeResult(url: String, reach: HttpReach): HttpFetchResult {
+    val request = HttpCachePolicy.requestFor(url, reach)
     return SharedHttpClient.client.newCall(request).awaitAndConsumeResponse { response ->
       if (!response.isSuccessful) {
         // The URL carries the TMDB api_key, so the detail stays here (redacted) and the thrown
         // message - which the UI may end up rendering - carries only status and host.
-        if (reach != Reach.CacheOnly) {
+        if (reach != HttpReach.CacheOnly) {
           Log.w(HTTP_TAG, "GET ${redactSecrets(url)} failed: HTTP ${response.code}")
         }
         throw HttpStatusException(

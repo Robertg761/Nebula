@@ -78,8 +78,7 @@ object StreamMerge {
     val seenFiles = mutableSetOf<String>()
     return streams.filter { stream ->
       val url = stream.url?.trim()?.takeIf { it.isNotEmpty() }
-      val file = stream.infoHash?.trim()?.lowercase(Locale.ROOT)?.takeIf { it.isNotEmpty() }
-        ?.let { "$it/${stream.fileIdx ?: -1}" }
+      val file = fileIdentity(stream)
       // A row with neither identity cannot be matched against anything, so it is
       // kept: dropping it would lose a stream rather than a duplicate.
       if (url == null && file == null) return@filter true
@@ -90,6 +89,41 @@ object StreamMerge {
       true
     }
   }
+
+  /**
+   * Which file inside which torrent a row points at, or null when it does not say.
+   *
+   * `fileIdx` answers this exactly when the addon supplies it. When it does not - and plenty do
+   * not for season packs - `infoHash` alone is not an identity: every episode of a twenty-episode
+   * pack shares it, so folding them onto one key collapsed a whole season into a single row and
+   * lost nineteen streams as "duplicates". A name is the discriminator that is left.
+   *
+   * The file name is preferred over the row's own label because it is the part two addons
+   * describing the same file agree on; a label carries seeders, size and the addon's own branding.
+   * The cost is one-sided and is the right way round: two addons that spell a pack entry
+   * differently now produce two rows where one would do, which is a longer list, rather than one
+   * row where there should be twenty, which is a missing episode.
+   */
+  private fun fileIdentity(stream: AddonStream): String? {
+    val hash = stream.infoHash?.trim()?.lowercase(Locale.ROOT)?.takeIf { it.isNotEmpty() }
+      ?: return null
+    val index = stream.fileIdx
+    if (index != null) return "$hash/$index"
+    return "$hash/${fileDiscriminator(stream)}"
+  }
+
+  /** The most file-like text a row offers, flattened so spacing alone cannot split an identity. */
+  private fun fileDiscriminator(stream: AddonStream): String =
+    listOfNotNull(stream.behaviorHints?.filename, stream.title, stream.name)
+      .firstOrNull { it.isNotBlank() }
+      ?.lowercase(Locale.ROOT)
+      ?.replace(WHITESPACE, " ")
+      ?.trim()
+      // Nothing to tell them apart by: back to hash-only, which is where this started, and the
+      // rows really are indistinguishable from here.
+      .orEmpty()
+
+  private val WHITESPACE = Regex("\\s+")
 
   /** "Couldn't reach Comet and Torrentio." - one sentence, whatever the count. */
   fun failureNotice(labels: List<String>): String? {

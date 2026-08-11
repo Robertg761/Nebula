@@ -1,5 +1,6 @@
 package com.stremioshell.host.tv.data
 
+import com.stremioshell.host.tv.data.addon.AddonBehaviorHints
 import com.stremioshell.host.tv.data.addon.AddonFetch
 import com.stremioshell.host.tv.data.addon.AddonStream
 import com.stremioshell.host.tv.data.addon.StreamMerge
@@ -84,6 +85,51 @@ class StreamMergeTest {
     )
 
     assertEquals(2, merged.streams.size)
+  }
+
+  @Test
+  fun `a pack with no file index is not collapsed into one row`() {
+    // `infoHash` alone is the torrent, not the file. Every episode of a season pack shares it, so
+    // keying on "$hash/-1" turned a twenty-episode pack into one row and lost nineteen streams as
+    // "duplicates" - which reads as a season with one episode in it.
+    val merged = StreamMerge.merge(
+      listOf(
+        AddonFetch(
+          "Comet",
+          listOf(
+            packEntry("Show S01E01 1080p", "Show.S01E01.1080p.mkv"),
+            packEntry("Show S01E02 1080p", "Show.S01E02.1080p.mkv"),
+            packEntry("Show S01E03 1080p", "Show.S01E03.1080p.mkv"),
+          ),
+        ),
+      ),
+    )
+
+    assertEquals(3, merged.streams.size)
+  }
+
+  @Test
+  fun `the same pack entry from two addons is still one row`() {
+    // The file name is what two addons describing one file agree on, which is why it is preferred
+    // over the row's own label - that carries seeders, size and the addon's branding.
+    val merged = StreamMerge.merge(
+      listOf(
+        AddonFetch("Comet", listOf(packEntry("[RD+] Comet 1080p", "Show.S01E01.1080p.mkv"))),
+        AddonFetch("MediaFusion", listOf(packEntry("MF 1080p 12 seeders", "show.s01e01.1080p.mkv"))),
+      ),
+    )
+
+    assertEquals(listOf("[RD+] Comet 1080p"), merged.streams.map { it.label })
+  }
+
+  @Test
+  fun `a hash-only row with nothing to tell it apart still dedupes`() {
+    // No index and no name: the rows really are indistinguishable, and this is where the old
+    // hash-only identity was right all along.
+    val bare = AddonStream(infoHash = "abc")
+    val merged = StreamMerge.merge(listOf(AddonFetch("Comet", listOf(bare, bare))))
+
+    assertEquals(1, merged.streams.size)
   }
 
   @Test
@@ -184,4 +230,11 @@ class StreamMergeTest {
     hash: String? = null,
     idx: Int? = null,
   ) = AddonStream(name = name, url = url, infoHash = hash, fileIdx = idx)
+
+  /** One file inside a season pack, as an addon that does not supply `fileIdx` reports it. */
+  private fun packEntry(name: String, filename: String) = AddonStream(
+    name = name,
+    infoHash = "abc",
+    behaviorHints = AddonBehaviorHints(filename = filename),
+  )
 }

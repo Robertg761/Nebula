@@ -248,13 +248,16 @@ fun SearchScreen(
   // card the viewer was last on if there is one. restoreFocusedChild reports whether it had
   // anything to restore and requestFocus throws when nothing is attached, so both need catching
   // before the key is claimed - with no grid at all this does nothing and consumes nothing.
+  //
+  // What is deliberately not consulted is firstResult.focused. onFocusChanged runs after
+  // requestFocus returns, batched to the end of the frame, so reading it here reports the state
+  // from before the request: the chips' Down key was left unconsumed and the default focus search
+  // moved a second time, landing two rows into the grid instead of on its first card. A dispatched
+  // request is the answer, the same conclusion `SettingsFocusJumper.leaveTextField` reached.
   val focusResults: () -> Boolean = remember {
     {
       runCatching { resultsFocus.restoreFocusedChild() }.getOrDefault(false) ||
-        runCatching {
-          firstResult.requester.requestFocus()
-          firstResult.focused
-        }.getOrDefault(false)
+        runCatching { firstResult.requester.requestFocus() }.isSuccess
     }
   }
 
@@ -880,25 +883,31 @@ private fun SearchSkeleton() {
   }
 }
 
-/** Redirect D-pad up/down to explicit neighbours so text fields can't trap focus on TV. */
+/**
+ * Redirect D-pad up/down to explicit neighbours so text fields can't trap focus on TV.
+ *
+ * The verdict is "the move was asked for", not "the target reports focus". A focus event is
+ * delivered through onFocusChanged, which this version of Compose batches and flushes at the end of
+ * the frame - so reading [InitialFocusTarget.focused] in the same breath as requesting it reads the
+ * value from *before* the request, calls a move that is already in flight a miss, and hands the key
+ * back. The field's default handling then runs a second move on top of the first, which is how Down
+ * out of the query field stepped clean over the filter chips. SettingsScreen settled the same
+ * question the same way for its own fields; see `SettingsFocusJumper.leaveTextField`.
+ *
+ * requestFocus throws when nothing is attached - a neighbour this screen never composes - and that
+ * still leaves the key unconsumed, because in that case nothing was asked to move at all.
+ */
 private fun Modifier.verticalFieldNav(
   down: InitialFocusTarget?,
   up: InitialFocusTarget?,
 ): Modifier {
   return onPreviewKeyEvent { event ->
     if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-    when (event.key) {
-      // requestFocus throws when nothing is attached; in that case leave the key unconsumed
-      // instead of pretending we moved.
-      Key.DirectionDown -> down != null && runCatching {
-        down.requester.requestFocus()
-        down.focused
-      }.getOrDefault(false)
-      Key.DirectionUp -> up != null && runCatching {
-        up.requester.requestFocus()
-        up.focused
-      }.getOrDefault(false)
-      else -> false
-    }
+    val target = when (event.key) {
+      Key.DirectionDown -> down
+      Key.DirectionUp -> up
+      else -> null
+    } ?: return@onPreviewKeyEvent false
+    runCatching { target.requester.requestFocus() }.isSuccess
   }
 }

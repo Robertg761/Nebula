@@ -281,7 +281,7 @@ class ExternalSubtitlesTest {
     )
 
     assertTrue(states.all { ExternalSubtitles.action(it)?.enabled == true })
-    assertEquals(false, ExternalSubtitles.action(ExternalSubtitlesState.Loading)?.enabled)
+    assertEquals(false, ExternalSubtitles.action(ExternalSubtitlesState.Loading())?.enabled)
   }
 
   @Test
@@ -297,6 +297,116 @@ class ExternalSubtitlesTest {
       ExternalSubtitles.action(ExternalSubtitlesState.Ready(emptyList()))?.label,
     )
   }
+
+  @Test
+  fun `languages are ordered by the name the menu will show, not the english one`() {
+    // The menu renders language names in the viewer's own locale, so ordering by the English
+    // names leaves a French TV showing a list that is alphabetical in no language on screen.
+    val rendered = mapOf("deu" to "Allemand", "eng" to "Anglais", "spa" to "Espagnol")
+
+    val options = ExternalSubtitles.options(
+      subtitles("eng" to 1, "spa" to 1, "deu" to 1),
+      preferredLanguage = "",
+      displayLabel = { rendered.getValue(it) },
+    )
+
+    assertEquals(listOf("Allemand", "Anglais", "Espagnol"), options.map { it.label })
+  }
+
+  @Test
+  fun `the rendered name falls back to the english one, then to the code`() {
+    // What the platform can localize varies by device and by code; what it cannot must still read
+    // as a language rather than as a three-letter tag.
+    assertEquals("German", ExternalSubtitles.menuLabel("deu"))
+    assertEquals("English", ExternalSubtitles.menuLabel("en"))
+    assertEquals("QAA", ExternalSubtitles.menuLabel("qaa"))
+    assertEquals("Unknown language", ExternalSubtitles.menuLabel(""))
+  }
+
+  @Test
+  fun `the cap drops whole languages, never part of one`() {
+    // Each row says "2 of 3". A cap applied to the flattened list cuts a language in half and
+    // leaves two rows both promising a third file that is not on the menu.
+    val response = (1..19).flatMap { subtitles("qa${it.toString().padStart(2, '0')}" to 3) } +
+      subtitles("qa20" to 2) +
+      subtitles("qa21" to 3)
+
+    val options = ExternalSubtitles.options(response, preferredLanguage = "")
+
+    assertEquals(59, options.size)
+    assertTrue(options.none { it.lang == "qa21" })
+    assertTrue(options.groupBy { it.lang }.all { (_, rows) -> rows.size == rows.first().total })
+  }
+
+  @Test
+  fun `the addon's answer is bounded before it is grouped`() {
+    // Nothing downstream is quadratic, but normalizing and grouping an unbounded response to then
+    // show sixty rows of it is still work done on a set-top box's main thread.
+    val response = (1..ExternalSubtitles.MAX_CANDIDATES).map { subtitle("qaa", "qaa-$it") } +
+      subtitle("eng", "english")
+
+    val options = ExternalSubtitles.options(response, preferredLanguage = "eng")
+
+    assertEquals(listOf("qaa"), options.map { it.lang }.distinct())
+  }
+
+  @Test
+  fun `a search adds to the stream's own subtitles rather than replacing them`() {
+    val embedded = listOf(embeddedOption("included-1"), embeddedOption("included-2"))
+    val online = ExternalSubtitles.options(subtitles("eng" to 2), preferredLanguage = "")
+
+    val merged = ExternalSubtitles.merge(embedded, online)
+
+    assertEquals(
+      listOf("included-1", "included-2", "eng-1", "eng-2"),
+      optionIds(merged),
+    )
+    assertEquals(
+      listOf(ExternalSubtitleSource.Embedded, ExternalSubtitleSource.Online),
+      merged.map { it.source }.distinct(),
+    )
+  }
+
+  @Test
+  fun `a file both the stream and the addon name is offered once, as the stream's`() {
+    val embedded = listOf(embeddedOption("shared"))
+    val online = ExternalSubtitles.options(
+      listOf(subtitle("eng", "shared"), subtitle("eng", "extra")),
+      preferredLanguage = "",
+    )
+
+    val merged = ExternalSubtitles.merge(embedded, online)
+
+    assertEquals(listOf("shared", "extra"), optionIds(merged))
+    assertEquals(ExternalSubtitleSource.Embedded, merged.first().source)
+  }
+
+  @Test
+  fun `a list with no search behind it is offered without a pressable search row`() {
+    // A stream that named subtitle files but carries no IMDb id: the files are still worth
+    // listing, and the row they hang off must not invite a press that can only do nothing.
+    val state = ExternalSubtitlesState.Ready(
+      listOf(embeddedOption("included")),
+      searchable = false,
+    )
+
+    assertEquals(false, ExternalSubtitles.action(state)?.enabled)
+  }
+
+  @Test
+  fun `nothing listed and nothing to search is no section at all`() {
+    assertNull(
+      ExternalSubtitles.action(ExternalSubtitlesState.Ready(emptyList(), searchable = false)),
+    )
+  }
+
+  private fun embeddedOption(id: String) = ExternalSubtitleOption(
+    url = subtitleUrl(id),
+    lang = "eng",
+    label = "English",
+    detail = "Included with the stream",
+    trackTitle = id,
+  )
 
   /** [counts] as language code to how many files the addon returned for it. */
   private fun subtitles(vararg counts: Pair<String, Int>): List<AddonSubtitle> =

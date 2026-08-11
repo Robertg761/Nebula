@@ -164,7 +164,10 @@ class TmdbClient(
       ),
       imdbId = details.externalIds?.imdbId?.ifBlank { null },
       runtimeMinutes = details.runtime ?: details.episodeRunTime.firstOrNull(),
-      genres = details.genres.map { it.name },
+      // Blank-filtered because TmdbGenre.name now defaults, so a null genre name coerces to "" -
+      // one fewer whole-page failure, but an empty chip on the details screen would be worse than
+      // the missing genre it stands for.
+      genres = details.genres.map { it.name }.filter { it.isNotBlank() },
       seasons = SeasonList.order(
         details.seasons.map { SeasonSummary(it.seasonNumber, it.name, it.episodeCount) },
       ),
@@ -309,8 +312,18 @@ class TmdbClient(
      * Shared rather than per-instance: a [TmdbClient] is built per request, and a [Json] carries a
      * serializer cache worth keeping instead of rebuilding nine times on a cold Home. The
      * configuration is immutable and [Json] is safe to use from several threads.
+     *
+     * [Json.coerceInputValues] because TMDB writes explicit nulls into fields it documents as
+     * strings: `"overview": null` on a title nobody has written a synopsis for is the everyday
+     * case, and it used to fail the decode of the whole page - every card in the rail - rather
+     * than one field. Coercion only reaches properties that declare a default, so the wire models
+     * default everything that is display data; see TmdbModels for the handful of identity fields
+     * deliberately left required.
      */
-    private val JSON = Json { ignoreUnknownKeys = true }
+    private val JSON = Json {
+      ignoreUnknownKeys = true
+      coerceInputValues = true
+    }
 
     private const val IMAGE_BASE_POSTER = "https://image.tmdb.org/t/p/w342"
     private const val IMAGE_BASE_BACKDROP = "https://image.tmdb.org/t/p/w1280"

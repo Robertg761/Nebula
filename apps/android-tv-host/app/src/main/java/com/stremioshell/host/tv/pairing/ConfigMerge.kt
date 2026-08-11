@@ -33,6 +33,12 @@ data class PairingSubmission(val tmdbKey: String?, val addonUrls: List<String>?)
      * Empty for a box with nothing usable in it, which the caller has to tell apart from a box the
      * viewer deliberately left blank: the first is a typo worth reporting, the second is "keep what
      * you have".
+     *
+     * On the pairing path the dropping and capping never actually fire - [addonInputError] has
+     * already refused a box with an unusable line, a duplicate, or more than [AddonList.MAX_ADDONS]
+     * of them - so a box that passed validation comes back here with one URL per submitted line
+     * and nothing missing. That is the invariant the server's confirmation page depends on to be
+     * able to report a count truthfully.
      */
     fun addonUrlsIn(raw: String?): List<String> =
       AddonList.sanitized(raw.orEmpty().split(LINE_BREAK))
@@ -40,10 +46,19 @@ data class PairingSubmission(val tmdbKey: String?, val addonUrls: List<String>?)
     /**
      * Validates the phone form before [of] normalises it.
      *
-     * [AddonList.sanitized] deliberately drops malformed entries and caps the stored list, which
-     * is convenient for migrating old preferences but unsafe for an interactive form: reporting
-     * success after silently discarding one line makes the viewer debug the wrong device. Pairing
-     * therefore accepts every non-blank line or rejects the entire submission.
+     * [AddonList.sanitized] deliberately drops malformed entries, collapses duplicates and caps
+     * the stored list, which is convenient for migrating old preferences but unsafe for an
+     * interactive form: reporting success after silently discarding one line makes the viewer
+     * debug the wrong device. Pairing therefore accepts every non-blank line or rejects the entire
+     * submission.
+     *
+     * Duplicates are part of that promise and used to escape it. Lines were checked one at a time
+     * while [addonUrlsIn] deduplicated the list as a whole, so two lines that normalise to the
+     * same URL - `comet.example` and `https://comet.example/manifest.json` are the same addon, and
+     * a viewer correcting a line by pasting it again below produces exactly that - passed
+     * validation and then arrived as one, with the confirmation reporting fewer saved than were
+     * submitted. Rejecting is the honest half of the contract above: the viewer is told which
+     * mistake to fix rather than left to notice a missing row.
      */
     fun addonInputError(raw: String?): String? {
       if (raw.isNullOrBlank()) return null
@@ -51,12 +66,16 @@ data class PairingSubmission(val tmdbKey: String?, val addonUrls: List<String>?)
       if (lines.size > AddonList.MAX_ADDONS) {
         return "Enter no more than ${AddonList.MAX_ADDONS} addon links."
       }
-      val usableCount = lines.count { AddonList.sanitized(listOf(it)).isNotEmpty() }
-      if (usableCount == 0) {
+      val normalized = lines.map { AddonList.sanitized(listOf(it)).firstOrNull() }
+      val usable = normalized.filterNotNull()
+      if (usable.isEmpty()) {
         return "No usable addon link in that box. Paste the manifest URL."
       }
-      if (usableCount != lines.size) {
+      if (usable.size != lines.size) {
         return "Every addon line must be a usable manifest link."
+      }
+      if (usable.distinct().size != usable.size) {
+        return "Two of those addon links are the same addon. Enter each one once."
       }
       return null
     }

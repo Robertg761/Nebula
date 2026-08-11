@@ -1,6 +1,7 @@
 package com.stremioshell.host.tv.data
 
 import com.stremioshell.host.tv.data.subtitles.SubtitlesClient
+import java.net.UnknownHostException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -130,6 +131,97 @@ class SettingsSaveGuardTest {
     )
   }
 
+  @Test
+  fun `a save during a failed read cannot erase a key it could not see`() {
+    // recoveringData hands blank values to a failed read, which look exactly like an unconfigured
+    // TV. Acting on them turned a transient disk error into a wiped TMDB key and an empty addon
+    // list - and the viewer's next Home load into "no key".
+    val resolved = SettingsSaveGuard.resolve(
+      draft(tmdbKey = "", addonUrls = emptyList(), subtitlesBaseUrl = "subs.example"),
+      StoredSettings(tmdbKey = "", addonUrls = emptyList(), readable = false),
+    )
+
+    assertTrue(resolved.keptTmdbKey)
+    assertTrue(resolved.keptAddonUrls)
+    assertTrue(resolved.storedUnreadable)
+    // Kept means "do not write this key at all"; see SettingsStore.persist.
+    assertEquals(
+      "Couldn't read your saved settings just now, so your TMDB key and addons were left " +
+        "as they are. Try Save again in a moment.",
+      SettingsSaveGuard.keptNotice(resolved),
+    )
+  }
+
+  @Test
+  fun `a failed read still lets the viewer write values they actually typed`() {
+    val resolved = SettingsSaveGuard.resolve(
+      draft(tmdbKey = "typed-key", addonUrls = listOf("comet.example")),
+      StoredSettings(tmdbKey = "", addonUrls = emptyList(), readable = false),
+    )
+
+    assertFalse(resolved.keptTmdbKey)
+    assertFalse(resolved.keptAddonUrls)
+    assertEquals("typed-key", resolved.tmdbKey)
+    assertEquals(listOf("https://comet.example/manifest.json"), resolved.addonUrls)
+    assertNull(SettingsSaveGuard.keptNotice(resolved))
+  }
+
+  @Test
+  fun `a rejected addon url is not reported as an empty list`() {
+    // "the list was empty" describes what the guard did, not what the viewer did - and left them
+    // with no idea that the address they typed was the problem.
+    val resolved = SettingsSaveGuard.resolve(
+      draft(tmdbKey = "k", addonUrls = listOf("http:/comet.example")),
+      stored(addonUrls = listOf("https://saved.example/manifest.json")),
+    )
+
+    assertTrue(resolved.keptAddonUrls)
+    assertTrue(resolved.addonInputRejected)
+    assertEquals(
+      "Kept your saved addons - none of the addon URLs were usable. Each one needs an https " +
+        "address.",
+      SettingsSaveGuard.keptNotice(resolved),
+    )
+  }
+
+  @Test
+  fun `rejected addon urls are reported even when there was nothing to keep`() {
+    val resolved = SettingsSaveGuard.resolve(
+      draft(tmdbKey = "k", addonUrls = listOf("http://cleartext.example")),
+      stored(),
+    )
+
+    assertFalse(resolved.keptAddonUrls)
+    assertTrue(resolved.addonInputRejected)
+    assertEquals(
+      "No addons saved - none of the addon URLs were usable. Each one needs an https address.",
+      SettingsSaveGuard.keptNotice(resolved),
+    )
+  }
+
+  @Test
+  fun `a genuinely blank list keeps the wording it had`() {
+    val resolved = SettingsSaveGuard.resolve(
+      draft(tmdbKey = "k", addonUrls = listOf("  ", "")),
+      stored(addonUrls = listOf("https://saved.example/manifest.json")),
+    )
+
+    assertFalse(resolved.addonInputRejected)
+    assertEquals("Kept your saved addons - the list was empty.", SettingsSaveGuard.keptNotice(resolved))
+  }
+
+  @Test
+  fun `one usable url among rejects is a save, not a complaint`() {
+    val resolved = SettingsSaveGuard.resolve(
+      draft(tmdbKey = "k", addonUrls = listOf("nonsense://x", "comet.example")),
+      stored(),
+    )
+
+    assertFalse(resolved.addonInputRejected)
+    assertEquals(listOf("https://comet.example/manifest.json"), resolved.addonUrls)
+    assertNull(SettingsSaveGuard.keptNotice(resolved))
+  }
+
   private fun draft(
     tmdbKey: String = "",
     addonUrls: List<String> = emptyList(),
@@ -148,6 +240,59 @@ class SettingsStatusTest {
     assertEquals("TMDB: no key", SettingsStatus.tmdbStatus("", null))
     assertEquals("TMDB: connected", SettingsStatus.tmdbStatus("abc", true))
     assertEquals("TMDB: failed (check the key)", SettingsStatus.tmdbStatus("abc", false))
+  }
+
+  @Test
+  fun `an outage is not reported as a bad key`() {
+    // A boolean could not tell the two apart, so a router reboot sent viewers off to retype a
+    // perfectly good key on a remote.
+    val offline = TmdbProbeResult.of("abc", UnknownHostException("api.themoviedb.org"))
+
+    assertTrue(offline is TmdbProbeResult.NetworkFailure)
+    assertFalse(offline.connected)
+    assertEquals(
+      "TMDB: not checked - No internet connection. Check your network and try again.",
+      SettingsStatus.tmdbStatus("abc", offline),
+    )
+  }
+
+  @Test
+  fun `only TMDB's own rejection blames the key`() {
+    val rejected = TmdbProbeResult.of("abc", HttpStatusException(401, "api.themoviedb.org"))
+    assertEquals(TmdbProbeResult.BadCredentials, rejected)
+    assertEquals("TMDB: failed (check the key)", SettingsStatus.tmdbStatus("abc", rejected))
+
+    assertEquals(
+      TmdbProbeResult.BadCredentials,
+      TmdbProbeResult.of("abc", HttpStatusException(403, "api.themoviedb.org")),
+    )
+    // A rate limit or an outage at TMDB says nothing about the credential.
+    assertTrue(
+      TmdbProbeResult.of("abc", HttpStatusException(429, "api.themoviedb.org"))
+        is TmdbProbeResult.NetworkFailure,
+    )
+    assertTrue(
+      TmdbProbeResult.of("abc", HttpStatusException(503, "api.themoviedb.org"))
+        is TmdbProbeResult.NetworkFailure,
+    )
+  }
+
+  @Test
+  fun `a wrapped rejection is still recognised`() {
+    val wrapped = IllegalStateException("probe", HttpStatusException(401, "api.themoviedb.org"))
+
+    assertEquals(TmdbProbeResult.BadCredentials, TmdbProbeResult.of("abc", wrapped))
+  }
+
+  @Test
+  fun `a probe that returned is connected, and a blank key is never probed`() {
+    assertEquals(TmdbProbeResult.Ok, TmdbProbeResult.of("abc", null))
+    assertTrue(TmdbProbeResult.of("abc", null).connected)
+    assertEquals("TMDB: connected", SettingsStatus.tmdbStatus("abc", TmdbProbeResult.Ok))
+
+    assertEquals(TmdbProbeResult.NoKey, TmdbProbeResult.of("   ", null))
+    assertFalse(TmdbProbeResult.NoKey.connected)
+    assertEquals("TMDB: no key", SettingsStatus.tmdbStatus("", TmdbProbeResult.NoKey))
   }
 
   @Test
