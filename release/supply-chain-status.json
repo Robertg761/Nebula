@@ -9,7 +9,7 @@
   "generators": {
     "sbom": {
       "path": "scripts/generate_release_sboms.js",
-      "sha256": "61b5c107f4f68b5f6433e5c870a882ebcc9d0c5781b8ee139503b422f7e2e754"
+      "sha256": "1af3269f081b7cf54a62b1aabe71bc75677e60b9d35658efda0abeb4db40b3b2"
     },
     "nativeSource": {
       "path": "scripts/generate_native_source_archive.js",
@@ -18,7 +18,7 @@
   },
   "gradleSbom": {
     "path": "release/gradle-sbom.cdx.json",
-    "sha256": "6333b3670e10cd09827354fd13ed5ecd2012377b6d8bbb026c8d1ffa6e9500df",
+    "sha256": "a20682a0834bb0aa5c030083f75d6c0332903e93f05ce98cf523463581c25b77",
     "format": "cyclonedx-json",
     "componentCount": 127,
     "requiredComponents": [

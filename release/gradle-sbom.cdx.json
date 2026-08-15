@@ -5064,6 +5064,12 @@
           }
         }
       ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "858b902696da9cf585ab9d98ffc1c2712269828354dfe9107e3711b084a36468"
+        }
+      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -5080,10 +5086,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "kotlin-stdlib-1.9.24-all.jar=cec38bc3302e72a8aaf9cde436b5a9071ee0331e2ad05e84d8bb897334d7e9d4"
         },
         {
           "name": "nebula:artifact-sha256",

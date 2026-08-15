@@ -124,6 +124,23 @@ function verificationHashes(xml, group, name, version) {
   return [...new Set(hashes)].sort();
 }
 
+function selectVerifiedArtifacts(files, hashes, coordinate, name, version) {
+  const verified = files
+    .filter((file) => !file.endsWith(".pom") && !file.endsWith(".module"))
+    .map((file) => ({ file, digest: sha256File(file) }))
+    .filter(({ digest }) => hashes.includes(digest));
+  if (verified.length <= 1) return verified;
+
+  const canonical = verified.filter(({ file }) => {
+    const fileName = path.basename(file);
+    return [".aar", ".jar"].some(
+      (extension) => fileName === `${name}-${version}${extension}`,
+    );
+  });
+  if (canonical.length === 1) return canonical;
+  fail(`ambiguous verified artifacts for ${coordinate}`);
+}
+
 function generateGradleSbom(version) {
   const verification = fs.readFileSync(verificationPath, "utf8");
   const components = fs.readFileSync(lockPath, "utf8")
@@ -148,10 +165,13 @@ function generateGradleSbom(version) {
       if (pomFiles.length !== 1) {
         fail(`expected one cached POM for ${coordinate}, found ${pomFiles.length}`);
       }
-      const cachedArtifacts = files
-        .filter((file) => !file.endsWith(".pom") && !file.endsWith(".module"))
-        .map((file) => ({ file, digest: sha256File(file) }))
-        .filter(({ digest }) => hashes.includes(digest));
+      const cachedArtifacts = selectVerifiedArtifacts(
+        files,
+        hashes,
+        coordinate,
+        name,
+        componentVersion,
+      );
       return {
         type: "library",
         group,
