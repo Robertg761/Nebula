@@ -4,7 +4,7 @@
   "projectLicense": {
     "spdx": "GPL-3.0-or-later",
     "path": "LICENSE",
-    "sha256": "4493a7e97329a94c8b8d2b1db279821a5fabcd4fabcb34427d3b016494310e65"
+    "sha256": "31b512bb947412fe7834d9cc35fd8be0ae60e983c144e846e5a31cf9c587941e"
   },
   "generators": {
     "sbom": {
