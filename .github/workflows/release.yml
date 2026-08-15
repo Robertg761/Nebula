@@ -353,11 +353,17 @@ jobs:
           VERIFY_OUTPUT="$("$APKSIGNER" verify --print-certs "$TV_APK")"
           printf '%s\n' "$VERIFY_OUTPUT"
 
-          ACTUAL_FINGERPRINT="$(
+          mapfile -t ACTUAL_FINGERPRINTS < <(
             printf '%s\n' "$VERIFY_OUTPUT" |
-              sed -n 's/^Signer #1 certificate SHA-256 digest: //p' |
-              head -n 1
-          )"
+              sed -n -E \
+                's/^(Signer #[0-9]+|V[0-9]+ Signer):? certificate SHA-256 digest: //p' |
+              sort -u
+          )
+          if [ "${#ACTUAL_FINGERPRINTS[@]}" -ne 1 ]; then
+            echo "Release APK must have exactly one unique signer certificate." >&2
+            exit 1
+          fi
+          ACTUAL_FINGERPRINT="${ACTUAL_FINGERPRINTS[0]}"
           EXPECTED_NORMALIZED="$(
             printf '%s' "$SS_SIGNING_CERT_SHA256" |
               tr -d '[:space:]:' |
