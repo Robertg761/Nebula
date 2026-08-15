@@ -554,12 +554,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "335679dcda5b9047e8e0838772c272fd7cbcbbceed87565184a369c0563ac06b"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -576,10 +570,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "collection-metadata-1.4.0.jar=335679dcda5b9047e8e0838772c272fd7cbcbbceed87565184a369c0563ac06b"
         }
       ]
     },
@@ -686,12 +676,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "b628671c9ebefd68ff33b35d2c5ca644bdb4f110c5fa24260930258d4bfef93d"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -708,10 +692,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "animation-core-metadata-1.7.0.jar=b628671c9ebefd68ff33b35d2c5ca644bdb4f110c5fa24260930258d4bfef93d"
         }
       ]
     },
@@ -730,12 +710,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "c80e1a9c03ca043ec747784c9d9e658d307b5fede7debf881c5ead441331962e"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -752,10 +726,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "animation-metadata-1.7.0.jar=c80e1a9c03ca043ec747784c9d9e658d307b5fede7debf881c5ead441331962e"
         }
       ]
     },
@@ -862,12 +832,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "4e75469751c9d4c464c7d06af283b9737693c20bc4aaf657630bb294c27bbff1"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -884,10 +848,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "foundation-layout-metadata-1.7.0.jar=4e75469751c9d4c464c7d06af283b9737693c20bc4aaf657630bb294c27bbff1"
         }
       ]
     },
@@ -906,12 +866,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "548f57ae3f6aa9ec87aaac82572f225f99830ec1ece01b622721947c8fb3075d"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -928,10 +882,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "foundation-metadata-1.7.0.jar=548f57ae3f6aa9ec87aaac82572f225f99830ec1ece01b622721947c8fb3075d"
         }
       ]
     },
@@ -994,12 +944,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "951f2a3a6c0913819dfaae7c69cb8cdf977f7c79bd53fef03e4faf459ee30a0f"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -1016,10 +960,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "material-icons-core-metadata-1.7.0.jar=951f2a3a6c0913819dfaae7c69cb8cdf977f7c79bd53fef03e4faf459ee30a0f"
         }
       ]
     },
@@ -1082,12 +1022,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "3018ecf7ef0302f1c2492e4c627ae36b763167779b4595fa89331553f5b0c51a"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -1104,10 +1038,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "material-ripple-metadata-1.7.0.jar=3018ecf7ef0302f1c2492e4c627ae36b763167779b4595fa89331553f5b0c51a"
         }
       ]
     },
@@ -1170,12 +1100,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "e2667048f898be236e8f3980d8137496bcafb626ebc4eedf32aa00f481f8fff7"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -1192,10 +1116,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "material3-metadata-1.3.0.jar=e2667048f898be236e8f3980d8137496bcafb626ebc4eedf32aa00f481f8fff7"
         }
       ]
     },
@@ -1302,12 +1222,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "13a43cc361aced06050b235ae2ba0231b73b72c5bf9d14f0c3bd27169e3e06e3"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -1324,10 +1238,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "runtime-saveable-metadata-1.7.0.jar=13a43cc361aced06050b235ae2ba0231b73b72c5bf9d14f0c3bd27169e3e06e3"
         }
       ]
     },
@@ -1346,12 +1256,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "9f40ab0b8cf4e7cb0f593493c2ed96e7155d0e91eb592407597ecd61e2d5a054"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -1368,10 +1272,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "runtime-metadata-1.7.0.jar=9f40ab0b8cf4e7cb0f593493c2ed96e7155d0e91eb592407597ecd61e2d5a054"
         }
       ]
     },
@@ -1478,12 +1378,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "00421ed4ed83f8b1ef2a22434a6c7102bb08e16b2cc4acfda503da9ddc213e91"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -1500,10 +1394,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "ui-geometry-metadata-1.7.0.jar=00421ed4ed83f8b1ef2a22434a6c7102bb08e16b2cc4acfda503da9ddc213e91"
         }
       ]
     },
@@ -1566,12 +1456,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "eebcaad22243f49e712aae8ea011d72fb5caedd250e27e6cecd6a5b20fb61872"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -1588,10 +1472,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "ui-graphics-metadata-1.7.0.jar=eebcaad22243f49e712aae8ea011d72fb5caedd250e27e6cecd6a5b20fb61872"
         }
       ]
     },
@@ -1654,12 +1534,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "d2a6ee7e58a3586e399991fadfd4d09f2304787384d51c9ec87b62fc46e922d4"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -1676,10 +1550,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "ui-text-metadata-1.7.0.jar=d2a6ee7e58a3586e399991fadfd4d09f2304787384d51c9ec87b62fc46e922d4"
         }
       ]
     },
@@ -1742,12 +1612,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "4990f016a2505b865ebbdc839af940a95eddd68683e5cc195c33465409810e94"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -1764,10 +1628,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "ui-unit-metadata-1.7.0.jar=4990f016a2505b865ebbdc839af940a95eddd68683e5cc195c33465409810e94"
         }
       ]
     },
@@ -1830,12 +1690,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "00421ed4ed83f8b1ef2a22434a6c7102bb08e16b2cc4acfda503da9ddc213e91"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -1852,10 +1706,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "ui-util-metadata-1.7.0.jar=00421ed4ed83f8b1ef2a22434a6c7102bb08e16b2cc4acfda503da9ddc213e91"
         }
       ]
     },
@@ -1874,12 +1724,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "b25acd07331b59c6ddf49b639f7322552c31b25e03a83f97f04ec4a3bacd8d25"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -1896,10 +1740,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "ui-metadata-1.7.0.jar=b25acd07331b59c6ddf49b639f7322552c31b25e03a83f97f04ec4a3bacd8d25"
         }
       ]
     },
@@ -2260,12 +2100,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "117beb462cad6a885864fe0296ed8cfee509da08d064c44d226efbd60538599b"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -2282,10 +2116,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "datastore-core-okio-metadata-1.1.1.jar=117beb462cad6a885864fe0296ed8cfee509da08d064c44d226efbd60538599b"
         }
       ]
     },
@@ -2304,12 +2134,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "dfdcb0213751b038b5486a178d3e7f7f8cd0ce7d2888a0ba6a9f3bd1c9f16b7c"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -2326,10 +2150,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "datastore-core-metadata-1.1.1.jar=dfdcb0213751b038b5486a178d3e7f7f8cd0ce7d2888a0ba6a9f3bd1c9f16b7c"
         }
       ]
     },
@@ -2436,12 +2256,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "a22a84cf98bb1f1b04edc3ff2a4a5f3a273205c773c14d008618c9e2501e440b"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -2458,10 +2272,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "datastore-preferences-core-metadata-1.1.1.jar=a22a84cf98bb1f1b04edc3ff2a4a5f3a273205c773c14d008618c9e2501e440b"
         }
       ]
     },
@@ -2480,12 +2290,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "7daf288a2f1efe727eac9fb75d9c8a773512c654740eb8381d443439c3d0c3a1"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -2502,10 +2306,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "datastore-preferences-metadata-1.1.1.jar=7daf288a2f1efe727eac9fb75d9c8a773512c654740eb8381d443439c3d0c3a1"
         }
       ]
     },
@@ -2524,12 +2324,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "4ab4086b6359ea81eb359451f0f005c78bc508d75c070555154cdf6313b0e1cb"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -2546,10 +2340,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "datastore-metadata-1.1.1.jar=4ab4086b6359ea81eb359451f0f005c78bc508d75c070555154cdf6313b0e1cb"
         }
       ]
     },
@@ -2832,12 +2622,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "e26c6d7d04a490c6fdaa1415ac95797a7dcc7444be3f3ab3d9acad87dae4921c"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -2854,10 +2638,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "lifecycle-common-metadata-2.8.5.jar=e26c6d7d04a490c6fdaa1415ac95797a7dcc7444be3f3ab3d9acad87dae4921c"
         }
       ]
     },
@@ -3140,12 +2920,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "1ace38c9470c78e8971ebcdf8d0390be64010fc869a7fd3c6e5eaf10370ec1ba"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -3162,10 +2936,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "lifecycle-runtime-compose-metadata-2.8.5.jar=1ace38c9470c78e8971ebcdf8d0390be64010fc869a7fd3c6e5eaf10370ec1ba"
         }
       ]
     },
@@ -3228,12 +2998,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "92e90c3bd6cc2f66a15e9597cc015cd3a2f8767a9bd29d7feadaea4d44b2fccf"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -3250,10 +3014,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "lifecycle-runtime-ktx-metadata-2.8.5.jar=92e90c3bd6cc2f66a15e9597cc015cd3a2f8767a9bd29d7feadaea4d44b2fccf"
         }
       ]
     },
@@ -3272,12 +3032,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "4ee784530e550754230395d4f4f56817c9fcbc08db4d645e77441f3dd82c56b5"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -3294,10 +3048,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "lifecycle-runtime-metadata-2.8.5.jar=4ee784530e550754230395d4f4f56817c9fcbc08db4d645e77441f3dd82c56b5"
         }
       ]
     },
@@ -3448,12 +3198,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "68457770ac6b3e12b5f688d54e8227253cbebf1b3c137fbd00833ed4c45bd4bd"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -3470,10 +3214,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "lifecycle-viewmodel-compose-metadata-2.8.5.jar=68457770ac6b3e12b5f688d54e8227253cbebf1b3c137fbd00833ed4c45bd4bd"
         }
       ]
     },
@@ -3580,12 +3320,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "539281344ce8a81d33570be300d86bb872c7b719a6dd2ce494eacba438fb53ce"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -3602,10 +3336,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "lifecycle-viewmodel-metadata-2.8.5.jar=539281344ce8a81d33570be300d86bb872c7b719a6dd2ce494eacba438fb53ce"
         }
       ]
     },
@@ -4590,12 +4320,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "6e3b420bbe2715cb5548509a82e4ce67eb320aad3dd61d0b1c18b40b5dba6307"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -4612,10 +4336,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "okio-metadata-3.8.0.jar=6e3b420bbe2715cb5548509a82e4ce67eb320aad3dd61d0b1c18b40b5dba6307"
         }
       ]
     },
@@ -5230,12 +4950,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "daf50f1c9404b224a1d6dd5286f8e8ee7d63fe807f78ea98f71795c183b6025f"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -5252,10 +4966,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "kotlinx-coroutines-core-metadata-1.8.1.jar=daf50f1c9404b224a1d6dd5286f8e8ee7d63fe807f78ea98f71795c183b6025f"
         }
       ]
     },
@@ -5352,12 +5062,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "2fa05aff0f33a70da873c09a0ff66b5d54ccdc15e39e7ca4b82633e70c792f34"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -5374,10 +5078,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "kotlinx-serialization-core-metadata-1.6.3.jar=2fa05aff0f33a70da873c09a0ff66b5d54ccdc15e39e7ca4b82633e70c792f34"
         }
       ]
     },
@@ -5440,12 +5140,6 @@
           }
         }
       ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "8c0016890a79ab5980dd520a5ab1a6738023c29aa3b6437c482e0e5fdc06dab1"
-        }
-      ],
       "properties": [
         {
           "name": "nebula:gradle-configuration",
@@ -5462,10 +5156,6 @@
         {
           "name": "nebula:pom-verification-covered",
           "value": "false"
-        },
-        {
-          "name": "nebula:artifact-sha256",
-          "value": "kotlinx-serialization-json-metadata-1.6.3.jar=8c0016890a79ab5980dd520a5ab1a6738023c29aa3b6437c482e0e5fdc06dab1"
         }
       ]
     },

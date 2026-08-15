@@ -124,25 +124,77 @@ function verificationHashes(xml, group, name, version) {
   return [...new Set(hashes)].sort();
 }
 
-function selectVerifiedArtifacts(files, hashes, coordinate, name, version) {
-  const verified = files
-    .filter((file) => !file.endsWith(".pom") && !file.endsWith(".module"))
-    .map((file) => ({ file, digest: sha256File(file) }))
-    .filter(({ digest }) => hashes.includes(digest));
-  if (verified.length <= 1) return verified;
+function resolvedReleaseArtifacts() {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "nebula-sbom-gradle-"));
+  const initScript = path.join(temporaryDirectory, "resolved-artifacts.gradle");
+  fs.writeFileSync(
+    initScript,
+    `gradle.projectsEvaluated {
+  def appProject = gradle.rootProject.project(":app")
+  appProject.tasks.register("nebulaResolvedReleaseArtifacts") {
+    doLast {
+      appProject.configurations.getByName("releaseRuntimeClasspath")
+        .resolvedConfiguration.resolvedArtifacts.each { artifact ->
+          def id = artifact.moduleVersion.id
+          println("NEBULA_ARTIFACT\\t" + id.group + "\\t" + id.name + "\\t" + id.version + "\\t" + artifact.file.absolutePath)
+        }
+    }
+  }
+}
+`,
+    "utf8",
+  );
 
-  const canonical = verified.filter(({ file }) => {
-    const fileName = path.basename(file);
-    return [".aar", ".jar"].some(
-      (extension) => fileName === `${name}-${version}${extension}`,
+  let result;
+  try {
+    result = spawnSync(
+      path.join(androidRoot, process.platform === "win32" ? "gradlew.bat" : "gradlew"),
+      [
+        "--quiet",
+        "--no-daemon",
+        "--no-configuration-cache",
+        "-I",
+        initScript,
+        ":app:nebulaResolvedReleaseArtifacts",
+      ],
+      {
+        cwd: androidRoot,
+        encoding: "utf8",
+        maxBuffer: 16 * 1024 * 1024,
+      },
     );
-  });
-  if (canonical.length === 1) return canonical;
-  fail(`ambiguous verified artifacts for ${coordinate}`);
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+  if (result.error || result.status !== 0) {
+    const detail = `${result.stderr || ""}\n${result.stdout || ""}`
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .slice(-12)
+      .join(" | ");
+    fail(`cannot resolve releaseRuntimeClasspath artifacts with Gradle${detail ? `: ${detail}` : ""}`);
+  }
+
+  const artifacts = new Map();
+  for (const line of result.stdout.split(/\r?\n/)) {
+    if (!line.startsWith("NEBULA_ARTIFACT\t")) continue;
+    const fields = line.split("\t");
+    if (fields.length !== 5 || fields.slice(1).some((field) => field.length === 0)) {
+      fail("Gradle returned a malformed release artifact record");
+    }
+    const coordinate = `${fields[1]}:${fields[2]}:${fields[3]}`;
+    const files = artifacts.get(coordinate) || [];
+    if (!files.includes(fields[4])) files.push(fields[4]);
+    artifacts.set(coordinate, files);
+  }
+  if (artifacts.size === 0) fail("Gradle returned no releaseRuntimeClasspath artifacts");
+  return artifacts;
 }
 
 function generateGradleSbom(version) {
   const verification = fs.readFileSync(verificationPath, "utf8");
+  const resolvedArtifacts = resolvedReleaseArtifacts();
   const components = fs.readFileSync(lockPath, "utf8")
     .split(/\r?\n/)
     .filter((line) => line && !line.startsWith("#") && line.includes("="))
@@ -165,13 +217,18 @@ function generateGradleSbom(version) {
       if (pomFiles.length !== 1) {
         fail(`expected one cached POM for ${coordinate}, found ${pomFiles.length}`);
       }
-      const cachedArtifacts = selectVerifiedArtifacts(
-        files,
-        hashes,
-        coordinate,
-        name,
-        componentVersion,
-      );
+      const cachedArtifacts = (resolvedArtifacts.get(coordinate) || [])
+        .map((file) => ({ file, digest: sha256File(file) }));
+      if (cachedArtifacts.some(({ digest }) => !hashes.includes(digest))) {
+        fail(`resolved artifact is not covered by verification metadata for ${coordinate}`);
+      }
+      if (cachedArtifacts.length > 1) {
+        fail(
+          `expected at most one resolved artifact for ${coordinate}: ${cachedArtifacts
+            .map(({ file }) => path.basename(file))
+            .join(", ")}`,
+        );
+      }
       return {
         type: "library",
         group,
