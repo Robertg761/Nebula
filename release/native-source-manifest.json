@@ -1,0 +1,223 @@
+{
+  "schemaVersion": 1,
+  "bundle": {
+    "name": "libmpv-android",
+    "version": "0.4.1",
+    "mavenCoordinate": "dev.jdtech.mpv:libmpv:0.4.1",
+    "aarSha256": "361f4fecb2769fd77697e02f83e24e767431859560282225facc5310a60f6ab2",
+    "effectiveLicense": "GPL-3.0-or-later",
+    "androidNdkVersion": "27.1.12297006",
+    "minimumAndroidApi": 26,
+    "architectures": [
+      "armeabi-v7a",
+      "arm64-v8a",
+      "x86",
+      "x86_64"
+    ]
+  },
+  "build": {
+    "ffmpeg": {
+      "version": "7.1",
+      "flags": [
+        "--target-os=android",
+        "--enable-cross-compile",
+        "--enable-jni",
+        "--enable-mediacodec",
+        "--enable-mbedtls",
+        "--enable-libdav1d",
+        "--disable-vulkan",
+        "--disable-static",
+        "--enable-shared",
+        "--enable-gpl",
+        "--enable-version3",
+        "--disable-stripping",
+        "--disable-doc",
+        "--disable-programs",
+        "--disable-muxers",
+        "--disable-encoders",
+        "--disable-devices",
+        "--disable-filters",
+        "--disable-v4l2-m2m"
+      ]
+    },
+    "mpv": {
+      "version": "0.39.0",
+      "effectiveOptions": {
+        "gpl": true
+      },
+      "flags": [
+        "--default-library=shared",
+        "-Diconv=disabled",
+        "-Dlua=enabled",
+        "-Dlibmpv=true",
+        "-Dcplayer=false",
+        "-Dmanpage-build=disabled"
+      ]
+    }
+  },
+  "sources": [
+    {
+      "name": "libmpv-android",
+      "version": "0.4.1",
+      "type": "git",
+      "repository": "https://github.com/jarnedemeulemeester/libmpv-android.git",
+      "commit": "293d1a606413be36886a2ec922aee3d358690e07",
+      "archivePath": "sources/libmpv-android",
+      "license": "MIT"
+    },
+    {
+      "name": "Mbed TLS",
+      "version": "3.6.1",
+      "type": "git",
+      "repository": "https://github.com/Mbed-TLS/mbedtls.git",
+      "commit": "71c569d44bf3a8bd53d874c81ee8ac644dd6e9e3",
+      "archivePath": "sources/mbedtls",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "Mbed TLS framework",
+      "version": "3.6.1-submodule",
+      "type": "git",
+      "repository": "https://github.com/Mbed-TLS/mbedtls-framework.git",
+      "commit": "94599c0e3b5036e086446a51a3f79640f70f22f6",
+      "archivePath": "sources/mbedtls/framework",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "dav1d",
+      "version": "1.4.3",
+      "type": "git",
+      "repository": "https://code.videolan.org/videolan/dav1d.git",
+      "commit": "e9986de7f4264940af6fa1df1498fd2754077de4",
+      "archivePath": "sources/dav1d",
+      "license": "BSD-2-Clause"
+    },
+    {
+      "name": "FFmpeg",
+      "version": "7.1",
+      "type": "git",
+      "repository": "https://github.com/FFmpeg/FFmpeg.git",
+      "commit": "b08d7969c550a804a59511c7b83f2dd8cc0499b8",
+      "archivePath": "sources/ffmpeg",
+      "license": "GPL-3.0-or-later"
+    },
+    {
+      "name": "FreeType",
+      "version": "2.13.3",
+      "type": "git",
+      "repository": "https://gitlab.freedesktop.org/freetype/freetype.git",
+      "commit": "42608f77f20749dd6ddc9e0536788eaad70ea4b5",
+      "archivePath": "sources/freetype",
+      "license": "FTL OR GPL-2.0-or-later"
+    },
+    {
+      "name": "FriBidi",
+      "version": "1.0.16",
+      "type": "git",
+      "repository": "https://github.com/fribidi/fribidi.git",
+      "commit": "68162babff4f39c4e2dc164a5e825af93bda9983",
+      "archivePath": "sources/fribidi",
+      "license": "LGPL-2.1-or-later"
+    },
+    {
+      "name": "HarfBuzz",
+      "version": "10.0.1",
+      "type": "git",
+      "repository": "https://github.com/harfbuzz/harfbuzz.git",
+      "commit": "a1d9bfe62818ef0fa9cf63b6e6d51436b1c93cbc",
+      "archivePath": "sources/harfbuzz",
+      "license": "MIT"
+    },
+    {
+      "name": "libass",
+      "version": "0.17.3",
+      "type": "git",
+      "repository": "https://github.com/libass/libass.git",
+      "commit": "e46aedea0a0d17da4c4ef49d84b94a7994664ab5",
+      "archivePath": "sources/libass",
+      "license": "ISC"
+    },
+    {
+      "name": "Lua",
+      "version": "5.2.4",
+      "type": "archive",
+      "url": "https://www.lua.org/ftp/lua-5.2.4.tar.gz",
+      "sha256": "b9e2e4aad6789b3b63a056d442f7b39f0ecfca3ae0f1fc0ae4e9614401b69f4b",
+      "stripComponents": 1,
+      "archivePath": "sources/lua",
+      "license": "MIT"
+    },
+    {
+      "name": "libplacebo",
+      "version": "7.349.0",
+      "type": "git",
+      "repository": "https://code.videolan.org/videolan/libplacebo.git",
+      "commit": "1fd3c7bde7b943fe8985c893310b5269a09b46c5",
+      "archivePath": "sources/libplacebo",
+      "license": "LGPL-2.1-or-later"
+    },
+    {
+      "name": "Vulkan-Headers",
+      "version": "libplacebo-submodule",
+      "type": "git",
+      "repository": "https://github.com/KhronosGroup/Vulkan-Headers.git",
+      "commit": "d732b2de303ce505169011d438178191136bfb00",
+      "archivePath": "sources/libplacebo/3rdparty/Vulkan-Headers",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "fast_float",
+      "version": "libplacebo-submodule",
+      "type": "git",
+      "repository": "https://github.com/fastfloat/fast_float.git",
+      "commit": "2b2395f9ac836ffca6404424bcc252bff7aa80e4",
+      "archivePath": "sources/libplacebo/3rdparty/fast_float",
+      "license": "Apache-2.0 OR MIT"
+    },
+    {
+      "name": "glad",
+      "version": "libplacebo-submodule",
+      "type": "git",
+      "repository": "https://github.com/Dav1dde/glad.git",
+      "commit": "d08b1aa01f8fe57498f04d47b5fa8c48725be877",
+      "archivePath": "sources/libplacebo/3rdparty/glad",
+      "license": "MIT"
+    },
+    {
+      "name": "Jinja",
+      "version": "libplacebo-submodule",
+      "type": "git",
+      "repository": "https://github.com/pallets/jinja.git",
+      "commit": "b08cd4bc64bb980df86ed2876978ae5735572280",
+      "archivePath": "sources/libplacebo/3rdparty/jinja",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "MarkupSafe",
+      "version": "libplacebo-submodule",
+      "type": "git",
+      "repository": "https://github.com/pallets/markupsafe.git",
+      "commit": "c0254f0cfe51720ecc9e72e8896022af29af5b44",
+      "archivePath": "sources/libplacebo/3rdparty/markupsafe",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "Nuklear",
+      "version": "libplacebo-submodule",
+      "type": "git",
+      "repository": "https://github.com/Immediate-Mode-UI/Nuklear.git",
+      "commit": "c512ac886425f6b6b6c816d67f4cb1385cd4cc53",
+      "archivePath": "sources/libplacebo/demos/3rdparty/nuklear",
+      "license": "Unlicense OR MIT"
+    },
+    {
+      "name": "mpv",
+      "version": "0.39.0",
+      "type": "git",
+      "repository": "https://github.com/mpv-player/mpv.git",
+      "commit": "a0fba7be57f3822d967b04f0f6b6d6341e7516e7",
+      "archivePath": "sources/mpv",
+      "license": "GPL-2.0-or-later"
+    }
+  ]
+}

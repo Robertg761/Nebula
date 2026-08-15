@@ -6,6 +6,9 @@ import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
 import java.io.IOException
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -21,6 +24,15 @@ internal fun logPersistence(message: String) {
 /** The same tag for the failures that come with a throwable worth keeping. */
 internal fun logPersistenceFailure(message: String, error: Throwable) {
   Log.e(PERSISTENCE_TAG, message, error)
+}
+
+/** Logs an unhandled detached write without turning cancellation into an application failure. */
+internal fun reportPersistenceScopeFailure(
+  error: Throwable,
+  log: (String, Throwable) -> Unit = ::logPersistenceFailure,
+) {
+  if (error is CancellationException) return
+  log("Detached persistence work failed", error)
 }
 
 /**
@@ -102,20 +114,94 @@ private const val MAX_BACKOFF_SHIFT = 11L
 private const val MAX_READ_RETRY_BACKOFF_MILLIS = 5L * 60 * 1_000
 private const val MAX_LOGGED_READ_FAILURES = 4L
 
-/** Timestamp ordering used to stop a delayed persistence coroutine undoing newer watch state. */
+/** Logical persistence ordering kept separate from user-visible wall-clock timestamps. */
 internal object PersistenceOrdering {
-  fun accepts(existingUpdatedAtMs: Long?, incomingUpdatedAtMs: Long): Boolean =
-    existingUpdatedAtMs == null || incomingUpdatedAtMs >= existingUpdatedAtMs
+  data class Allocation(val order: Long, val sessionBase: Long, val counter: Long)
 
-  /** A remove wins a timestamp tie so an in-flight save cannot immediately resurrect the row. */
-  fun acceptsAfterRemoval(removedAtMs: Long?, incomingUpdatedAtMs: Long): Boolean =
-    removedAtMs == null || incomingUpdatedAtMs > removedAtMs
+  /**
+   * Allocates after both the persisted counter and any order observed in migrated/restored records.
+   * A missing counter is therefore safe, and an NTP/manual clock rollback cannot make a later
+   * mutation look older. Long.MAX_VALUE is a harmless saturation point centuries beyond this cap.
+   */
+  fun nextMutationOrder(storedCounter: Long?, observedOrder: Long = 0L): Long {
+    val current = maxOf(storedCounter ?: 0L, observedOrder, 0L)
+    return if (current == Long.MAX_VALUE) Long.MAX_VALUE else current + 1L
+  }
 
-  /** Delayed duplicate removals must not weaken a newer deletion marker. */
-  fun latestRemoval(existingRemovedAtMs: Long?, incomingRemovedAtMs: Long): Long =
-    maxOf(existingRemovedAtMs ?: Long.MIN_VALUE, incomingRemovedAtMs)
+  /** Rebase this process' action-time token above every order already present on disk. */
+  fun allocate(
+    storedSession: String?,
+    storedSessionBase: Long?,
+    storedCounter: Long?,
+    observedOrder: Long,
+    token: PersistenceMutationToken,
+  ): Allocation {
+    val current = maxOf(storedCounter ?: 0L, observedOrder, 0L)
+    val base = if (storedSession == token.sessionId && storedSessionBase != null) {
+      storedSessionBase.coerceAtLeast(0L)
+    } else {
+      current
+    }
+    val order = saturatingAdd(base, token.sequence.coerceAtLeast(1L))
+    return Allocation(order, base, maxOf(current, order))
+  }
+
+  fun acceptsMutation(existingOrder: Long?, incomingOrder: Long): Boolean =
+    existingOrder == null || incomingOrder >= existingOrder
+
+  /** A removal wins a tie, though action-time tokens make ties exceptional. */
+  fun acceptsAfterRemoval(removedOrder: Long?, incomingOrder: Long): Boolean =
+    removedOrder == null || incomingOrder > removedOrder
+
+  private fun saturatingAdd(first: Long, second: Long): Long =
+    if (first > Long.MAX_VALUE - second) Long.MAX_VALUE else first + second
+
+  /**
+   * New-format records sort by logical order. A touched new-format record is newer than untouched
+   * legacy data; two legacy records retain their old timestamp ordering until they are mutated.
+   */
+  fun compareNewest(
+    firstOrder: Long,
+    firstTimestampMs: Long,
+    secondOrder: Long,
+    secondTimestampMs: Long,
+  ): Int = when {
+    firstOrder > 0L && secondOrder > 0L -> secondOrder.compareTo(firstOrder)
+    firstOrder > 0L -> -1
+    secondOrder > 0L -> 1
+    else -> secondTimestampMs.compareTo(firstTimestampMs)
+  }
 
   /** Monotonic counters must not move backwards when two queued writes finish out of order. */
   fun monotonicCounter(existing: Int?, incoming: Int): Int =
     maxOf(existing ?: 0, incoming.coerceAtLeast(0))
+}
+
+/** One mutation's order within this app process, captured before persistence work is launched. */
+data class PersistenceMutationToken internal constructor(
+  val sessionId: String,
+  val sequence: Long,
+) {
+  val assigned: Boolean get() = sessionId.isNotEmpty() && sequence > 0L
+
+  companion object {
+    val Unassigned = PersistenceMutationToken("", 0L)
+  }
+}
+
+/**
+ * Process-local source tokens are rebased against a persisted counter in each store. UUID identity
+ * distinguishes process restarts; the sequence distinguishes actions even when the wall clock moves
+ * backwards, and is captured in the data object's constructor before a coroutine can be delayed.
+ */
+object PersistenceMutationClock {
+  private val sessionId = UUID.randomUUID().toString()
+  private val sequence = AtomicLong(0L)
+
+  fun next(): PersistenceMutationToken {
+    val next = sequence.updateAndGet { current ->
+      if (current == Long.MAX_VALUE) Long.MAX_VALUE else current + 1L
+    }
+    return PersistenceMutationToken(sessionId, next)
+  }
 }

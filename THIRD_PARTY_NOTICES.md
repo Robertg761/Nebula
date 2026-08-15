@@ -18,16 +18,15 @@ Key runtime components include:
 | libmpv-android wrapper | 0.4.1 | <https://github.com/jarnedemeulemeester/libmpv-android/releases/tag/v0.4.1> | MIT per published POM |
 | Outfit font | Bundled files | <https://github.com/Outfitio/Outfit-Fonts> | SIL Open Font License 1.1 |
 
-The libmpv Android AAR includes native mpv and FFmpeg-family libraries. Their
-effective license and source obligations depend on the exact upstream build
-configuration, not only the wrapper POM. The release owner must verify that
-configuration and preserve corresponding source/build information before each
-public release. See the
+The libmpv Android AAR includes mpv 0.39.0 and FFmpeg 7.1 native libraries.
+This build enables GPL and version 3 code, making the distributed playback
+bundle GPL-3.0-or-later effective. Its exact source revisions, build flags,
+per-ABI file hashes, and corresponding-source generator are pinned and checked
+for each release. See the
 [native source requirements](docs/native-source-requirements.md) and the
-blocking [release supply-chain gate](docs/release-supply-chain.md).
+[release supply-chain gate](docs/release-supply-chain.md).
 
 The Outfit license text is preserved at
 `apps/android-tv-host/licenses/Outfit-OFL.txt`.
 
-There is intentionally no root `LICENSE` yet. Choosing the project's own
-license is a maintainer decision tracked in [docs/roadmap.md](docs/roadmap.md).
+Nebula itself is licensed under GPL-3.0-or-later; see [LICENSE](LICENSE).

@@ -31,6 +31,13 @@ object WatchNextDeepLink {
   const val TYPE_MOVIE = "movie"
   const val TYPE_SHOW = "show"
 
+  /**
+   * Watch Next's provider column and mpv's practical resume input are both bounded to a signed
+   * 32-bit millisecond value. Treat anything outside that range as no resume point instead of
+   * allowing an exported deep link to seek days beyond EOF.
+   */
+  internal const val MAX_RESUME_POSITION_MS = 2_147_483_647L
+
   private const val PREFIX = "$SCHEME://$HOST"
   private const val PARAM_TYPE = "type"
   private const val PARAM_TMDB = "tmdb"
@@ -43,7 +50,7 @@ object WatchNextDeepLink {
     tmdbId = entry.tmdbId,
     season = entry.season,
     episode = entry.episode,
-    resumePositionMs = entry.positionMs.coerceAtLeast(0L),
+    resumePositionMs = safeResumePositionMs(entry.positionMs),
   )
 
   fun build(target: WatchNextTarget): String = buildString {
@@ -52,8 +59,9 @@ object WatchNextDeepLink {
     append('&').append(PARAM_TMDB).append('=').append(target.tmdbId)
     target.season?.let { append('&').append(PARAM_SEASON).append('=').append(it) }
     target.episode?.let { append('&').append(PARAM_EPISODE).append('=').append(it) }
-    if (target.resumePositionMs > 0L) {
-      append('&').append(PARAM_POSITION).append('=').append(target.resumePositionMs)
+    val safePositionMs = safeResumePositionMs(target.resumePositionMs)
+    if (safePositionMs > 0L) {
+      append('&').append(PARAM_POSITION).append('=').append(safePositionMs)
     }
   }
 
@@ -75,12 +83,22 @@ object WatchNextDeepLink {
     if (mediaType != TYPE_MOVIE && mediaType != TYPE_SHOW) return null
     val tmdbId = params[PARAM_TMDB]?.toIntOrNull() ?: return null
     if (tmdbId <= 0) return null
+    val season = params[PARAM_SEASON]?.toIntOrNull()?.takeIf { it in 0..MAX_SEASON }
+    val episode = params[PARAM_EPISODE]?.toIntOrNull()?.takeIf { it in 1..MAX_EPISODE }
     return WatchNextTarget(
       mediaType = mediaType,
       tmdbId = tmdbId,
-      season = params[PARAM_SEASON]?.toIntOrNull(),
-      episode = params[PARAM_EPISODE]?.toIntOrNull(),
-      resumePositionMs = params[PARAM_POSITION]?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L,
+      season = season,
+      episode = episode,
+      resumePositionMs = safeResumePositionMs(
+        params[PARAM_POSITION]?.toLongOrNull() ?: 0L,
+      ),
     )
   }
+
+  internal fun safeResumePositionMs(value: Long): Long =
+    value.takeIf { it in 0L..MAX_RESUME_POSITION_MS } ?: 0L
+
+  private const val MAX_SEASON = 1_000
+  private const val MAX_EPISODE = 10_000
 }

@@ -186,6 +186,7 @@ fun TvApp(
       // picker - BACK, the rail, the next episode replacing it - and none of them can return to
       // that list: streams are refetched on entry because a debrid URL does not keep.
       if (screen is Screen.Streams) viewModel.clearStreams()
+      if (screen is Screen.Pair) viewModel.stopPairing()
     }
   }
 
@@ -509,6 +510,9 @@ fun TvApp(
                       season = season,
                       episode = episode,
                       startOver = startOver,
+                      resumePositionFallbackMs = screen.resumePositionFallbackMs.takeIf {
+                        deepLinkFallbackMatches(screen, season, episode)
+                      } ?: 0L,
                     )
                   )
                 }
@@ -575,6 +579,16 @@ fun TvApp(
       },
     )
   }
+}
+
+/** A show deep link's position belongs only to its named episode; movie targets have no episode. */
+internal fun deepLinkFallbackMatches(
+  screen: Screen.Details,
+  season: Int?,
+  episode: Int?,
+): Boolean = when (screen.type) {
+  MediaType.Movie -> season == null && episode == null
+  MediaType.Show -> season == screen.initialSeason && episode == screen.initialEpisode
 }
 
 /**

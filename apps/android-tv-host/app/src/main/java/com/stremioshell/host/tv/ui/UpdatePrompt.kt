@@ -17,6 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
@@ -33,6 +34,7 @@ import com.stremioshell.host.tv.ui.theme.NebulaIcon
 import com.stremioshell.host.tv.ui.theme.NebulaPalette
 import com.stremioshell.host.tv.ui.theme.NebulaSpace
 import com.stremioshell.host.update.UpdatePromptCoordinator
+import com.stremioshell.host.update.InstallIntentResult
 import com.stremioshell.host.update.UpdatePromptPolicy
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -87,7 +89,7 @@ fun UpdatePromptHost(currentVersionName: String = BuildConfig.VERSION_NAME) {
     // The error belongs to the prompt that produced it. Without this it survives every
     // resolution to NONE and re-appears - stale text, and a "Check download" primary button -
     // on the next release's dialog.
-    if (!UpdatePromptPolicy.retainsError(state.versionName, next.prompt, next.versionName)) {
+    if (!UpdatePromptPolicy.retainsError(state.update, next.prompt, next.update)) {
       error = null
     }
     state = next
@@ -108,11 +110,12 @@ fun UpdatePromptHost(currentVersionName: String = BuildConfig.VERSION_NAME) {
   UpdateReadyDialog(
     version = version,
     currentVersionName = currentVersionName,
+    releaseNotes = state.update?.releaseNotes.orEmpty(),
     needsUnknownSourcesPermission = state.prompt == UpdatePromptPolicy.Prompt.ENABLE_UNKNOWN_SOURCES,
     error = error?.message,
     canCheckDownload = error?.canCheckDownload == true,
     actionInProgress = actionInProgress,
-    onConfirm = {
+    onConfirm = confirm@{
       error = null
       if (state.prompt == UpdatePromptPolicy.Prompt.ENABLE_UNKNOWN_SOURCES) {
         try {
@@ -125,36 +128,55 @@ fun UpdatePromptHost(currentVersionName: String = BuildConfig.VERSION_NAME) {
           error = UpdatePromptError(settingsOpenFailed, canCheckDownload = false)
         }
       } else {
+        // Capture the exact evaluated attempt before launching. A worker may publish a replacement
+        // while this coroutine is waiting for IO; the manager will reject that stale identity
+        // without verifying or clearing the replacement.
+        val expectedUpdate = state.update ?: return@confirm
         actionInProgress = true
         coroutineScope.launch {
-          val installIntent = try {
+          val reportInstallError = { promptError: UpdatePromptError ->
+            if (UpdatePromptPolicy.retainsError(expectedUpdate, state.prompt, state.update)) {
+              error = promptError
+            }
+          }
+          val installResult = try {
             withContext(Dispatchers.IO) {
-              coordinator.buildInstallIntent(context)
+              coordinator.buildInstallIntent(context, expectedUpdate)
             }
           } catch (_: IllegalArgumentException) {
             actionInProgress = false
-            error = UpdatePromptError(installerOpenFailed, canCheckDownload = false)
+            reportInstallError(UpdatePromptError(installerOpenFailed, canCheckDownload = false))
             return@launch
           } catch (_: SecurityException) {
             actionInProgress = false
-            error = UpdatePromptError(installerOpenFailed, canCheckDownload = false)
+            reportInstallError(UpdatePromptError(installerOpenFailed, canCheckDownload = false))
             return@launch
           }
           actionInProgress = false
-          if (installIntent != null) {
-            try {
-              context.startActivity(installIntent)
-            } catch (_: ActivityNotFoundException) {
-              error = UpdatePromptError(installerOpenFailed, canCheckDownload = false)
-            } catch (_: SecurityException) {
-              error = UpdatePromptError(installerOpenFailed, canCheckDownload = false)
+          when (installResult) {
+            is InstallIntentResult.Ready -> {
+              try {
+                context.startActivity(installResult.intent)
+              } catch (_: ActivityNotFoundException) {
+                reportInstallError(UpdatePromptError(installerOpenFailed, canCheckDownload = false))
+              } catch (_: SecurityException) {
+                reportInstallError(UpdatePromptError(installerOpenFailed, canCheckDownload = false))
+              }
             }
-          } else {
-            // The APK went missing or failed verification. This used to re-evaluate immediately,
-            // which is right when the only report is a Toast and wrong now that the report is in
-            // the dialog: a re-evaluation that resolves to NONE closes the sheet and takes the
-            // explanation with it. ON_RESUME re-checks anyway the next time the app comes back.
-            error = UpdatePromptError(installFailed, canCheckDownload = true)
+            InstallIntentResult.StalePrompt -> {
+              // A worker replaced the attempt while its old dialog was visible. That is a state
+              // transition, not an install failure; refresh to the replacement without attaching
+              // error text or a "Check download" action to the stale prompt.
+              error = null
+              refreshTick++
+            }
+            InstallIntentResult.Failed -> {
+              // The APK went missing or failed verification. This used to re-evaluate immediately,
+              // which is right when the only report is a Toast and wrong now that the report is in
+              // the dialog: a re-evaluation that resolves to NONE closes the sheet and takes the
+              // explanation with it. ON_RESUME re-checks anyway the next time the app comes back.
+              reportInstallError(UpdatePromptError(installFailed, canCheckDownload = true))
+            }
           }
         }
       }
@@ -171,6 +193,7 @@ fun UpdatePromptHost(currentVersionName: String = BuildConfig.VERSION_NAME) {
 private fun UpdateReadyDialog(
   version: String,
   currentVersionName: String,
+  releaseNotes: String,
   needsUnknownSourcesPermission: Boolean,
   error: String?,
   canCheckDownload: Boolean,
@@ -219,6 +242,19 @@ private fun UpdateReadyDialog(
         style = MaterialTheme.typography.bodyMedium,
         color = NebulaPalette.TextMuted,
       )
+      if (releaseNotes.isNotBlank()) {
+        Text(
+          stringResource(R.string.update_whats_new),
+          style = MaterialTheme.typography.titleMedium,
+        )
+        Text(
+          releaseNotes,
+          style = MaterialTheme.typography.bodyMedium,
+          color = NebulaPalette.TextMuted,
+          maxLines = 5,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
       if (error != null) {
         Row(
           verticalAlignment = Alignment.CenterVertically,
@@ -259,6 +295,11 @@ private fun UpdateReadyDialog(
           enabled = !actionInProgress,
         )
       }
+      Text(
+        stringResource(R.string.update_later_hint),
+        style = MaterialTheme.typography.bodySmall,
+        color = NebulaPalette.TextFaint,
+      )
     }
   }
 }

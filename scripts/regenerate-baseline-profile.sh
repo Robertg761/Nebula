@@ -99,15 +99,26 @@ trap on_exit EXIT
   -Pandroid.injected.androidTest.leaveApksInstalledAfterTest=true \
   -Pandroid.testInstrumentationRunnerArguments.androidx.benchmark.enabledRules=BaselineProfile
 
-mapfile -d '' -t generated_profiles < <(
+mapfile -d '' -t generated_baseline_profiles < <(
   find app/src -type f -path '*/generated/baselineProfiles/*' \
     -name '*baseline-prof*.txt' -print0
 )
-if [ "${#generated_profiles[@]}" -ne 1 ] || [ ! -s "${generated_profiles[0]:-}" ]; then
-  echo "Expected exactly one non-empty source-staged baseline profile; found ${#generated_profiles[@]}." >&2
+mapfile -d '' -t generated_startup_profiles < <(
+  find app/src -type f -path '*/generated/baselineProfiles/*' \
+    -name '*startup-prof*.txt' -print0
+)
+if [ "${#generated_baseline_profiles[@]}" -ne 1 ] || \
+   [ ! -s "${generated_baseline_profiles[0]:-}" ]; then
+  echo "Expected exactly one non-empty source-staged baseline profile; found ${#generated_baseline_profiles[@]}." >&2
   exit 1
 fi
-GENERATED="${generated_profiles[0]}"
+if [ "${#generated_startup_profiles[@]}" -ne 1 ] || \
+   [ ! -s "${generated_startup_profiles[0]:-}" ]; then
+  echo "Expected exactly one non-empty source-staged startup profile; found ${#generated_startup_profiles[@]}." >&2
+  exit 1
+fi
+GENERATED_BASELINE="${generated_baseline_profiles[0]}"
+GENERATED_STARTUP="${generated_startup_profiles[0]}"
 
 required_paths=(
   "com/stremioshell/host/tv/TvAppActivity"
@@ -119,13 +130,46 @@ required_paths=(
   "com/stremioshell/host/tv/player/MpvPlayerActivity"
 )
 for path in "${required_paths[@]}"; do
-  if ! rg -q "$path" "$GENERATED"; then
+  if ! rg -q "$path" "$GENERATED_BASELINE"; then
     echo "Refusing candidate: generated profile did not exercise $path." >&2
     exit 1
   fi
 done
 
-cp "$GENERATED" "$WORK_DIR/baseline-prof.txt"
+startup_required_paths=(
+  "com/stremioshell/host/tv/TvAppActivity"
+  "com/stremioshell/host/tv/ui/TvApp"
+  "com/stremioshell/host/tv/ui/HomeScreen"
+)
+for path in "${startup_required_paths[@]}"; do
+  if ! rg -q "$path" "$GENERATED_STARTUP"; then
+    echo "Refusing candidate: launch-only startup profile did not exercise $path." >&2
+    exit 1
+  fi
+done
+
+if cmp -s "$GENERATED_BASELINE" "$GENERATED_STARTUP"; then
+  echo "Refusing candidate: startup and baseline profiles are still identical." >&2
+  exit 1
+fi
+baseline_lines="$(wc -l < "$GENERATED_BASELINE")"
+startup_lines="$(wc -l < "$GENERATED_STARTUP")"
+if (( startup_lines >= baseline_lines )); then
+  echo "Refusing candidate: startup profile is not smaller than the full baseline profile." >&2
+  exit 1
+fi
+startup_rules_outside_baseline="$(
+  comm -23 \
+    <(LC_ALL=C sort -u "$GENERATED_STARTUP") \
+    <(LC_ALL=C sort -u "$GENERATED_BASELINE")
+)"
+if [ -n "$startup_rules_outside_baseline" ]; then
+  echo "Refusing candidate: startup profile contains rules outside the full baseline profile." >&2
+  exit 1
+fi
+
+cp "$GENERATED_BASELINE" "$WORK_DIR/baseline-prof.txt"
+cp "$GENERATED_STARTUP" "$WORK_DIR/startup-prof.txt"
 
 {
   echo "generated_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -138,8 +182,10 @@ cp "$GENERATED" "$WORK_DIR/baseline-prof.txt"
   echo "android_api=$API_LEVEL"
   echo "build_fingerprint=$("${ADB[@]}" shell getprop ro.build.fingerprint | tr -d '\r')"
   echo "security_patch=$("${ADB[@]}" shell getprop ro.build.version.security_patch | tr -d '\r')"
-  echo "profile_sha256=$(sha256sum "$WORK_DIR/baseline-prof.txt" | cut -d' ' -f1)"
-  echo "profile_lines=$(wc -l < "$WORK_DIR/baseline-prof.txt")"
+  echo "baseline_profile_sha256=$(sha256sum "$WORK_DIR/baseline-prof.txt" | cut -d' ' -f1)"
+  echo "baseline_profile_lines=$baseline_lines"
+  echo "startup_profile_sha256=$(sha256sum "$WORK_DIR/startup-prof.txt" | cut -d' ' -f1)"
+  echo "startup_profile_lines=$startup_lines"
   echo "generator=:app:generateBaselineProfile"
 } > "$WORK_DIR/evidence.txt"
 
@@ -152,6 +198,7 @@ mv "$WORK_DIR" "$CANDIDATE_DIR"
 
 echo "Candidate (committed profile was not changed):"
 echo "  $CANDIDATE_DIR/baseline-prof.txt"
+echo "  $CANDIDATE_DIR/startup-prof.txt"
 echo "Evidence:"
 echo "  $CANDIDATE_DIR/evidence.txt"
 echo "Review and benchmark it using docs/baseline-profile.md before copying it into src/main."

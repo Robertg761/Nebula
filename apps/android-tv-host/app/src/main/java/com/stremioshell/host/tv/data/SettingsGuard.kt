@@ -15,7 +15,7 @@ data class SettingsDraft(
  * What is on disk right now, for the guard below to fall back to.
  *
  * [readable] is load-bearing and defaults to true only so that callers with a genuine read - tests
- * included - stay unchanged. When it is false the other two fields are not knowledge, they are a
+ * included - stay unchanged. When it is false the other fields are not knowledge, they are a
  * failed read's stand-in, and the guard must not let a Save act on them; see
  * [SettingsStore.storedSnapshot], which is the one place that can tell the difference.
  */
@@ -23,6 +23,9 @@ data class StoredSettings(
   val tmdbKey: String,
   val addonUrls: List<String>,
   val readable: Boolean = true,
+  val subtitlesBaseUrl: String = SubtitlesClient.OPENSUBTITLES_V3_BASE,
+  /** False only when the addon-list key exists but its JSON cannot be decoded. */
+  val addonUrlsReadable: Boolean = true,
 )
 
 /**
@@ -38,10 +41,13 @@ data class ResolvedSettings(
   val subtitlesBaseUrl: String,
   val keptTmdbKey: Boolean,
   val keptAddonUrls: Boolean,
+  val keptSubtitlesBaseUrl: Boolean = false,
   /** The stored values could not be read, so nothing they imply may be treated as an instruction. */
   val storedUnreadable: Boolean = false,
   /** The draft offered addon URLs and every one of them was rejected as unusable. */
   val addonInputRejected: Boolean = false,
+  /** The stored addon bytes were malformed and therefore were deliberately not overwritten. */
+  val addonUrlsUnreadable: Boolean = false,
 )
 
 /**
@@ -71,15 +77,24 @@ object SettingsSaveGuard {
     // nothing, overwriting one that does costs the viewer their rails until they retype it.
     val keepTmdb = tmdbKey.isEmpty() && (!stored.readable || stored.tmdbKey.isNotBlank())
     val addonUrls = AddonList.sanitized(draft.addonUrls)
-    val keepAddons = addonUrls.isEmpty() && (!stored.readable || stored.addonUrls.isNotEmpty())
+    val keepAddons = !stored.addonUrlsReadable ||
+      (addonUrls.isEmpty() && (!stored.readable || stored.addonUrls.isNotEmpty()))
+    val subtitlesBaseUrl = normalizeSubtitlesBase(draft.subtitlesBaseUrl)
+    // A degraded subtitles flow presents the built-in default, not the unknown stored value. A
+    // Save of that stand-in must not silently reset a custom addon. On a healthy read, blank still
+    // means the documented explicit reset to the built-in default.
+    val keepSubtitles = !stored.readable &&
+      subtitlesBaseUrl == SubtitlesClient.OPENSUBTITLES_V3_BASE
     return ResolvedSettings(
       tmdbKey = if (keepTmdb) stored.tmdbKey else tmdbKey,
       addonUrls = if (keepAddons) AddonList.sanitized(stored.addonUrls) else addonUrls,
-      subtitlesBaseUrl = normalizeSubtitlesBase(draft.subtitlesBaseUrl),
+      subtitlesBaseUrl = if (keepSubtitles) stored.subtitlesBaseUrl else subtitlesBaseUrl,
       keptTmdbKey = keepTmdb,
       keptAddonUrls = keepAddons,
+      keptSubtitlesBaseUrl = keepSubtitles,
       storedUnreadable = !stored.readable,
       addonInputRejected = AddonList.allRejected(draft.addonUrls),
+      addonUrlsUnreadable = !stored.addonUrlsReadable,
     )
   }
 
@@ -104,9 +119,16 @@ object SettingsSaveGuard {
    * nothing was touched and the Save is worth repeating.
    */
   fun keptNotice(resolved: ResolvedSettings): String? {
-    if (resolved.storedUnreadable && (resolved.keptTmdbKey || resolved.keptAddonUrls)) {
-      return "Couldn't read your saved settings just now, so your TMDB key and addons were left " +
-        "as they are. Try Save again in a moment."
+    if (resolved.addonUrlsUnreadable && resolved.keptAddonUrls) {
+      return "Couldn't read your saved addon list, so it was left untouched. " +
+        "The other settings were saved; repair or restore the addon list before changing it."
+    }
+    if (
+      resolved.storedUnreadable &&
+      (resolved.keptTmdbKey || resolved.keptAddonUrls || resolved.keptSubtitlesBaseUrl)
+    ) {
+      return "Couldn't read your saved settings just now, so the values that could not be read " +
+        "were left as they are. Try Save again in a moment."
     }
     return when {
       resolved.keptTmdbKey && resolved.keptAddonUrls && resolved.addonInputRejected ->

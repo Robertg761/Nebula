@@ -14,7 +14,6 @@ import androidx.core.content.IntentCompat
 import androidx.lifecycle.lifecycleScope
 import com.stremioshell.host.BuildConfig
 import com.stremioshell.host.tv.channel.WatchNextDeepLink
-import com.stremioshell.host.tv.channel.WatchNextSync
 import com.stremioshell.host.tv.channel.WatchNextTarget
 import com.stremioshell.host.tv.data.SettingsStore
 import com.stremioshell.host.tv.data.WatchStateStore
@@ -124,8 +123,13 @@ class TvAppActivity : ComponentActivity() {
 
     if (BuildConfig.DEBUG) {
       // Debug-only: allow test automation to inject settings via intent extras.
-      val debugTmdbKey = intent.getStringExtra("debug_tmdb_key")
-      val debugAddonUrl = intent.getStringExtra("debug_addon_url")
+      // This Activity is exported, so even debug-only extras can carry a Bundle that fails while
+      // unparcelling. Treat it like the guarded production launch extras below.
+      val debugSettings = runCatching {
+        intent.getStringExtra("debug_tmdb_key") to intent.getStringExtra("debug_addon_url")
+      }.getOrNull()
+      val debugTmdbKey = debugSettings?.first
+      val debugAddonUrl = debugSettings?.second
       if (debugTmdbKey != null || debugAddonUrl != null) {
         val settings = SettingsStore(applicationContext)
         lifecycleScope.launch {
@@ -149,11 +153,14 @@ class TvAppActivity : ComponentActivity() {
                 try {
                   // "Start over" is the one case that ignores a stored position; a watched
                   // record keeps position 0 anyway, so a re-watch also starts at the top.
-                  val resumeMs = if (screen.startOver) {
-                    0L
-                  } else {
-                    watchStore.get(MpvPlayerActivity.watchKeyFor(screen))?.positionMs ?: 0L
-                  }
+                  val storedPositionMs = watchStore
+                    .get(MpvPlayerActivity.watchKeyFor(screen))
+                    ?.positionMs
+                  val resumeMs = resolveResumePositionMs(
+                    startOver = screen.startOver,
+                    storedPositionMs = storedPositionMs,
+                    fallbackPositionMs = screen.resumePositionFallbackMs,
+                  )
                   playerLauncher.launch(
                     MpvPlayerActivity.createIntent(this@TvAppActivity, screen, stream, resumeMs)
                       .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -179,6 +186,7 @@ class TvAppActivity : ComponentActivity() {
               tmdbId = target.tmdbId,
               initialSeason = target.season,
               initialEpisode = target.episode,
+              resumePositionFallbackMs = target.resumePositionMs,
             )
           },
           onPendingDeepLinkHandled = {
@@ -248,10 +256,13 @@ class TvAppActivity : ComponentActivity() {
    */
   private fun queryOf(intent: Intent?): String? {
     if (intent == null) return null
-    return runCatching {
-      intent.getStringExtra(LaunchIntents.EXTRA_QUERY)
-        ?: intent.getStringExtra(LaunchIntents.EXTRA_USER_QUERY)
+    val userQuery = runCatching {
+      intent.getStringExtra(LaunchIntents.EXTRA_USER_QUERY)
     }.getOrNull()
+    val rewrittenQuery = runCatching {
+      intent.getStringExtra(LaunchIntents.EXTRA_QUERY)
+    }.getOrNull()
+    return LaunchIntents.preferredQuery(userQuery, rewrittenQuery)
   }
 
   /**
@@ -321,14 +332,17 @@ class TvAppActivity : ComponentActivity() {
     }
   }
 
-  override fun onStop() {
-    super.onStop()
-    // "Mark watched" and "Remove from row" change the watch state from the UI,
-    // which the player's publish hook never sees. Leaving the app is the moment
-    // the home screen is about to be looked at, so this one skips the throttle -
-    // a row the viewer just dismissed must not still be there behind them.
-    WatchNextSync.publish(this, force = true)
-  }
+}
+
+/** Local watch state is authoritative; the launcher position only fills an absent/unreadable read. */
+internal fun resolveResumePositionMs(
+  startOver: Boolean,
+  storedPositionMs: Long?,
+  fallbackPositionMs: Long,
+): Long = when {
+  startOver -> 0L
+  storedPositionMs != null -> WatchNextDeepLink.safeResumePositionMs(storedPositionMs)
+  else -> WatchNextDeepLink.safeResumePositionMs(fallbackPositionMs)
 }
 
 private fun Bundle.putPendingLaunch(event: PendingLaunchEvent) {
@@ -340,7 +354,10 @@ private fun Bundle.putPendingLaunch(event: PendingLaunchEvent) {
       putInt(STATE_PENDING_WATCH_TMDB, request.target.tmdbId)
       request.target.season?.let { putInt(STATE_PENDING_WATCH_SEASON, it) }
       request.target.episode?.let { putInt(STATE_PENDING_WATCH_EPISODE, it) }
-      putLong(STATE_PENDING_WATCH_POSITION, request.target.resumePositionMs)
+      putLong(
+        STATE_PENDING_WATCH_POSITION,
+        WatchNextDeepLink.safeResumePositionMs(request.target.resumePositionMs),
+      )
     }
     is PendingLaunch.Search -> {
       putString(STATE_PENDING_KIND, PENDING_SEARCH)
@@ -372,8 +389,9 @@ private fun Bundle.pendingLaunchEvent(): PendingLaunchEvent? {
               .takeIf { containsKey(STATE_PENDING_WATCH_SEASON) },
             episode = getInt(STATE_PENDING_WATCH_EPISODE)
               .takeIf { containsKey(STATE_PENDING_WATCH_EPISODE) },
-            resumePositionMs = getLong(STATE_PENDING_WATCH_POSITION, 0L)
-              .coerceAtLeast(0L),
+            resumePositionMs = WatchNextDeepLink.safeResumePositionMs(
+              getLong(STATE_PENDING_WATCH_POSITION, 0L),
+            ),
           )
         )
       }

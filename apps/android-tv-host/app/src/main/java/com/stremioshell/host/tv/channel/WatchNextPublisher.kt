@@ -16,11 +16,10 @@ import com.stremioshell.host.tv.TvAppActivity
  * what puts resume points on the Android TV home screen next to Netflix's and
  * YouTube's.
  *
- * Deliberately thin: every decision lives in [WatchNextMapper] and [WatchNextDiff],
- * while the ContentValues update semantics are covered by a device-backed test.
- * The remaining ContentResolver calls need a TV provider. Every failure is swallowed -
- * a home-screen row is a nicety, and the provider is missing entirely on a phone or a
- * non-TV emulator image.
+ * Deliberately thin: every decision lives in [WatchNextMapper], [WatchNextDiff] and the
+ * unit-testable [WatchNextPublishExecutor], while the ContentValues update semantics are covered
+ * by a device-backed test. Provider failures never escape to playback, but they are reported to
+ * [WatchNextSync] so a failed reconciliation does not spend the throttle window as if it landed.
  */
 // tvprovider 1.0.0 marks its Watch Next compatibility surface RestrictedApi
 // even though this is the documented public API for third-party TV apps.
@@ -29,92 +28,19 @@ import com.stremioshell.host.tv.TvAppActivity
 @SuppressLint("RestrictedApi")
 class WatchNextPublisher(context: Context) {
   private val context = context.applicationContext
-
-  /**
-   * Whether the provider was actually reached with a plan. A `false` is a no-op
-   * (no provider on this image, or the row query failed) that wrote nothing, so
-   * the caller's throttle window can be handed back rather than spent on it.
-   */
-  fun publish(desired: List<WatchNextProgramData>): Boolean {
-    if (!providerAvailable()) return false
-    val resolver = context.contentResolver
-    val plan = runCatching { WatchNextDiff.plan(queryOwnRows(), desired) }
-      .getOrElse {
-        Log.w(TAG, "Watch Next query failed", it)
-        return false
-      }
-    for (id in plan.deletes) {
-      runCatching {
-        resolver.delete(TvContractCompat.buildWatchNextProgramUri(id), null, null)
-      }.onFailure { Log.w(TAG, "Watch Next delete failed for row $id", it) }
-    }
-    for ((id, program) in plan.updates) {
-      runCatching {
-        val updated = resolver.update(
-          TvContractCompat.buildWatchNextProgramUri(id),
-          contentValuesFor(program),
-          null,
-          null,
-        )
-        // The launcher may remove a row after the query. Reinsert only on a clean zero-row update;
-        // an exception could be a transient provider failure, where inserting risks a duplicate.
-        if (updated == 0) {
-          resolver.insert(
-            TvContractCompat.WatchNextPrograms.CONTENT_URI,
-            contentValuesFor(program),
-          )
-        }
-      }.onFailure {
-        Log.w(TAG, "Watch Next update failed for ${program.internalProviderId}", it)
-      }
-    }
-    for (program in plan.inserts) {
-      runCatching {
-        resolver.insert(
-          TvContractCompat.WatchNextPrograms.CONTENT_URI,
-          contentValuesFor(program),
-        )
-      }.onFailure {
-        Log.w(TAG, "Watch Next insert failed for ${program.internalProviderId}", it)
-      }
-    }
-    return true
+  private val executor = WatchNextPublishExecutor(
+    AndroidWatchNextProvider(this.context, ::contentValuesFor),
+  ) { message, error ->
+    if (error == null) Log.w(TAG, message) else Log.w(TAG, message, error)
   }
 
   /**
-   * Absent on anything that is not running the leanback system stack - a phone, or
-   * a TV emulator image built without the TV provider - where every call below
-   * would otherwise throw on each save.
+   * Whether reconciliation landed, could not exist on this image, or reached a retryable failure.
+   * Keeping those outcomes distinct prevents phones/non-TV emulators from retrying forever while
+   * still handing a real provider failure back to the scheduler.
    */
-  private fun providerAvailable(): Boolean =
-    context.packageManager.resolveContentProvider(TvContractCompat.AUTHORITY, 0) != null
-
-  /**
-   * The provider scopes a plain query to the calling package's own rows, so this
-   * needs no permission and can never see - or delete - another app's rows.
-   */
-  private fun queryOwnRows(): List<ExistingWatchNextRow> {
-    val projection = arrayOf(
-      BaseColumns._ID,
-      TvContractCompat.WatchNextPrograms.COLUMN_INTERNAL_PROVIDER_ID,
-    )
-    val rows = ArrayList<ExistingWatchNextRow>()
-    context.contentResolver.query(
-      TvContractCompat.WatchNextPrograms.CONTENT_URI,
-      projection,
-      null,
-      null,
-      null,
-    )?.use { cursor ->
-      while (cursor.moveToNext()) {
-        rows += ExistingWatchNextRow(
-          id = cursor.getLong(0),
-          internalProviderId = if (cursor.isNull(1)) null else cursor.getString(1),
-        )
-      }
-    }
-    return rows
-  }
+  internal fun publish(desired: List<WatchNextProgramData>): WatchNextPublishResult =
+    executor.publish(desired)
 
   internal fun contentValuesFor(program: WatchNextProgramData): ContentValues {
     val builder = WatchNextProgram.Builder()
@@ -176,4 +102,138 @@ class WatchNextPublisher(context: Context) {
   private companion object {
     const val TAG = "WatchNext"
   }
+}
+
+internal enum class WatchNextPublishResult { Published, Unavailable, Failed }
+
+/** Provider boundary kept free of Android values so every failure contract has a local unit test. */
+internal interface WatchNextProvider {
+  fun available(): Boolean
+  /** Null is a provider failure, not proof that the table is empty. */
+  fun queryOwnRows(): List<ExistingWatchNextRow>?
+  fun delete(id: Long)
+  /** Number of rows updated; zero means the launcher removed it after the query. */
+  fun update(id: Long, program: WatchNextProgramData): Int
+  /** False includes ContentResolver.insert returning null. */
+  fun insert(program: WatchNextProgramData): Boolean
+}
+
+/** Applies one complete diff and reports partial failure instead of laundering it as success. */
+internal class WatchNextPublishExecutor(
+  private val provider: WatchNextProvider,
+  private val log: (String, Throwable?) -> Unit = { _, _ -> },
+) {
+  fun publish(desired: List<WatchNextProgramData>): WatchNextPublishResult {
+    val available = try {
+      provider.available()
+    } catch (error: Throwable) {
+      log("Watch Next provider lookup failed", error)
+      return WatchNextPublishResult.Failed
+    }
+    if (!available) return WatchNextPublishResult.Unavailable
+    val existing = try {
+      provider.queryOwnRows() ?: return WatchNextPublishResult.Failed.also {
+        log("Watch Next query returned no cursor", null)
+      }
+    } catch (error: Throwable) {
+      log("Watch Next query failed", error)
+      return WatchNextPublishResult.Failed
+    }
+    val plan = WatchNextDiff.plan(existing, desired)
+    var succeeded = true
+
+    for (id in plan.deletes) {
+      try {
+        provider.delete(id)
+      } catch (error: Throwable) {
+        succeeded = false
+        log("Watch Next delete failed for row $id", error)
+      }
+    }
+    for ((id, program) in plan.updates) {
+      try {
+        val updated = provider.update(id, program)
+        // A clean zero means the queried row vanished. Reinsert the desired row, but a null insert
+        // is still a failed reconciliation and must be retried rather than called published.
+        if (updated == 0 && !provider.insert(program)) {
+          succeeded = false
+          log("Watch Next reinsert failed for ${program.internalProviderId}", null)
+        } else if (updated < 0) {
+          succeeded = false
+          log("Watch Next update returned $updated for ${program.internalProviderId}", null)
+        }
+      } catch (error: Throwable) {
+        succeeded = false
+        log("Watch Next update failed for ${program.internalProviderId}", error)
+      }
+    }
+    for (program in plan.inserts) {
+      try {
+        if (!provider.insert(program)) {
+          succeeded = false
+          log("Watch Next insert returned null for ${program.internalProviderId}", null)
+        }
+      } catch (error: Throwable) {
+        succeeded = false
+        log("Watch Next insert failed for ${program.internalProviderId}", error)
+      }
+    }
+    return if (succeeded) WatchNextPublishResult.Published else WatchNextPublishResult.Failed
+  }
+}
+
+/** Android's nullable/throwing ContentResolver surface translated without losing failure states. */
+@SuppressLint("RestrictedApi")
+private class AndroidWatchNextProvider(
+  context: Context,
+  private val valuesFor: (WatchNextProgramData) -> ContentValues,
+) : WatchNextProvider {
+  private val context = context.applicationContext
+  private val resolver = this.context.contentResolver
+
+  override fun available(): Boolean =
+    context.packageManager.resolveContentProvider(TvContractCompat.AUTHORITY, 0) != null
+
+  /** The provider scopes this query to the calling package's own rows. */
+  override fun queryOwnRows(): List<ExistingWatchNextRow>? {
+    val projection = arrayOf(
+      BaseColumns._ID,
+      TvContractCompat.WatchNextPrograms.COLUMN_INTERNAL_PROVIDER_ID,
+    )
+    val cursor = resolver.query(
+      TvContractCompat.WatchNextPrograms.CONTENT_URI,
+      projection,
+      null,
+      null,
+      null,
+    ) ?: return null
+    return cursor.use {
+      buildList {
+        while (cursor.moveToNext()) {
+          add(
+            ExistingWatchNextRow(
+              id = cursor.getLong(0),
+              internalProviderId = if (cursor.isNull(1)) null else cursor.getString(1),
+            )
+          )
+        }
+      }
+    }
+  }
+
+  override fun delete(id: Long) {
+    resolver.delete(TvContractCompat.buildWatchNextProgramUri(id), null, null)
+  }
+
+  override fun update(id: Long, program: WatchNextProgramData): Int = resolver.update(
+    TvContractCompat.buildWatchNextProgramUri(id),
+    valuesFor(program),
+    null,
+    null,
+  )
+
+  override fun insert(program: WatchNextProgramData): Boolean = resolver.insert(
+    TvContractCompat.WatchNextPrograms.CONTENT_URI,
+    valuesFor(program),
+  ) != null
 }

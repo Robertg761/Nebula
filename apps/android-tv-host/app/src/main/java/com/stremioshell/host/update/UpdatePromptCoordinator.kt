@@ -13,8 +13,10 @@ class UpdatePromptCoordinator(
 ) {
   data class State(
     val prompt: UpdatePromptPolicy.Prompt,
-    val versionName: String?
+    val update: DownloadedUpdateSnapshot?,
   ) {
+    val versionName: String? get() = update?.versionName
+
     companion object {
       val None = State(UpdatePromptPolicy.Prompt.NONE, null)
     }
@@ -30,13 +32,10 @@ class UpdatePromptCoordinator(
     currentVersionName: String,
     dismissedVersionName: String?
   ): State {
-    if (!apkUpdateManager.hasPendingDownloadedUpdate(context, currentVersionName)) {
-      return State.None
-    }
-
-    val downloadedVersion = apkUpdateManager.getDownloadedVersionName(context) ?: return State.None
+    val update = apkUpdateManager.pendingDownloadedUpdate(context, currentVersionName)
+      ?: return State.None
     val prompt = UpdatePromptPolicy.decide(
-      downloadedVersionName = downloadedVersion,
+      downloadedVersionName = update.versionName,
       currentVersionName = currentVersionName,
       needsUnknownSourcesPermission = apkUpdateManager.needsUnknownSourcesPermission(context),
       dismissedVersionName = dismissedVersionName
@@ -44,13 +43,16 @@ class UpdatePromptCoordinator(
     return if (prompt == UpdatePromptPolicy.Prompt.NONE) {
       State.None
     } else {
-      State(prompt = prompt, versionName = downloadedVersion)
+      State(prompt = prompt, update = update)
     }
   }
 
-  /** Null when the APK vanished, failed verification, or installs are still blocked. */
-  fun buildInstallIntent(context: Context): Intent? =
-    apkUpdateManager.buildInstallIntentFromDownloadedApk(context)
+  /** Distinguishes a harmless stale prompt from a genuine final-verification failure. */
+  fun buildInstallIntent(
+    context: Context,
+    expectedUpdate: DownloadedUpdateSnapshot,
+  ): InstallIntentResult =
+    apkUpdateManager.buildInstallIntentFromDownloadedApk(context, expectedUpdate)
 
   fun buildUnknownSourcesIntent(context: Context): Intent =
     apkUpdateManager.buildUnknownSourcesSettingsIntent(context)

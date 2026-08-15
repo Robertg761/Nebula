@@ -13,7 +13,13 @@ import com.stremioshell.host.tv.data.NetworkErrorMessage
 import com.stremioshell.host.tv.data.NetworkSource
 import com.stremioshell.host.tv.data.PlayerPrefs
 import com.stremioshell.host.tv.data.PlayerPrefsStore
+import com.stremioshell.host.tv.data.PersistenceMutationClock
 import com.stremioshell.host.tv.data.RefreshCompletionPolicy
+import com.stremioshell.host.tv.data.SavedContentProvenance
+import com.stremioshell.host.tv.data.SavedContentReason
+import com.stremioshell.host.tv.data.SavedContentRefreshPolicy
+import com.stremioshell.host.tv.data.SearchHistoryStore
+import com.stremioshell.host.tv.data.SearchHistoryWrites
 import com.stremioshell.host.tv.data.SettingsDraft
 import com.stremioshell.host.tv.data.SettingsSaveGuard
 import com.stremioshell.host.tv.data.SettingsStatus
@@ -21,6 +27,7 @@ import com.stremioshell.host.tv.data.SettingsStore
 import com.stremioshell.host.tv.data.StalenessPolicy
 import com.stremioshell.host.tv.data.StreamPickStore
 import com.stremioshell.host.tv.data.TmdbProbeResult
+import com.stremioshell.host.tv.data.ValidatedConnectivityMonitor
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.WatchStateStore
 import com.stremioshell.host.tv.data.WatchlistEntry
@@ -57,8 +64,10 @@ import com.stremioshell.host.tv.pairing.PairingSubmission
 import com.stremioshell.host.tv.pairing.PairingTokenGenerator
 import com.stremioshell.host.tv.pairing.PairingValidation
 import com.stremioshell.host.tv.pairing.PairingValidationPolicy
-import com.stremioshell.host.tv.pairing.findLanIpv4
-import com.stremioshell.host.tv.search.LaunchIntents
+import com.stremioshell.host.tv.pairing.findPairingLanAddress
+import com.stremioshell.host.tv.pairing.pairingUrlHost
+import com.stremioshell.host.tv.player.PlayerPreferenceWrites
+import com.stremioshell.host.tv.search.SearchQuery
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -93,12 +102,150 @@ data class HomeRail(val title: String, val items: List<MediaItem>)
 data class DetailsRequestKey(val type: MediaType, val tmdbId: Int)
 data class SeasonRequestKey(val tmdbId: Int, val seasonNumber: Int)
 data class StreamsRequestKey(val imdbId: String, val season: Int?, val episode: Int?)
+data class SavedDetailsContent(
+  val request: DetailsRequestKey,
+  val provenance: SavedContentProvenance,
+)
+data class SavedSeasonContent(
+  val request: SeasonRequestKey,
+  val provenance: SavedContentProvenance,
+)
 enum class SettingsMutationResult { Changed, Unchanged, Failed }
 data class PlayerPrefsMutationResult(
   val outcome: SettingsMutationResult,
   /** The authoritative post-mutation value, absent only when the DataStore operation failed. */
   val prefs: PlayerPrefs? = null,
 )
+
+/** Identity and arguments for one immediate Settings mutation, retained across recreation. */
+sealed interface SettingsMutationRequest {
+  data class AddAddon(val submittedUrl: String) : SettingsMutationRequest
+  data class MoveAddon(val url: String, val direction: Int) : SettingsMutationRequest
+  data class RemoveAddon(val url: String) : SettingsMutationRequest
+  data object ClearTmdbKey : SettingsMutationRequest
+  data class PlaybackLanguages(val audio: String, val subtitles: String) : SettingsMutationRequest
+  data class PlaybackSubtitleSize(val storageName: String) : SettingsMutationRequest
+  data class PlaybackAudioOutput(val storageName: String) : SettingsMutationRequest
+  data class AutoPlayNext(val enabled: Boolean) : SettingsMutationRequest
+  data class UpNextCountdown(val seconds: Int) : SettingsMutationRequest
+  data object ResetPlayback : SettingsMutationRequest
+}
+
+@Immutable
+data class SettingsMutationOperation(
+  val requestId: Long,
+  val request: SettingsMutationRequest,
+  val result: SettingsMutationResult? = null,
+  val playerPrefs: PlayerPrefs? = null,
+) {
+  val running: Boolean get() = result == null
+}
+
+/**
+ * A one-slot operation handoff. Completion remains observable until the replacement Settings
+ * composition consumes it, so no callback can disappear with the composition that started it.
+ */
+internal class SettingsMutationTracker {
+  private val _operation = MutableStateFlow<SettingsMutationOperation?>(null)
+  val operation: StateFlow<SettingsMutationOperation?> = _operation
+  private var nextRequestId = 0L
+
+  @Synchronized
+  fun begin(request: SettingsMutationRequest): Long? {
+    if (_operation.value != null) return null
+    val requestId = ++nextRequestId
+    _operation.value = SettingsMutationOperation(requestId, request)
+    return requestId
+  }
+
+  @Synchronized
+  fun complete(requestId: Long, result: SettingsMutationResult, prefs: PlayerPrefs? = null) {
+    val current = _operation.value ?: return
+    if (current.requestId == requestId) {
+      _operation.value = current.copy(result = result, playerPrefs = prefs)
+    }
+  }
+
+  @Synchronized
+  fun consume(requestId: Long) {
+    if (_operation.value?.requestId == requestId) _operation.value = null
+  }
+}
+
+internal enum class PairingPauseDecision { CloseNow, WaitForResponse }
+
+internal data class PairingResponseCompletion<T>(
+  val receipt: T?,
+  val closeServer: Boolean,
+)
+
+/**
+ * Owns the narrow interval where pairing has crossed its commit gate but the phone has not yet
+ * received its HTTP answer. A lifecycle pause may wait in that interval; an explicit exit may not.
+ */
+internal class PairingCommitReceiptTracker<T> {
+  private var stopped = false
+  private var responsePending = false
+  private var paused = false
+  private var receiptAllowed = true
+  private var pendingReceipt: T? = null
+
+  @Synchronized
+  fun beginCommit(): Boolean {
+    if (stopped) return false
+    responsePending = true
+    return true
+  }
+
+  @Synchronized
+  fun pause(): PairingPauseDecision {
+    if (responsePending) {
+      paused = true
+      return PairingPauseDecision.WaitForResponse
+    }
+    // Set this under the same lock as beginCommit. A commit cannot slip through between the
+    // decision to close and the caller shutting down the listener.
+    stopped = true
+    return PairingPauseDecision.CloseNow
+  }
+
+  @Synchronized
+  fun resumePendingResponse(): Boolean {
+    if (stopped || !responsePending) return false
+    paused = false
+    return true
+  }
+
+  @Synchronized
+  fun recordReceipt(receipt: T) {
+    if (receiptAllowed) pendingReceipt = receipt
+  }
+
+  @Synchronized
+  fun stop(suppressReceipt: Boolean) {
+    stopped = true
+    paused = false
+    if (suppressReceipt) {
+      receiptAllowed = false
+      pendingReceipt = null
+    }
+  }
+
+  @Synchronized
+  fun finishResponse(): PairingResponseCompletion<T>? {
+    if (!responsePending) return null
+    responsePending = false
+    val closeServer = paused || stopped
+    if (paused) stopped = true
+    return PairingResponseCompletion(
+      receipt = pendingReceipt.takeIf { receiptAllowed },
+      closeServer = closeServer,
+    )
+  }
+
+  @Synchronized
+  fun active(): Boolean = !stopped
+}
 
 /** Network answers shared by Settings' connection test and phone pairing's save gate. */
 private data class ConfigurationProbe(
@@ -182,6 +329,8 @@ sealed interface SettingsSaveUpdate {
 
   data class Persisted(override val message: String) : SettingsSaveUpdate
   data class Complete(override val message: String) : SettingsSaveUpdate
+  /** The main configuration committed, but a separate playback preference write is unconfirmed. */
+  data class Partial(override val message: String) : SettingsSaveUpdate
   data class Failed(override val message: String) : SettingsSaveUpdate
 }
 
@@ -211,6 +360,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   val watchlist = WatchlistStore(application)
   val streamPicks = StreamPickStore(application)
   private val playerPrefsStore = PlayerPrefsStore(application)
+  private val searchHistoryStore = SearchHistoryStore(application)
   private val addonClient = AddonClient()
   private val streamCatalog = StreamCatalog(addonClient)
 
@@ -272,8 +422,16 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   val rememberedPicks: StateFlow<Map<String, StreamSelection>> = streamPicks.selections
     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(IDLE_UNSUBSCRIBE_MS), emptyMap())
 
+  /** Small, device-local history for Search's idle screen, newest first. */
+  val recentSearches: StateFlow<List<String>> = searchHistoryStore.entries
+    .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
   private val _homeRails = MutableStateFlow<LoadState<List<HomeRail>>>(LoadState.Loading)
   val homeRails: StateFlow<LoadState<List<HomeRail>>> = _homeRails
+
+  /** Non-null only while Home is visibly retaining disk/in-memory catalogs after a failed refresh. */
+  private val _homeSavedContent = MutableStateFlow<SavedContentProvenance?>(null)
+  val homeSavedContent: StateFlow<SavedContentProvenance?> = _homeSavedContent
 
   /**
    * Set when Home has usable rails but part of the load did not make it: a compact retry notice
@@ -317,6 +475,8 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   val details: StateFlow<LoadState<MediaDetails>> = _details
   private val _detailsRequest = MutableStateFlow<DetailsRequestKey?>(null)
   val detailsRequest: StateFlow<DetailsRequestKey?> = _detailsRequest
+  private val _detailsSavedContent = MutableStateFlow<SavedDetailsContent?>(null)
+  val detailsSavedContent: StateFlow<SavedDetailsContent?> = _detailsSavedContent
 
   /** See [loadHeroArt]. Null whenever the featured title has no logo, which Home renders as type. */
   private val _heroLogoUrl = MutableStateFlow<String?>(null)
@@ -328,6 +488,8 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   val episodes: StateFlow<LoadState<List<EpisodeItem>>> = _episodes
   private val _seasonRequest = MutableStateFlow<SeasonRequestKey?>(null)
   val seasonRequest: StateFlow<SeasonRequestKey?> = _seasonRequest
+  private val _seasonSavedContent = MutableStateFlow<SavedSeasonContent?>(null)
+  val seasonSavedContent: StateFlow<SavedSeasonContent?> = _seasonSavedContent
 
   private val _streams = MutableStateFlow<LoadState<List<AddonStream>>>(LoadState.Loading)
   val streams: StateFlow<LoadState<List<AddonStream>>> = _streams
@@ -370,7 +532,9 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    * already succeeded.
    */
   private val settingsMutationMutex = Mutex()
-  private val playerPrefsMutationMutex = Mutex()
+  private val settingsMutationTracker = SettingsMutationTracker()
+  val settingsMutationOperation: StateFlow<SettingsMutationOperation?> =
+    settingsMutationTracker.operation
 
   private val _settingsSaveOperation = MutableStateFlow<SettingsSaveOperation?>(null)
   val settingsSaveOperation: StateFlow<SettingsSaveOperation?> = _settingsSaveOperation
@@ -383,6 +547,16 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   // covers tabbing across every season of the longest show that exists plus the shows around it.
   private val detailsCache = MetadataCache<Pair<MediaType, Int>, MediaDetails>(maxEntries = 10)
   private val seasonCache = MetadataCache<Pair<Int, Int>, List<EpisodeItem>>(maxEntries = 20)
+  private val detailsLoadedAtMillis = object : LinkedHashMap<Pair<MediaType, Int>, Long>(16, 0.75f, true) {
+    override fun removeEldestEntry(
+      eldest: MutableMap.MutableEntry<Pair<MediaType, Int>, Long>,
+    ): Boolean = size > 10
+  }
+  private val seasonsLoadedAtMillis = object : LinkedHashMap<Pair<Int, Int>, Long>(24, 0.75f, true) {
+    override fun removeEldestEntry(
+      eldest: MutableMap.MutableEntry<Pair<Int, Int>, Long>,
+    ): Boolean = size > 20
+  }
 
   /** Which TMDB key the two caches above hold data for; null also owns the cleared state. */
   private var metadataCacheKey: String? = null
@@ -390,6 +564,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   /** See [clientFor]. */
   private var cachedClientKey: String? = null
   private var cachedClient: TmdbClient? = null
+  private var connectivityMonitor: ValidatedConnectivityMonitor? = null
 
   init {
     // Search state can outlive the Search screen. Invalidate it at the source as soon as DataStore
@@ -397,6 +572,11 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     viewModelScope.launch {
       tmdbApiKey.collect { synchronizeSearchCredential(it) }
     }
+    connectivityMonitor = ValidatedConnectivityMonitor(application) {
+      // Connectivity callbacks are not delivered on the main thread. Every loader below owns
+      // main-confined Jobs and state, so re-enter through the ViewModel scope before touching them.
+      viewModelScope.launch { refreshSavedContentAfterConnectivityReturn() }
+    }.also { it.start() }
   }
 
   // Phone pairing.
@@ -429,12 +609,10 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    */
   private class PairingSession {
     val token: String = PairingTokenGenerator.generate()
+    val commitReceipt = PairingCommitReceiptTracker<PairingState.Received>()
 
     @Volatile
     var server: ConfigPairingServer? = null
-
-    @Volatile
-    var stopped: Boolean = false
   }
 
   private sealed interface PairingStartOutcome {
@@ -447,7 +625,12 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   private var pairingSession: PairingSession? = null
 
   fun startPairing() {
-    if (pairingSession != null) return
+    pairingSession?.let { current ->
+      // A fast resume can beat the phone response that a pause agreed to wait for. Reuse that
+      // session and cancel the deferred shutdown instead of minting a second live token.
+      current.commitReceipt.resumePendingResponse()
+      return
+    }
     val session = PairingSession()
     pairingSession = session
     _pairing.value = PairingState.Idle
@@ -473,20 +656,25 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    * pairing screen's entry animation from the main thread.
    */
   private fun bindPairingServer(session: PairingSession): PairingStartOutcome {
-    val ip = findLanIpv4() ?: return PairingStartOutcome.Failed(
+    val address = findPairingLanAddress(getApplication()) ?: return PairingStartOutcome.Failed(
       "Connect your TV to Wi-Fi or Ethernet first.",
     )
-    val server = ConfigPairingServer(session.token) { submission ->
-      applyPairedConfig(session, submission)
-    }
+    val bindHost = address.hostAddress?.takeIf { it.isNotBlank() }
+      ?: return PairingStartOutcome.Failed("Could not identify this TV on your network.")
+    val server = ConfigPairingServer(
+      token = session.token,
+      bindHost = bindHost,
+      onApplyResponseFinished = { finishPairingResponse(session) },
+      onConfig = { submission -> applyPairedConfig(session, submission) },
+    )
     session.server = server
-    if (session.stopped) return PairingStartOutcome.Aborted
+    if (!session.commitReceipt.active()) return PairingStartOutcome.Aborted
     val started = runCatching { server.start() }
     started.exceptionOrNull()?.let { error ->
       runCatching { server.stop() }
       return PairingStartOutcome.Failed(error.message ?: "Could not start pairing.")
     }
-    if (session.stopped) {
+    if (!session.commitReceipt.active()) {
       // The pairing screen went away while we were binding. A stop request always
       // wins, so undo the start here rather than leaving the port open.
       runCatching { server.stop() }
@@ -494,7 +682,8 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     }
     // The token is what keeps the rest of the LAN out, so it travels in the QR URL.
     return PairingStartOutcome.Ready(
-      "http://$ip:${server.listeningPort}/?${ConfigPairingServer.TOKEN_FIELD}=${session.token}",
+      "http://${pairingUrlHost(address)}:${server.listeningPort}/?" +
+        "${ConfigPairingServer.TOKEN_FIELD}=${session.token}",
     )
   }
 
@@ -587,13 +776,14 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       // decide the answer while the edit is in flight.
       val committed = withContext(NonCancellable) {
         settingsMutationMutex.withLock {
-          if (!pairingActive(session)) return@withLock null
           val latest = ConfigMerge.merge(
             submission,
             currentTmdbKey = settings.tmdbApiKey.first(),
             currentAddonUrls = settings.addonManifestUrls.first(),
           )
           if (latest.tmdbKey != candidate.tmdbKey || latest.addonUrls != candidate.addonUrls) {
+            null
+          } else if (!session.commitReceipt.beginCommit()) {
             null
           } else {
             if (latest.changed) settings.setPairedConfiguration(latest.tmdbKey, latest.addonUrls)
@@ -606,29 +796,25 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
         continue
       }
 
-      // A stop that wins before the commit gate aborts the request. If the atomic DataStore edit
-      // has already begun, "Leave pairing" remains honest: it leaves the screen rather than
-      // promising that an accepted phone submission can be rolled back.
-      if (pairingSession === session) {
-        _pairing.value = PairingState.Received(
-          tmdbKeyChanged = committed.tmdbKeyChanged,
-          addonUrlsChanged = committed.addonUrlsChanged,
-          hasTmdbKey = committed.tmdbKey.isNotBlank(),
-          addonCount = committed.addonUrls.size,
+      val receipt = PairingReceipt(
+        tmdbKeyChanged = committed.tmdbKeyChanged,
+        addonUrlsChanged = committed.addonUrlsChanged,
+        hasTmdbKey = committed.tmdbKey.isNotBlank(),
+        addonCount = committed.addonUrls.size,
+      )
+      session.commitReceipt.recordReceipt(
+        PairingState.Received(
+          tmdbKeyChanged = receipt.tmdbKeyChanged,
+          addonUrlsChanged = receipt.addonUrlsChanged,
+          hasTmdbKey = receipt.hasTmdbKey,
+          addonCount = receipt.addonCount,
           checks = displayChecks,
-        )
-        // Use the just-received key: the exposed tmdbApiKey flow may not have caught up yet.
-        // loadRails mutates ViewModel-owned jobs, so hop back to the main-scoped coroutine.
-        viewModelScope.launch { loadRails(committed.tmdbKey, force = true) }
-      }
-      return PairingApplyResult.Saved(
-        PairingReceipt(
-          tmdbKeyChanged = committed.tmdbKeyChanged,
-          addonUrlsChanged = committed.addonUrlsChanged,
-          hasTmdbKey = committed.tmdbKey.isNotBlank(),
-          addonCount = committed.addonUrls.size,
         ),
       )
+      // The configuration is durable even though the UI receipt waits for the phone response.
+      // Use the just-received key because the exposed DataStore flow may not have caught up yet.
+      viewModelScope.launch { loadRails(committed.tmdbKey, force = true) }
+      return PairingApplyResult.Saved(receipt)
     }
   }
 
@@ -654,7 +840,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
 
   /** The viewer left the pairing screen: the session ends and the screen's state ends with it. */
   fun stopPairing() {
-    shutdownPairing()
+    shutdownPairing(suppressReceipt = true)
     _pairing.value = PairingState.Idle
   }
 
@@ -672,7 +858,11 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    * resume starts a clean attempt.
    */
   fun pausePairing() {
-    shutdownPairing()
+    val session = pairingSession
+    if (session != null && session.commitReceipt.pause() == PairingPauseDecision.WaitForResponse) {
+      return
+    }
+    closePairingSession(session, suppressReceipt = false)
     if (_pairing.value !is PairingState.Received) _pairing.value = PairingState.Idle
   }
 
@@ -698,19 +888,67 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   fun releaseMetadataCaches() {
     detailsCache.clear()
     seasonCache.clear()
+    detailsLoadedAtMillis.clear()
+    seasonsLoadedAtMillis.clear()
   }
 
   override fun onCleared() {
-    shutdownPairing()
+    connectivityMonitor?.close()
+    connectivityMonitor = null
+    shutdownPairing(suppressReceipt = true)
     super.onCleared()
   }
 
-  private fun shutdownPairing() {
+  /**
+   * Revalidates only content currently identified as saved fallback content. All three loaders keep
+   * their Ready payloads in place for this path, so neither route state nor a lazy list's focus and
+   * scroll anchors are replaced by Loading while Android verifies the restored connection.
+   */
+  private fun refreshSavedContentAfterConnectivityReturn() {
+    if (_homeSavedContent.value != null && _homeRails.value is LoadState.Ready) {
+      loadHomeRails(force = true)
+    }
+    _detailsSavedContent.value?.let { saved ->
+      if (_details.value is LoadState.Ready) {
+        loadDetails(
+          type = saved.request.type,
+          tmdbId = saved.request.tmdbId,
+          preserveVisibleContent = true,
+        )
+      }
+    }
+    _seasonSavedContent.value?.let { saved ->
+      if (_episodes.value is LoadState.Ready) {
+        loadSeason(
+          tmdbId = saved.request.tmdbId,
+          seasonNumber = saved.request.seasonNumber,
+          preserveVisibleContent = true,
+        )
+      }
+    }
+  }
+
+  private fun savedContentProvenance(savedAtMillis: Long?): SavedContentProvenance =
+    SavedContentProvenance(
+      savedAtMillis = savedAtMillis,
+      reason = if (connectivityMonitor?.currentlyValidated == false) {
+        SavedContentReason.Offline
+      } else {
+        SavedContentReason.RefreshUnavailable
+      },
+    )
+
+  private fun shutdownPairing(suppressReceipt: Boolean) {
     val session = pairingSession ?: return
+    session.commitReceipt.stop(suppressReceipt)
+    closePairingSession(session, suppressReceipt)
+  }
+
+  private fun closePairingSession(session: PairingSession?, suppressReceipt: Boolean) {
+    session ?: return
+    if (suppressReceipt) session.commitReceipt.stop(suppressReceipt = true)
+    if (pairingSession !== session) return
     pairingSession = null
-    // Marked before the socket is touched: if the bind is still in flight it will
-    // see this and close the server itself.
-    session.stopped = true
     val server = session.server ?: return
     // stop() joins the listener thread; never on the caller's (main) thread. Uses the
     // app-scoped IO scope because onCleared has already cancelled viewModelScope.
@@ -718,7 +956,24 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   private fun pairingActive(session: PairingSession): Boolean =
-    !session.stopped && pairingSession === session
+    session.commitReceipt.active() && pairingSession === session
+
+  /** Publishes the TV receipt only after NanoHTTPD has finished the phone's response write. */
+  private fun finishPairingResponse(session: PairingSession) {
+    val completion = session.commitReceipt.finishResponse() ?: return
+    if (pairingSession === session) {
+      completion.receipt?.let { _pairing.value = it }
+      if (completion.closeServer) {
+        pairingSession = null
+        if (completion.receipt == null) _pairing.value = PairingState.Idle
+      }
+    }
+    if (completion.closeServer) {
+      session.server?.let { server ->
+        persistenceScope.launch { runCatching { server.stop() } }
+      }
+    }
+  }
 
   private companion object {
     /**
@@ -784,6 +1039,10 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       metadataCacheKey = key
       detailsCache.clear()
       seasonCache.clear()
+      detailsLoadedAtMillis.clear()
+      seasonsLoadedAtMillis.clear()
+      _detailsSavedContent.value = null
+      _seasonSavedContent.value = null
     }
     return key?.let { clientFor(it) }
   }
@@ -859,6 +1118,11 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    */
   private fun loadRails(key: String, force: Boolean) {
     val sameKey = railsLoadedForKey == key
+    val savedAtBeforeRefresh = if (sameKey) {
+      _homeSavedContent.value?.savedAtMillis ?: railsLoadedAtMillis
+    } else {
+      null
+    }
     if (sameKey) {
       // Whatever is already in flight for this key produces exactly the data a refresh would.
       if (railsJob?.isActive == true) return
@@ -866,6 +1130,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     } else {
       railsJob?.cancel()
       railsLoadedAtMillis = null
+      _homeSavedContent.value = null
     }
     railsLoadedForKey = key
     // A page fetch for the rails we are about to replace would land on a row that no longer exists.
@@ -885,11 +1150,11 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       // Snapshots: everything below publishes into _homeRails as it goes, so the fallback copy has
       // to be the one from before this load started.
       val previous = (_homeRails.value as? LoadState.Ready)?.value.orEmpty()
-      val carriedPaging = _railPaging.value
       val loaded = LinkedHashMap<String, HomeRail>()
       val failed = mutableSetOf<String>()
       val failures = mutableListOf<Throwable>()
       var usedStaleFallback = false
+      val staleFallbackTitles = mutableSetOf<String>()
       // Every rail's paging state waits here until the emission that makes its row visible. The
       // asyncs below all run on this coroutine's (main) dispatcher and only suspend inside the
       // request, so these three collections are single-threaded despite the fan-out.
@@ -934,7 +1199,10 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
               failed += spec.title
               result.exceptionOrNull()?.let { failures += it }
             } else {
-              if (loadedPage.staleFallback) usedStaleFallback = true
+              if (loadedPage.staleFallback) {
+                usedStaleFallback = true
+                staleFallbackTitles += spec.title
+              }
               val page = loadedPage.value
               // The depth the row has reached, not the depth it had when this load started: rails
               // served from the cache can be paged into while the refresh behind them is still in
@@ -943,7 +1211,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
               val items = RailPaging.merge(page.items, railItemsOnScreen(spec.title))
               loaded[spec.title] = HomeRail(spec.title, items)
               pendingPaging[spec.title] =
-                RailPaging.afterFirstPage(page, items.size, carriedPaging[spec.title])
+                RailPaging.afterFirstPage(page, items.size, _railPaging.value[spec.title])
             }
             publishPartial()
           }
@@ -958,12 +1226,23 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
         // Nothing loaded and nothing to fall back on: the one case Home reports as an outright
         // failure.
         _homeRails.value = LoadState.Failed(message ?: "Couldn't load catalogs from TMDB.")
+        _homeSavedContent.value = null
         return@launch
       }
       // A rail that answered but is still held back by one above it never got its paging committed;
       // the completed load is where that stops being true.
       commitPaging()
       _homeRails.value = LoadState.Ready(assembled.rails)
+      val visibleTitles = assembled.rails.mapTo(mutableSetOf(), HomeRail::title)
+      val previousTitles = previous.mapTo(mutableSetOf(), HomeRail::title)
+      val showingSavedContent = SavedContentRefreshPolicy.homeUsesSavedContent(
+        visibleTitles = visibleTitles,
+        previousTitles = previousTitles,
+        failedTitles = failed,
+        staleFallbackTitles = staleFallbackTitles,
+      )
+      _homeSavedContent.value = savedContentProvenance(savedAtBeforeRefresh)
+        .takeIf { showingSavedContent }
       // Only mention a failure that actually left a gap; a rail still covered by the copy already
       // on screen needs no notice, just a retry on the next visit.
       _railsNotice.value = if (assembled.missingTitles.isEmpty()) null else message
@@ -1105,6 +1384,30 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
   /**
+   * Runs a complete viewer submission and remembers it locally. Debounced field changes and Retry
+   * continue to call [search] directly, so neither can manufacture history entries.
+   */
+  fun submitSearch(query: String) {
+    val normalized = SearchQuery.forRequest(query)
+    if (normalized.isNotEmpty()) {
+      // Capture ordering at the press boundary, before coroutine scheduling can overtake it. The
+      // process queue also lets this tiny edit finish if the viewer immediately leaves Search.
+      SearchHistoryWrites.enqueue { searchHistoryStore.record(normalized) }
+    }
+    search(normalized)
+  }
+
+  fun removeRecentSearch(query: String) {
+    val normalized = SearchQuery.forRequest(query)
+    if (normalized.isEmpty()) return
+    SearchHistoryWrites.enqueue { searchHistoryStore.remove(normalized) }
+  }
+
+  fun clearRecentSearches() {
+    SearchHistoryWrites.enqueue { searchHistoryStore.clear() }
+  }
+
+  /**
    * Runs [query] against TMDB, replacing whatever the last one produced.
    *
    * A newer query always wins: the previous fetch is cancelled, and even if it were already past
@@ -1113,18 +1416,22 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    * which query the state it is rendering belongs to.
    */
   fun search(query: String) {
+    val normalizedQuery = SearchQuery.forRequest(query)
     val key = synchronizeSearchCredential(tmdbApiKey.value)
     // The search field re-submits what it holds whenever its collector is re-armed (a key
     // arriving, a voice query seeding it), and the answer to a query already in hand or
     // already on its way is the same answer. A failure is not: Retry sends the same string
     // back through here and must actually retry.
-    if (searchRequests.canReuse(query, key) && _searchResults.value !is LoadState.Failed) return
+    if (
+      searchRequests.canReuse(normalizedQuery, key) &&
+      _searchResults.value !is LoadState.Failed
+    ) return
     searchJob?.cancel()
     searchPageJob?.cancel()
-    _searchQuery.value = query
+    _searchQuery.value = normalizedQuery
     _searchPaging.value = SearchPageState()
-    val request = searchRequests.begin(query, key)
-    if (query.isBlank()) {
+    val request = searchRequests.begin(normalizedQuery, key)
+    if (normalizedQuery.isBlank()) {
       _searchResults.value = LoadState.Ready(emptyList())
       return
     }
@@ -1137,7 +1444,7 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     }
     _searchResults.value = LoadState.Loading
     searchJob = viewModelScope.launch {
-      val page = catchingFailure { client.searchPage(query) }
+      val page = catchingFailure { client.searchPage(normalizedQuery) }
       if (!isActive || !ownsSearch(request)) return@launch
       page.onSuccess {
         _searchResults.value = LoadState.Ready(it.items)
@@ -1190,10 +1497,10 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    * in flight while the screen is still being built.
    */
   fun submitVoiceQuery(query: String) {
-    val cleaned = LaunchIntents.sanitize(query)
+    val cleaned = SearchQuery.forRequest(query)
     if (cleaned.isEmpty()) return
     _voiceQuery.value = cleaned
-    search(cleaned)
+    submitSearch(cleaned)
   }
 
   /** Called by the search field once it has taken [voiceQuery] into itself. */
@@ -1266,26 +1573,46 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
           liveCredential = tmdbApiKey.value,
         )
       ) return@launch
-      detailsCache.putLoad(key, loaded, System.currentTimeMillis())
+      val loadedAt = System.currentTimeMillis()
+      detailsCache.putLoad(key, loaded, loadedAt)
+      if (!loaded.staleFallback) detailsLoadedAtMillis[key] = loadedAt
       _heroLogoUrl.value = loaded.value.logoUrl
     }
   }
 
-  fun loadDetails(type: MediaType, tmdbId: Int) {
+  fun loadDetails(
+    type: MediaType,
+    tmdbId: Int,
+    preserveVisibleContent: Boolean = false,
+  ) {
     val client = metadataClient() ?: return
     val credentialOwner = metadataCacheKey
     val key = type to tmdbId
-    // Opening another title invalidates the details *and* the season list of the previous one.
+    val request = DetailsRequestKey(type, tmdbId)
+    val sameDetails = detailsKey == key && _detailsRequest.value == request
+    val visibleFallback = (_details.value as? LoadState.Ready)?.value
+      ?.takeIf { sameDetails && preserveVisibleContent }
+    // Opening another title invalidates the details *and* the season list of the previous one. A
+    // connectivity return for the title already on screen deliberately preserves both while its
+    // replacement is fetched, which keeps the selected episode and lazy-list anchors mounted.
     detailsJob?.cancel()
-    seasonJob?.cancel()
+    if (!sameDetails || !preserveVisibleContent) {
+      seasonJob?.cancel()
+      seasonKey = null
+      _seasonRequest.value = null
+      _seasonSavedContent.value = null
+      _episodes.value = LoadState.Ready(emptyList())
+    }
+    if (!sameDetails) _detailsSavedContent.value = null
     detailsKey = key
-    _detailsRequest.value = DetailsRequestKey(type, tmdbId)
-    seasonKey = null
-    _seasonRequest.value = null
+    _detailsRequest.value = request
     val cached = detailsCache.get(key, System.currentTimeMillis())
-    _details.value = if (cached == null) LoadState.Loading else LoadState.Ready(cached.value)
-    _episodes.value = LoadState.Ready(emptyList())
-    if (cached != null && !cached.stale) return
+    val fallback = cached?.value ?: visibleFallback
+    _details.value = fallback?.let { LoadState.Ready(it) } ?: LoadState.Loading
+    if (cached != null && !cached.stale) {
+      _detailsSavedContent.value = null
+      return
+    }
     detailsJob = viewModelScope.launch {
       val result = PerformanceTrace.suspendSection("details.load") {
         catchingFailure { client.detailsLoad(type, tmdbId) }
@@ -1301,13 +1628,40 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       ) return@launch
       val loaded = result.getOrNull()
       if (loaded != null) {
-        detailsCache.putLoad(key, loaded, System.currentTimeMillis())
+        val loadedAt = System.currentTimeMillis()
+        detailsCache.putLoad(key, loaded, loadedAt)
+        if (loaded.staleFallback) {
+          val savedAt = detailsLoadedAtMillis[key]
+            ?: _detailsSavedContent.value
+              ?.takeIf { it.request == request }
+              ?.provenance
+              ?.savedAtMillis
+          _detailsSavedContent.value = SavedDetailsContent(
+            request,
+            savedContentProvenance(savedAt),
+          )
+        } else {
+          detailsLoadedAtMillis[key] = loadedAt
+          _detailsSavedContent.value = null
+        }
         _details.value = LoadState.Ready(loaded.value)
         return@launch
       }
       // Nothing to fall back on is the only case the screen reports as a failure; a stale copy is
       // still the right thing to be looking at.
-      if (cached != null) return@launch
+      if (fallback != null) {
+        val savedAt = detailsLoadedAtMillis[key]
+          ?: _detailsSavedContent.value
+            ?.takeIf { it.request == request }
+            ?.provenance
+            ?.savedAtMillis
+        _detailsSavedContent.value = SavedDetailsContent(
+          request,
+          savedContentProvenance(savedAt),
+        )
+        return@launch
+      }
+      _detailsSavedContent.value = null
       _details.value = LoadState.Failed(
         NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, result.exceptionOrNull()),
       )
@@ -1315,7 +1669,11 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   /** An episode list, on the same terms as [loadDetails]: cached copy first, refresh in place. */
-  fun loadSeason(tmdbId: Int, seasonNumber: Int) {
+  fun loadSeason(
+    tmdbId: Int,
+    seasonNumber: Int,
+    preserveVisibleContent: Boolean = false,
+  ) {
     val client = metadataClient() ?: return
     val credentialOwner = metadataCacheKey
     // The details screen can ask for a season while it is still showing the previous title (its
@@ -1323,12 +1681,21 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
     val requestedDetails = detailsKey
     if (requestedDetails != null && requestedDetails.second != tmdbId) return
     val key = tmdbId to seasonNumber
+    val request = SeasonRequestKey(tmdbId, seasonNumber)
+    val sameSeason = seasonKey == key && _seasonRequest.value == request
+    val visibleFallback = (_episodes.value as? LoadState.Ready)?.value
+      ?.takeIf { sameSeason && preserveVisibleContent }
     seasonJob?.cancel()
+    if (!sameSeason) _seasonSavedContent.value = null
     seasonKey = key
-    _seasonRequest.value = SeasonRequestKey(tmdbId, seasonNumber)
+    _seasonRequest.value = request
     val cached = seasonCache.get(key, System.currentTimeMillis())
-    _episodes.value = if (cached == null) LoadState.Loading else LoadState.Ready(cached.value)
-    if (cached != null && !cached.stale) return
+    val fallback = cached?.value ?: visibleFallback
+    _episodes.value = fallback?.let { LoadState.Ready(it) } ?: LoadState.Loading
+    if (cached != null && !cached.stale) {
+      _seasonSavedContent.value = null
+      return
+    }
     seasonJob = viewModelScope.launch {
       val result = PerformanceTrace.suspendSection("season.load") {
         catchingFailure { client.seasonLoad(tmdbId, seasonNumber) }
@@ -1344,11 +1711,38 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       ) return@launch
       val loaded = result.getOrNull()
       if (loaded != null) {
-        seasonCache.putLoad(key, loaded, System.currentTimeMillis())
+        val loadedAt = System.currentTimeMillis()
+        seasonCache.putLoad(key, loaded, loadedAt)
+        if (loaded.staleFallback) {
+          val savedAt = seasonsLoadedAtMillis[key]
+            ?: _seasonSavedContent.value
+              ?.takeIf { it.request == request }
+              ?.provenance
+              ?.savedAtMillis
+          _seasonSavedContent.value = SavedSeasonContent(
+            request,
+            savedContentProvenance(savedAt),
+          )
+        } else {
+          seasonsLoadedAtMillis[key] = loadedAt
+          _seasonSavedContent.value = null
+        }
         _episodes.value = LoadState.Ready(loaded.value)
         return@launch
       }
-      if (cached != null) return@launch
+      if (fallback != null) {
+        val savedAt = seasonsLoadedAtMillis[key]
+          ?: _seasonSavedContent.value
+            ?.takeIf { it.request == request }
+            ?.provenance
+            ?.savedAtMillis
+        _seasonSavedContent.value = SavedSeasonContent(
+          request,
+          savedContentProvenance(savedAt),
+        )
+        return@launch
+      }
+      _seasonSavedContent.value = null
       _episodes.value = LoadState.Failed(
         NetworkErrorMessage.forThrowable(NetworkSource.Tmdb, result.exceptionOrNull()),
       )
@@ -1438,9 +1832,11 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
 
   /** "Mark watched" from the Continue Watching row: keeps the record, drops the resume point. */
   fun markWatched(entry: WatchEntry) {
+    val watchedAtMs = System.currentTimeMillis()
+    val pendingMutation = PersistenceMutationClock.next()
     persistenceScope.launch {
       runCatching {
-        watchState.markWatched(entry.key, System.currentTimeMillis())
+        watchState.markWatched(entry.key, watchedAtMs, pendingMutation)
         WatchNextSync.publish(getApplication(), force = true)
       }
     }
@@ -1452,9 +1848,10 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    */
   fun forgetWatchEntry(entry: WatchEntry) {
     val removedAtMs = System.currentTimeMillis()
+    val pendingMutation = PersistenceMutationClock.next()
     persistenceScope.launch {
       runCatching {
-        watchState.remove(entry.key, removedAtMs)
+        watchState.remove(entry.key, removedAtMs, pendingMutation)
         WatchNextSync.publish(getApplication(), force = true)
       }
     }
@@ -1478,29 +1875,19 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
   /** Appends an addon and persists immediately; see [AddonList.added] for what is rejected. */
   fun addAddon(
     rawUrl: String,
-    onResult: (SettingsMutationResult) -> Unit = {},
-  ) = mutateSettings(onResult) {
-    val current = settings.addonManifestUrls.first()
-    val next = AddonList.added(current, rawUrl)
-    if (next == current) return@mutateSettings false
-    settings.setAddonManifestUrls(next)
-    true
+  ) = mutateSettings(SettingsMutationRequest.AddAddon(rawUrl)) {
+    settings.updateAddonManifestUrls { current -> AddonList.added(current, rawUrl) }
   }
 
   /** Reorders addon priority and persists immediately, just like add and remove. */
   fun moveAddon(
     url: String,
     direction: Int,
-    onResult: (SettingsMutationResult) -> Unit = {},
-  ) = mutateSettings(onResult) {
-    val current = settings.addonManifestUrls.first()
+  ) = mutateSettings(SettingsMutationRequest.MoveAddon(url, direction)) {
     // Resolve the row's current position only after taking settingsMutationMutex. Compose can
     // enqueue several D-pad presses before its collected list recomposes; captured indices would
     // then reorder whichever addon happened to move into that old slot.
-    val next = AddonList.moved(current, url, direction)
-    if (next == current) return@mutateSettings false
-    settings.setAddonManifestUrls(next)
-    true
+    settings.updateAddonManifestUrls { current -> AddonList.moved(current, url, direction) }
   }
 
   /**
@@ -1513,76 +1900,66 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    */
   fun removeAddon(
     url: String,
-    onResult: (SettingsMutationResult) -> Unit = {},
-  ) = mutateSettings(onResult) {
-    val current = settings.addonManifestUrls.first()
-    val next = AddonList.removed(current, url)
-    if (next == current) return@mutateSettings false
-    settings.setAddonManifestUrls(next)
-    true
+  ) = mutateSettings(SettingsMutationRequest.RemoveAddon(url)) {
+    settings.updateAddonManifestUrls { current -> AddonList.removed(current, url) }
   }
 
   /** The explicit clear the blank-save guard points at. */
-  fun clearTmdbKey(onResult: (SettingsMutationResult) -> Unit = {}) =
-    mutateSettings(onResult) {
+  fun clearTmdbKey() =
+    mutateSettings(SettingsMutationRequest.ClearTmdbKey) {
       if (settings.tmdbApiKey.first().isBlank()) return@mutateSettings false
       settings.setTmdbApiKey("")
       true
     }
 
   private fun mutateSettings(
-    onResult: (SettingsMutationResult) -> Unit,
+    request: SettingsMutationRequest,
     mutation: suspend () -> Boolean,
-  ) {
-    viewModelScope.launch {
+  ): Long? {
+    val requestId = settingsMutationTracker.begin(request) ?: return null
+    persistenceScope.launch {
       val result = runCatching {
         settingsMutationMutex.withLock {
           if (mutation()) SettingsMutationResult.Changed else SettingsMutationResult.Unchanged
         }
       }.getOrElse { SettingsMutationResult.Failed }
-      onResult(result)
+      settingsMutationTracker.complete(requestId, result)
     }
+    return requestId
   }
 
   fun savePlaybackLanguages(
     audioLanguage: String,
     subtitleLanguage: String,
-    onResult: (PlayerPrefsMutationResult) -> Unit = {},
-  ) = mutatePlayerPrefs(onResult) {
+  ) = mutatePlayerPrefs(SettingsMutationRequest.PlaybackLanguages(audioLanguage, subtitleLanguage)) {
     playerPrefsStore.setLanguages(audioLanguage, subtitleLanguage)
   }
 
   fun setPlaybackSubtitleSize(
     storageName: String,
-    onResult: (PlayerPrefsMutationResult) -> Unit = {},
-  ) = mutatePlayerPrefs(onResult) {
+  ) = mutatePlayerPrefs(SettingsMutationRequest.PlaybackSubtitleSize(storageName)) {
     playerPrefsStore.setSubtitleSize(storageName)
   }
 
   fun setPlaybackAudioOutput(
     storageName: String,
-    onResult: (PlayerPrefsMutationResult) -> Unit = {},
-  ) = mutatePlayerPrefs(onResult) {
+  ) = mutatePlayerPrefs(SettingsMutationRequest.PlaybackAudioOutput(storageName)) {
     playerPrefsStore.setAudioOutput(storageName)
   }
 
   fun setAutoPlayNext(
     enabled: Boolean,
-    onResult: (PlayerPrefsMutationResult) -> Unit = {},
-  ) = mutatePlayerPrefs(onResult) {
+  ) = mutatePlayerPrefs(SettingsMutationRequest.AutoPlayNext(enabled)) {
     playerPrefsStore.setAutoPlayNext(enabled)
   }
 
   fun setUpNextCountdownSeconds(
     seconds: Int,
-    onResult: (PlayerPrefsMutationResult) -> Unit = {},
-  ) = mutatePlayerPrefs(onResult) {
+  ) = mutatePlayerPrefs(SettingsMutationRequest.UpNextCountdown(seconds)) {
     playerPrefsStore.setUpNextCountdownSeconds(seconds)
   }
 
-  fun resetPlaybackPreferences(
-    onResult: (PlayerPrefsMutationResult) -> Unit = {},
-  ) = mutatePlayerPrefs(onResult) {
+  fun resetPlaybackPreferences() = mutatePlayerPrefs(SettingsMutationRequest.ResetPlayback) {
     playerPrefsStore.resetPlaybackPreferences()
   }
 
@@ -1592,30 +1969,40 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
    * second D-pad press from computing against a StateFlow emission that has not reached Compose yet.
    */
   private fun mutatePlayerPrefs(
-    onResult: (PlayerPrefsMutationResult) -> Unit,
+    request: SettingsMutationRequest,
     mutation: suspend () -> Unit,
-  ) {
-    viewModelScope.launch {
-      onResult(mutatePlayerPrefsNow(mutation))
+  ): Long? {
+    val requestId = settingsMutationTracker.begin(request) ?: return null
+    // Enqueue synchronously at the call boundary. Launching first would let coroutine scheduling
+    // reorder a later Settings press or a player-side choice ahead of this one.
+    val pending = PlayerPreferenceWrites.enqueueResult { mutatePlayerPrefsNow(mutation) }
+    persistenceScope.launch {
+      val result = pending.await().getOrElse {
+        PlayerPrefsMutationResult(SettingsMutationResult.Failed)
+      }
+      settingsMutationTracker.complete(requestId, result.outcome, result.prefs)
     }
+    return requestId
+  }
+
+  fun consumeSettingsMutation(requestId: Long) {
+    settingsMutationTracker.consume(requestId)
   }
 
   private suspend fun mutatePlayerPrefsNow(
     mutation: suspend () -> Unit,
   ): PlayerPrefsMutationResult = try {
-    playerPrefsMutationMutex.withLock {
-      val before = playerPrefsStore.get()
-      mutation()
-      val after = playerPrefsStore.get()
-      PlayerPrefsMutationResult(
-        outcome = if (after == before) {
-          SettingsMutationResult.Unchanged
-        } else {
-          SettingsMutationResult.Changed
-        },
-        prefs = after,
-      )
-    }
+    val before = playerPrefsStore.get()
+    mutation()
+    val after = playerPrefsStore.get()
+    PlayerPrefsMutationResult(
+      outcome = if (after == before) {
+        SettingsMutationResult.Unchanged
+      } else {
+        SettingsMutationResult.Changed
+      },
+      prefs = after,
+    )
   } catch (cancelled: CancellationException) {
     throw cancelled
   } catch (_: Throwable) {
@@ -1670,35 +2057,13 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
       submittedSubtitleLanguage = subtitleLanguage,
     )
     _settingsSaveOperation.value = initial
-    settingsSaveJob = viewModelScope.launch {
+    settingsSaveJob = persistenceScope.launch {
       var operation = initial
       var persisted = false
+      var playbackConfirmed = !initial.savingPlaybackLanguages
+      var confirmedPlayerPrefs: PlayerPrefs? = null
       try {
         withTimeout(SETTINGS_SAVE_TIMEOUT_MS) {
-          if (operation.savingPlaybackLanguages) {
-            val playbackResult = mutatePlayerPrefsNow {
-              playerPrefsStore.setLanguages(audioLanguage!!, subtitleLanguage!!)
-            }
-            if (playbackResult.outcome == SettingsMutationResult.Failed) {
-              publishSettingsSave(
-                operation.copy(
-                  savingPlaybackLanguages = false,
-                  update = SettingsSaveUpdate.Failed(
-                    getApplication<Application>().getString(
-                      R.string.settings_save_playback_languages_failed,
-                    ),
-                  ),
-                ),
-              )
-              return@withTimeout
-            }
-            operation = operation.copy(
-              savingPlaybackLanguages = false,
-              playerPrefs = playbackResult.prefs,
-            )
-            publishSettingsSave(operation)
-          }
-
           val resolved = settingsMutationMutex.withLock {
             // Add/remove/reorder persist immediately. Read the stored state inside the same lock
             // instead of accepting a compositional snapshot: a rapid Save after a list edit must
@@ -1707,16 +2072,61 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
             // read succeeded at all - a degraded read presents as empty, and a Save built on that
             // emptiness used to erase the stored key and addon list.
             val stored = settings.storedSnapshot()
-            SettingsSaveGuard.resolve(
+            val candidate = SettingsSaveGuard.resolve(
               SettingsDraft(tmdbKey, stored.addonUrls, subtitlesBaseUrl),
               stored,
-            ).also { result -> settings.persist(result) }
+            )
+            // If the watchdog expires after DataStore begins its atomic edit, cancellation cannot
+            // tell us whether the bytes landed. Finish that one edit and set the receipt flags
+            // inside the same NonCancellable block so every later message describes a known state.
+            withContext(NonCancellable) {
+              settings.persist(candidate)
+              persisted = true
+              if (candidate.tmdbKey.isNotBlank()) {
+                viewModelScope.launch { loadRails(candidate.tmdbKey, force = true) }
+              }
+            }
+            candidate
           }
-          persisted = true
-          // Persisting the key is what makes Home load its rails, so start that load here, with the
-          // key we just wrote (the exposed flow has not caught up yet). loadRails de-dupes it
-          // against the load Home asks for when it next composes, so the save produces exactly one.
-          if (resolved.tmdbKey.isNotBlank()) loadRails(resolved.tmdbKey, force = true)
+
+          // Player preferences live in a second DataStore. They cannot share the configuration's
+          // atomic edit, so commit them second and represent that boundary honestly. A retry is
+          // idempotent, while pretending the first store also failed sends the user back to fields
+          // that are already durable.
+          if (operation.savingPlaybackLanguages) {
+            val playbackResult = withContext(NonCancellable) {
+              PlayerPreferenceWrites.enqueueResult {
+                mutatePlayerPrefsNow {
+                  playerPrefsStore.setLanguages(audioLanguage!!, subtitleLanguage!!)
+                }
+              }.await().getOrElse {
+                PlayerPrefsMutationResult(SettingsMutationResult.Failed)
+              }.also { result ->
+                if (result.outcome != SettingsMutationResult.Failed) {
+                  playbackConfirmed = true
+                  confirmedPlayerPrefs = result.prefs
+                }
+              }
+            }
+            operation = operation.copy(
+              savingPlaybackLanguages = false,
+              playerPrefs = confirmedPlayerPrefs,
+            )
+            if (playbackResult.outcome == SettingsMutationResult.Failed) {
+              publishSettingsSave(
+                operation.copy(
+                  update = SettingsSaveUpdate.Partial(
+                    getApplication<Application>().getString(
+                      R.string.settings_save_playback_languages_failed,
+                    ),
+                  ),
+                ),
+              )
+              return@withTimeout
+            }
+            publishSettingsSave(operation)
+          }
+
           val kept = SettingsSaveGuard.keptNotice(resolved)
           operation = operation.copy(
             update = SettingsSaveUpdate.Persisted(
@@ -1737,33 +2147,50 @@ class TvAppViewModel(application: Application) : AndroidViewModel(application) {
           )
         }
       } catch (_: TimeoutCancellationException) {
-        val message = if (persisted) {
-          getApplication<Application>().getString(R.string.settings_save_watchdog_persisted)
-        } else {
-          getApplication<Application>().getString(
-            R.string.settings_save_watchdog_unconfirmed,
-            getApplication<Application>().getString(R.string.app_name),
+        val update = when {
+          !persisted -> SettingsSaveUpdate.Failed(
+            getApplication<Application>().getString(
+              R.string.settings_save_watchdog_unconfirmed,
+              getApplication<Application>().getString(R.string.app_name),
+            ),
+          )
+          !playbackConfirmed -> SettingsSaveUpdate.Partial(
+            getApplication<Application>().getString(
+              R.string.settings_save_playback_languages_failed,
+            ),
+          )
+          else -> SettingsSaveUpdate.Complete(
+            getApplication<Application>().getString(R.string.settings_save_watchdog_persisted),
           )
         }
         publishSettingsSave(
           operation.copy(
             savingPlaybackLanguages = false,
-            update = if (persisted) {
-              SettingsSaveUpdate.Complete(message)
-            } else {
-              SettingsSaveUpdate.Failed(message)
-            },
+            playerPrefs = confirmedPlayerPrefs,
+            update = update,
           ),
         )
       } catch (cancelled: CancellationException) {
         throw cancelled
       } catch (_: Throwable) {
+        val update = when {
+          !persisted -> SettingsSaveUpdate.Failed(
+            "Couldn't save settings. Check the TV's available storage and try again.",
+          )
+          !playbackConfirmed -> SettingsSaveUpdate.Partial(
+            getApplication<Application>().getString(
+              R.string.settings_save_playback_languages_failed,
+            ),
+          )
+          else -> SettingsSaveUpdate.Complete(
+            getApplication<Application>().getString(R.string.settings_save_probe_failed),
+          )
+        }
         publishSettingsSave(
           operation.copy(
             savingPlaybackLanguages = false,
-            update = SettingsSaveUpdate.Failed(
-              "Couldn't save settings. Check the TV's available storage and try again.",
-            ),
+            playerPrefs = confirmedPlayerPrefs,
+            update = update,
           ),
         )
       }

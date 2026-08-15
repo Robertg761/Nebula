@@ -1,6 +1,7 @@
 package com.stremioshell.host.tv.data
 
 import com.stremioshell.host.tv.data.addon.AddonClient
+import com.stremioshell.host.tv.data.addon.MAX_ADDON_STREAM_ROWS
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
@@ -61,6 +62,22 @@ class AddonClientTest {
 
     val streams = client.movieStreams("https://comet.example/cfg/manifest.json", "tt1")
     assertEquals(listOf("Good"), streams.map { it.label })
+  }
+
+  @Test
+  fun `syntactically forbidden playback urls are dropped before stream merging`() = runBlocking {
+    val client = AddonClient(fetcher = {
+      """{"streams":[
+        {"name":"Local file 4K","url":"file:///data/local/movie.mkv"},
+        {"name":"Private host 4K","url":"https://192.168.1.10/movie.mkv"},
+        {"name":"Cleartext 4K","url":"http://cdn.example/movie.mkv"},
+        {"name":"Playable 1080p","url":"HTTPS://CDN.EXAMPLE:443/movie.mkv"}]}"""
+    })
+
+    val streams = client.movieStreams("https://comet.example/manifest.json", "tt1")
+
+    assertEquals(listOf("Playable 1080p"), streams.map { it.label })
+    assertEquals("https://cdn.example/movie.mkv", streams.single().url)
   }
 
   @Test
@@ -140,6 +157,57 @@ class AddonClientTest {
     assertEquals("video/x-matroska", hints.proxyHeaders?.response?.get("Content-Type"))
     assertEquals(true, hints.notWebReady)
     assertEquals(listOf("CA", "US"), hints.countryWhitelist)
+  }
+
+  @Test
+  fun `oversized stream behavior fields and collections are bounded at ingestion`() = runBlocking {
+    val oversized = "x".repeat(20_000)
+    val countries = (0 until 100).joinToString(",") { "\"CA\"" }
+    val client = AddonClient(fetcher = {
+      """
+        {"streams":[{
+          "name":"$oversized",
+          "url":"https://cdn.example/video.mkv",
+          "subtitles":[{"url":"https://subs.example/$oversized.srt"}],
+          "behaviorHints":{
+            "bingeGroup":"$oversized",
+            "filename":"$oversized",
+            "videoHash":"$oversized",
+            "proxyHeaders":{
+              "request":{"Authorization":"$oversized","Accept":"video/*"},
+              "response":{"X-Large":"$oversized"}
+            },
+            "countryWhitelist":[$countries]
+          }
+        }]}
+      """.trimIndent()
+    })
+
+    val stream = client.movieStreams("https://comet.example/manifest.json", "tt1").single()
+    val hints = requireNotNull(stream.behaviorHints)
+
+    assertEquals(256, stream.name?.length)
+    assertEquals(emptyList<Any>(), stream.subtitles)
+    assertEquals(null, hints.bingeGroup)
+    assertEquals(1024, hints.filename?.length)
+    assertEquals(null, hints.videoHash)
+    assertEquals(mapOf("Accept" to "video/*"), hints.proxyHeaders?.request)
+    assertEquals(emptyMap<String, String>(), hints.proxyHeaders?.response)
+    assertEquals(32, hints.countryWhitelist.size)
+  }
+
+  @Test
+  fun `an addon response cannot retain more than the safe stream row limit`() = runBlocking {
+    val rows = (0 until MAX_ADDON_STREAM_ROWS + 25).joinToString(",") { index ->
+      """{"name":"Stream $index","url":"https://cdn.example/$index.mkv"}"""
+    }
+    val client = AddonClient(fetcher = { """{"streams":[$rows]}""" })
+
+    val streams = client.movieStreams("https://comet.example/manifest.json", "tt1")
+
+    assertEquals(MAX_ADDON_STREAM_ROWS, streams.size)
+    assertEquals("Stream 0", streams.first().name)
+    assertEquals("Stream ${MAX_ADDON_STREAM_ROWS - 1}", streams.last().name)
   }
 
   @Test

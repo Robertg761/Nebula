@@ -34,6 +34,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -84,6 +85,7 @@ import com.stremioshell.host.tv.data.tmdb.MediaItem
 import com.stremioshell.host.tv.data.tmdb.MediaType
 import com.stremioshell.host.tv.data.tmdb.SearchFilter
 import com.stremioshell.host.tv.data.tmdb.SearchPaging
+import com.stremioshell.host.tv.search.SearchQuery
 import com.stremioshell.host.tv.ui.theme.NebulaDimens
 import com.stremioshell.host.tv.ui.theme.NebulaIcon
 import com.stremioshell.host.tv.ui.theme.NebulaPalette
@@ -119,6 +121,15 @@ private val GRID_ROW_GAP = 28.dp
 private val GRID_TOP_SLACK = 24.dp
 private val GRID_BOTTOM_SLACK = 40.dp
 
+/** Chooses the stable neighbour that should receive focus after one history row disappears. */
+internal object RecentSearchFocus {
+  fun afterRemoval(entries: List<String>, removed: String): String? {
+    val removedIndex = entries.indexOfFirst { it.equals(removed, ignoreCase = true) }
+    if (removedIndex < 0) return entries.firstOrNull()
+    return entries.getOrNull(removedIndex + 1) ?: entries.getOrNull(removedIndex - 1)
+  }
+}
+
 @OptIn(FlowPreview::class, ExperimentalComposeUiApi::class)
 @Composable
 fun SearchScreen(
@@ -133,6 +144,7 @@ fun SearchScreen(
   val paging by viewModel.searchPaging.collectAsStateWithLifecycle()
   val apiKey by viewModel.tmdbApiKey.collectAsStateWithLifecycle()
   val voiceQuery by viewModel.voiceQuery.collectAsStateWithLifecycle()
+  val recentSearches by viewModel.recentSearches.collectAsStateWithLifecycle()
   // Membership only, the same flow the Details toggle reads: saving from here and saving from
   // there have to be the same act, or a title could be in My List twice over.
   val watchlistKeys by viewModel.watchlistKeys.collectAsStateWithLifecycle()
@@ -140,6 +152,10 @@ fun SearchScreen(
   // The card a long press opened the options for. Unlike Home's rows, toggling here never removes
   // the card the viewer is standing on, so there is no focus to re-aim afterwards.
   var options by remember { mutableStateOf<MediaItem?>(null) }
+  // Saveable because Details disposes this composable. The lazy grid restores its scroll state,
+  // but its focusRestorer target is destroyed with the subtree, so the card identity is the part
+  // that has to cross the route boundary explicitly.
+  var returnFocusKey by rememberSaveable { mutableStateOf<String?>(null) }
 
   // Seeded so a voice launch shows its words immediately; without it the field starts blank and
   // the debounce below would fire search("") over the results the ViewModel already has.
@@ -150,6 +166,8 @@ fun SearchScreen(
   var resultFocusTick by remember { mutableIntStateOf(0) }
   var pendingResultFocusQuery by remember { mutableStateOf<String?>(null) }
   var voiceStatusFocusPending by remember { mutableStateOf(false) }
+  var recentFocusTick by remember { mutableIntStateOf(0) }
+  var pendingRecentFocusQuery by remember { mutableStateOf<String?>(null) }
   LaunchedEffect(voiceQuery) {
     val spoken = voiceQuery ?: return@LaunchedEffect
     query = spoken
@@ -164,10 +182,13 @@ fun SearchScreen(
 
   val queryField = rememberInitialFocusTarget()
   val filterRowFocus = rememberInitialFocusTarget()
+  val firstRecent = rememberInitialFocusTarget()
+  val recentAfterRemoval = rememberInitialFocusTarget()
   // The first result card. An InitialFocusTarget rather than a bare FocusRequester because two
   // different arrivals want it: D-pad down out of the chips (which asks by requester) and a spoken
   // query (which has to wait for the node to be placed).
   val firstResult = rememberInitialFocusTarget()
+  val returnResult = rememberInitialFocusTarget()
   val statusFocus = rememberInitialFocusTarget()
   // The grid as a whole, so stepping back down into it can return to the card the viewer was on
   // rather than rewinding to the first result every time they touch the chips.
@@ -223,6 +244,34 @@ fun SearchScreen(
   val ui = remember(query, requested, results, filter) {
     SearchPresentation.resolve(typed = query, requested = requested, state = results, filter = filter)
   }
+  val pendingRecentQuery = pendingRecentFocusQuery
+  val pendingRecentExists = recentSearches.any { it == pendingRecentQuery }
+  RequestInitialFocus(
+    target = recentAfterRemoval,
+    key = "recent:$recentFocusTick:$pendingRecentQuery",
+    label = "Recent search after removal",
+    enabled = ui is SearchUi.Idle && pendingRecentQuery != null && pendingRecentExists,
+  )
+  LaunchedEffect(recentAfterRemoval.focused) {
+    if (recentAfterRemoval.focused) pendingRecentFocusQuery = null
+  }
+  LaunchedEffect(ui) {
+    // A delayed history write must not replay an old removal focus intent after the viewer starts
+    // typing or submits a recent query and the idle content leaves composition.
+    if (ui !is SearchUi.Idle) pendingRecentFocusQuery = null
+  }
+  val returnResultExists = (ui as? SearchUi.Results)?.items?.any {
+    it.key == returnFocusKey
+  } == true
+  RequestInitialFocus(
+    target = returnResult,
+    key = "return:$returnFocusKey",
+    label = "Search result after Details",
+    enabled = returnFocusKey != null && returnResultExists,
+  )
+  LaunchedEffect(returnResult.focused) {
+    if (returnResult.focused) returnFocusKey = null
+  }
   val pendingFocusQuery = pendingResultFocusQuery
   val focusIntentMatchesField = pendingFocusQuery != null && query.trim() == pendingFocusQuery
   val focusIntentMatchesRequest =
@@ -244,18 +293,19 @@ fun SearchScreen(
     voiceStatusFocusPending = false
   }
 
-  // Both the chips' Down key and the keyboard's Search action want the same thing: the grid, on the
-  // card the viewer was last on if there is one. restoreFocusedChild reports whether it had
-  // anything to restore and requestFocus throws when nothing is attached, so both need catching
-  // before the key is claimed - with no grid at all this does nothing and consumes nothing.
+  // The chips' Down key enters whichever content is actually mounted: recent searches while idle,
+  // otherwise the grid on the card the viewer last used. RequestFocus throws when a target is not
+  // attached, so each branch is caught before the key is claimed.
   //
   // What is deliberately not consulted is firstResult.focused. onFocusChanged runs after
   // requestFocus returns, batched to the end of the frame, so reading it here reports the state
   // from before the request: the chips' Down key was left unconsumed and the default focus search
   // moved a second time, landing two rows into the grid instead of on its first card. A dispatched
   // request is the answer, the same conclusion `SettingsFocusJumper.leaveTextField` reached.
-  val focusResults: () -> Boolean = remember {
-    {
+  val focusBelowFilters: () -> Boolean = {
+    if (ui is SearchUi.Idle && recentSearches.isNotEmpty()) {
+      runCatching { firstRecent.requester.requestFocus() }.isSuccess
+    } else {
       runCatching { resultsFocus.restoreFocusedChild() }.getOrDefault(false) ||
         runCatching { firstResult.requester.requestFocus() }.isSuccess
     }
@@ -272,7 +322,7 @@ fun SearchScreen(
   RequestInitialFocus(
     target = statusFocus,
     key = "status:$resultFocusTick:$pendingFocusQuery:$statusKind",
-    label = "Search status after voice query",
+    label = "Search status after submitted query",
     enabled = voiceStatusReady,
   )
   LaunchedEffect(ui, pendingFocusQuery, query, requested) {
@@ -314,8 +364,40 @@ fun SearchScreen(
       }
   }
 
+  var gridRequest by rememberSaveable { mutableStateOf(requested) }
   LaunchedEffect(requested) {
-    if (requested.isNotBlank()) gridState.scrollToItem(0)
+    if (requested.isNotBlank() && requested != gridRequest) gridState.scrollToItem(0)
+    gridRequest = requested
+  }
+
+  /**
+   * The only UI path that records history. A recent selection asks the loading/status anchor to
+   * take focus because its own row is about to disappear; the field remains a safe handoff while
+   * that anchor is being placed.
+   */
+  val submitQuery: (String, Boolean) -> Unit = { raw, focusStatusWhileLoading ->
+    val submitted = SearchQuery.forRequest(raw)
+    pendingRecentFocusQuery = null
+    if (focusStatusWhileLoading) runCatching { queryField.requester.requestFocus() }
+    query = SearchQuery.forField(submitted)
+    viewModel.submitSearch(submitted)
+    resultFocusTick++
+    pendingResultFocusQuery = submitted.takeIf { it.isNotEmpty() }
+    voiceStatusFocusPending = focusStatusWhileLoading && submitted.isNotEmpty()
+    keyboard?.hide()
+  }
+
+  val removeRecent: (String) -> Unit = { removed ->
+    val next = RecentSearchFocus.afterRemoval(recentSearches, removed)
+    if (next == null) {
+      pendingRecentFocusQuery = null
+      // The last row is about to leave composition. Hand focus to the always-mounted field first.
+      runCatching { queryField.requester.requestFocus() }
+    } else {
+      pendingRecentFocusQuery = next
+      recentFocusTick++
+    }
+    viewModel.removeRecentSearch(removed)
   }
 
   // Edge padding is carried by the children rather than by this column, so the results grid can pad
@@ -337,15 +419,10 @@ fun SearchScreen(
         value = query,
         onValueChange = {
           cancelResultFocusIntent()
-          query = it
+          pendingRecentFocusQuery = null
+          query = SearchQuery.forField(it)
         },
-        onSearch = {
-          viewModel.search(query)
-          resultFocusTick++
-          pendingResultFocusQuery = query.trim().takeIf { it.isNotEmpty() }
-          voiceStatusFocusPending = false
-          keyboard?.hide()
-        },
+        onSearch = { submitQuery(query, false) },
         modifier = Modifier
           .weight(1f)
           .padding(start = NebulaSpace.xl)
@@ -373,7 +450,7 @@ fun SearchScreen(
           filterName = it.name
         },
         firstChipFocus = filterRowFocus,
-        focusResults = focusResults,
+        focusBelow = focusBelowFilters,
       )
       // Always mounted, never conditionally composed: a control that removes itself on click is
       // exactly how focus gets stranded. It hands focus back to the field on the way out, which is
@@ -382,6 +459,7 @@ fun SearchScreen(
         text = stringResource(R.string.action_clear),
         onClick = {
           cancelResultFocusIntent()
+          pendingRecentFocusQuery = null
           query = ""
           runCatching { queryField.requester.requestFocus() }
         },
@@ -412,10 +490,27 @@ fun SearchScreen(
       // word 200dp lower down. The hint is also the only place the app admits the mic key works
       // here - material-icons-core has no microphone glyph, and one vector is not worth pulling in
       // material-icons-extended for.
-      SearchUi.Idle -> CenteredEmptyState(
-        title = stringResource(R.string.search_idle_title),
-        hint = stringResource(R.string.search_idle_hint),
-      )
+      SearchUi.Idle -> if (recentSearches.isEmpty()) {
+        CenteredEmptyState(
+          title = stringResource(R.string.search_idle_title),
+          hint = stringResource(R.string.search_idle_hint),
+        )
+      } else {
+        RecentSearches(
+          entries = recentSearches,
+          firstFocus = firstRecent,
+          focusAfterRemoval = recentAfterRemoval,
+          focusAfterRemovalQuery = pendingRecentFocusQuery,
+          onSearch = { submitQuery(it, true) },
+          onRemove = removeRecent,
+          onClear = {
+            pendingRecentFocusQuery = null
+            // Clear history removes this whole subtree, so move focus before starting the write.
+            runCatching { queryField.requester.requestFocus() }
+            viewModel.clearRecentSearches()
+          },
+        )
+      }
       // Not a centred spinner: the first search of a session used to hard-cut from a centred prompt
       // to a centred ring to a top-anchored grid, three layouts in the same region inside 400ms.
       SearchUi.Searching -> SearchStatusAnchor(
@@ -503,7 +598,10 @@ fun SearchScreen(
             Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
               MediaCard(
                 item = item,
-                onClick = { onItemClick(item.type, item.tmdbId) },
+                onClick = {
+                  returnFocusKey = item.key
+                  onItemClick(item.type, item.tmdbId)
+                },
                 // Two same-named remakes are one of the things search is for, so the year and the
                 // kind of title ride under every card. Built once per result rather than per
                 // recomposition: a focus move across the grid recomposes every card it passes, and
@@ -520,7 +618,9 @@ fun SearchScreen(
                 onLongClick = { options = item },
                 // Landing spot for D-pad down out of the chips and for a spoken query; up from the
                 // first row falls back to the default focus search, which finds the chips.
-                modifier = if (index == 0) Modifier.initialFocusTarget(firstResult) else Modifier,
+                modifier = Modifier
+                  .initialFocusTarget(if (index == 0) firstResult else null)
+                  .initialFocusTarget(if (item.key == returnFocusKey) returnResult else null),
               )
             }
           }
@@ -604,6 +704,82 @@ fun SearchScreen(
       ),
       onDismiss = { options = null },
     )
+  }
+}
+
+/** Idle-state history with explicit removal controls and stable targets for every disappearing row. */
+@Composable
+private fun RecentSearches(
+  entries: List<String>,
+  firstFocus: InitialFocusTarget,
+  focusAfterRemoval: InitialFocusTarget,
+  focusAfterRemovalQuery: String?,
+  onSearch: (String) -> Unit,
+  onRemove: (String) -> Unit,
+  onClear: () -> Unit,
+) {
+  val removeLabel = stringResource(R.string.search_remove_recent)
+  Column(
+    verticalArrangement = Arrangement.spacedBy(NebulaSpace.sm),
+    modifier = Modifier
+      .fillMaxWidth()
+      .padding(horizontal = NebulaDimens.ScreenEdge)
+      .padding(top = NebulaSpace.md, bottom = NebulaSpace.xl)
+      .widthIn(max = 760.dp),
+  ) {
+    Row(
+      verticalAlignment = Alignment.CenterVertically,
+      modifier = Modifier.fillMaxWidth(),
+    ) {
+      Column(modifier = Modifier.weight(1f)) {
+        Text(
+          text = stringResource(R.string.search_recent_title),
+          style = MaterialTheme.typography.titleMedium,
+          color = NebulaPalette.TextHigh,
+        )
+        Text(
+          text = stringResource(R.string.search_idle_hint),
+          style = MaterialTheme.typography.bodySmall,
+          color = NebulaPalette.TextMuted,
+        )
+      }
+      NebulaButton(
+        text = stringResource(R.string.search_clear_history),
+        onClick = onClear,
+        style = NebulaButtonStyle.Ghost,
+      )
+    }
+
+    entries.forEachIndexed { index, entry ->
+      key(entry) {
+        val removeDescription = stringResource(R.string.search_remove_recent_description, entry)
+        Row(
+          horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
+          verticalAlignment = Alignment.CenterVertically,
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          NebulaButton(
+            text = entry,
+            onClick = { onSearch(entry) },
+            style = NebulaButtonStyle.Secondary,
+            modifier = Modifier
+              .weight(1f)
+              .initialFocusTarget(if (index == 0) firstFocus else null)
+              .initialFocusTarget(
+                if (entry == focusAfterRemovalQuery) focusAfterRemoval else null,
+              ),
+          )
+          NebulaButton(
+            text = removeLabel,
+            onClick = { onRemove(entry) },
+            style = NebulaButtonStyle.Ghost,
+            modifier = Modifier.semantics {
+              contentDescription = removeDescription
+            },
+          )
+        }
+      }
+    }
   }
 }
 
@@ -705,9 +881,8 @@ private fun SearchField(
  * and a filter applies to results already in hand - switching it never refetches and never touches
  * the query.
  *
- * @param focusResults aims Down into the grid rather than letting the default focus search pick its
- *   way into a lazy one. It asks the grid to restore the card focus was last on, which is what
- *   makes changing a filter and coming back not lose the viewer's place.
+ * @param focusBelow aims Down into the mounted content rather than leaving Compose's geometric
+ *   search to guess between a lazy grid and the recent-search controls.
  */
 @OptIn(ExperimentalComposeUiApi::class, ExperimentalTvMaterial3Api::class)
 @Composable
@@ -715,19 +890,18 @@ private fun SearchFilterRow(
   selected: SearchFilter,
   onSelect: (SearchFilter) -> Unit,
   firstChipFocus: InitialFocusTarget,
-  focusResults: () -> Boolean,
+  focusBelow: () -> Boolean,
   modifier: Modifier = Modifier,
 ) {
   Row(
     horizontalArrangement = Arrangement.spacedBy(NebulaDimens.ControlGap),
     modifier = modifier
-      // When there is no grid - the empty, failed and idle states - focusResults reports false and
-      // the key falls through to whatever else is below.
+      // When there is no focusable content below, the key falls through to geometric focus search.
       .onPreviewKeyEvent { event ->
         if (event.type != KeyEventType.KeyDown || event.key != Key.DirectionDown) {
           false
         } else {
-          focusResults()
+          focusBelow()
         }
       },
   ) {

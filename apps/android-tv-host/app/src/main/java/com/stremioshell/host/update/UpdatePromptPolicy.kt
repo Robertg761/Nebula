@@ -54,19 +54,20 @@ object UpdatePromptPolicy {
    * later a completely different release raised the dialog still carrying "Install failed" and,
    * worse, still offering "Check download" as its primary button instead of "Install".
    *
-   * @param previousVersionName version the error was recorded against, null if none was.
+   * Attempt identity, not merely version, is the boundary: a corrected same-version asset or a
+   * fresh DownloadManager attempt must never inherit the prior prompt's failure text/action.
    */
   fun retainsError(
-    previousVersionName: String?,
+    previousUpdate: DownloadedUpdateSnapshot?,
     nextPrompt: Prompt,
-    nextVersionName: String?,
+    nextUpdate: DownloadedUpdateSnapshot?,
   ): Boolean {
-    if (nextPrompt == Prompt.NONE || nextVersionName == null) {
+    if (nextPrompt == Prompt.NONE || nextUpdate == null) {
       return false
     }
-    if (previousVersionName == null) {
+    if (previousUpdate == null) {
       return false
     }
-    return ApkUpdateManager.isSameRelease(previousVersionName, nextVersionName)
+    return ApkUpdateManager.sameDownloadedUpdate(previousUpdate, nextUpdate)
   }
 }

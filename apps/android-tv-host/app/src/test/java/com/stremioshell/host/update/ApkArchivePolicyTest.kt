@@ -74,6 +74,42 @@ class ApkArchivePolicyTest {
   }
 
   @Test
+  fun `accepts a later prerelease on the same numeric version code`() {
+    val betaOne = installed.copy(versionName = "0.6.2-beta.1", versionCode = 18L)
+    val betaTwo = installed.copy(versionName = "0.6.2-beta.2", versionCode = 18L)
+
+    assertEquals(
+      ApkArchivePolicy.Verdict.VERIFIED,
+      ApkArchivePolicy.verify(PACKAGE_NAME, "v0.6.2-beta.2", betaOne, betaTwo),
+    )
+  }
+
+  @Test
+  fun `accepts stable after a same-code prerelease but not another copy of stable`() {
+    val beta = installed.copy(versionName = "0.6.2-beta.2", versionCode = 18L)
+    val stable = installed.copy(versionName = "0.6.2", versionCode = 18L)
+
+    assertEquals(
+      ApkArchivePolicy.Verdict.VERIFIED,
+      ApkArchivePolicy.verify(PACKAGE_NAME, "v0.6.2", beta, stable),
+    )
+    assertEquals(
+      ApkArchivePolicy.Verdict.NOT_NEWER,
+      ApkArchivePolicy.verify(PACKAGE_NAME, "v0.6.2", stable, stable),
+    )
+  }
+
+  @Test
+  fun `same version code cannot cross to a newer numeric core`() {
+    val sameCodeNextCore = installed.copy(versionName = "0.6.2", versionCode = 17L)
+
+    assertEquals(
+      ApkArchivePolicy.Verdict.NOT_NEWER,
+      ApkArchivePolicy.verify(PACKAGE_NAME, "0.6.2", installed, sameCodeNextCore),
+    )
+  }
+
+  @Test
   fun `rejects an unrelated signer`() {
     assertEquals(
       ApkArchivePolicy.Verdict.UNTRUSTED_SIGNER,

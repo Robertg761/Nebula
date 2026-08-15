@@ -1,7 +1,9 @@
 package com.stremioshell.host.tv.ui
 
 import android.app.ActivityManager
+import android.content.Context
 import android.content.Intent
+import android.text.format.DateFormat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -91,6 +93,7 @@ import androidx.tv.material3.Text
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stremioshell.host.BuildConfig
 import com.stremioshell.host.R
+import com.stremioshell.host.tv.SettingsMutationRequest
 import com.stremioshell.host.tv.SettingsMutationResult
 import com.stremioshell.host.tv.SettingsSaveUpdate
 import com.stremioshell.host.tv.TvAppViewModel
@@ -108,19 +111,29 @@ import com.stremioshell.host.tv.ui.theme.NebulaMotion
 import com.stremioshell.host.tv.ui.theme.NebulaPalette
 import com.stremioshell.host.tv.ui.theme.NebulaShapes
 import com.stremioshell.host.tv.ui.theme.NebulaSpace
+import com.stremioshell.host.update.UpdateFailureKind
+import com.stremioshell.host.update.UpdateStatus
+import com.stremioshell.host.update.UpdateStatusPhase
+import com.stremioshell.host.update.UpdateStatusStore
+import com.stremioshell.host.update.UpdateWorkScheduler
+import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private const val CredentialRevealMs = 30_000L
+private const val UpdateStatusPollMs = 2_000L
 
 /** Null while the durable write is complete but connection checks are still running. */
 internal fun SettingsSaveUpdate.completionSuccess(): Boolean? = when (this) {
   is SettingsSaveUpdate.Persisted -> null
   is SettingsSaveUpdate.Complete -> true
+  is SettingsSaveUpdate.Partial -> false
   is SettingsSaveUpdate.Failed -> false
 }
 
@@ -153,6 +166,7 @@ fun SettingsScreen(
   val storedSubtitles by viewModel.subtitlesBaseUrl.collectAsStateWithLifecycle()
   val storedPlayerPrefs by viewModel.playerPrefs.collectAsStateWithLifecycle()
   val saveOperation by viewModel.settingsSaveOperation.collectAsStateWithLifecycle()
+  val mutationOperation by viewModel.settingsMutationOperation.collectAsStateWithLifecycle()
 
   var tmdbKey by rememberSaveable { mutableStateOf("") }
   var newAddonUrl by rememberSaveable { mutableStateOf("") }
@@ -194,7 +208,6 @@ fun SettingsScreen(
   var movedAddonDirection by remember { mutableIntStateOf(0) }
   var addonMoveTick by remember { mutableIntStateOf(0) }
   var playbackControls by remember { mutableStateOf<PlayerPrefs?>(null) }
-  var playbackMutationInFlight by remember { mutableStateOf(false) }
   // A focused field is a D-pad navigation stop until the viewer explicitly presses Center/Enter.
   // Not saveable: recreation and leaving Settings both end any active input session.
   var editingField by remember { mutableStateOf<SettingsTextField?>(null) }
@@ -203,6 +216,13 @@ fun SettingsScreen(
   val context = LocalContext.current
   val softwareKeyboard = LocalSoftwareKeyboardController.current
   val supportScope = rememberCoroutineScope()
+  val updateScope = rememberCoroutineScope()
+  val updateStatusStore = remember(context.applicationContext) {
+    UpdateStatusStore(context.applicationContext)
+  }
+  val updateStatus by updateStatusStore.updates.collectAsStateWithLifecycle(
+    initialValue = updateStatusStore.current(),
+  )
 
   val addons = storedAddons.orEmpty()
   val addonLabels = remember(addons) { AddonList.labels(addons) }
@@ -210,7 +230,10 @@ fun SettingsScreen(
   val playback = playbackControls ?: storedPlayerPrefs ?: PlayerPrefs()
   val activeSave = saveOperation?.takeIf { it.requestId == activeSaveId }
   val saving = activeSave?.running == true
-  val playbackBusy = playbackMutationInFlight || activeSave?.savingPlaybackLanguages == true
+  // A completed immediate operation stays busy until this composition consumes its result. That
+  // one-slot handoff is what lets a replacement composition reconnect after activity recreation.
+  val mutationBusy = mutationOperation != null
+  val playbackBusy = mutationBusy || activeSave?.savingPlaybackLanguages == true
   val playbackSubtitleSize = SubtitleSize.fromStorage(playback.subtitleSize)
   val playbackAudioOutput = AudioOutputMode.fromStorage(playback.audioOutput)
   val listState = rememberLazyListState()
@@ -221,6 +244,29 @@ fun SettingsScreen(
   // their own initiative, so they can tell "the viewer was on a node we just disposed" from "a
   // dialog owns focus and this scroll is happening behind it".
   var formFocused by remember { mutableStateOf(false) }
+
+  // DownloadManager does not expose a Flow. Reconcile only while a transfer can change state, plus
+  // once on entry to recover a ready APK that predates this status ledger.
+  LaunchedEffect(updateStatus.phase, updateStatus.targetVersionName) {
+    if (updateStatus.phase != UpdateStatusPhase.IDLE &&
+      updateStatus.phase != UpdateStatusPhase.DOWNLOAD_QUEUED &&
+      updateStatus.phase != UpdateStatusPhase.DOWNLOADING &&
+      updateStatus.phase != UpdateStatusPhase.READY
+    ) {
+      return@LaunchedEffect
+    }
+    do {
+      val reconciled = withContext(Dispatchers.IO) {
+        updateStatusStore.reconcileDownloadState()
+      }
+      if (reconciled.phase != UpdateStatusPhase.DOWNLOAD_QUEUED &&
+        reconciled.phase != UpdateStatusPhase.DOWNLOADING
+      ) {
+        break
+      }
+      delay(UpdateStatusPollMs)
+    } while (true)
+  }
 
   // Mostly the nodes a text field has to aim at: button-to-button moves are left to the default
   // focus search, which handles them, while a text field is the one thing on the screen that
@@ -568,9 +614,228 @@ fun SettingsScreen(
     if (wasSaving) currentOnSaveComplete(false)
   }
 
+  // Immediate mutations use the same ViewModel-owned handoff as the long Settings save. The old
+  // callback shape retained this composition's mutable state from persistenceScope; recreation
+  // disposed that state and silently lost both busy and failure feedback.
+  LaunchedEffect(mutationOperation) {
+    val operation = mutationOperation ?: return@LaunchedEffect
+    val result = operation.result ?: return@LaunchedEffect
+    val request = operation.request
+    val prefs = operation.playerPrefs
+    prefs?.let { playbackControls = it }
+    try {
+      when (request) {
+        is SettingsMutationRequest.AddAddon -> {
+          val normalized = AddonList.normalize(request.submittedUrl)
+          addonNotice = when (result) {
+            SettingsMutationResult.Changed -> {
+              invalidateConnectionVerdict()
+              if (newAddonUrl == request.submittedUrl) {
+                newAddonUrl = ""
+                showAddonUrl = false
+              }
+              Notice(
+                context.getString(R.string.settings_addon_added, AddonList.label(normalized)),
+                StatusTone.Success,
+              )
+            }
+            SettingsMutationResult.Unchanged -> Notice(
+              context.getString(R.string.settings_addon_already_in_list),
+              StatusTone.Caution,
+            )
+            SettingsMutationResult.Failed -> Notice(
+              context.getString(
+                R.string.settings_addon_add_failed,
+                AddonList.label(normalized),
+              ),
+              StatusTone.Danger,
+            )
+          }
+        }
+        is SettingsMutationRequest.MoveAddon -> {
+          val label = AddonList.label(request.url)
+          addonNotice = when (result) {
+            SettingsMutationResult.Changed -> {
+              invalidateConnectionVerdict()
+              if (movedAddonUrl == request.url) addonMoveTick++
+              Notice(
+                context.getString(
+                  if (request.direction < 0) {
+                    R.string.settings_addon_moved_earlier
+                  } else {
+                    R.string.settings_addon_moved_later
+                  },
+                  label,
+                ),
+                StatusTone.Success,
+              )
+            }
+            SettingsMutationResult.Unchanged -> Notice(
+              context.getString(R.string.settings_addon_already_positioned, label),
+              StatusTone.Info,
+            )
+            SettingsMutationResult.Failed -> Notice(
+              context.getString(R.string.settings_addon_move_failed, label),
+              StatusTone.Danger,
+            )
+          }
+        }
+        is SettingsMutationRequest.RemoveAddon -> {
+          val label = AddonList.label(request.url)
+          when (result) {
+            SettingsMutationResult.Changed -> {
+              invalidateConnectionVerdict()
+              addonNotice = Notice(
+                context.getString(R.string.settings_addon_removed, label),
+                StatusTone.Info,
+              )
+              pendingRemovalFeedback = null
+              pendingRemoval = null
+              addonEditTick++
+            }
+            SettingsMutationResult.Unchanged -> {
+              val message = context.getString(R.string.settings_addon_not_found, label)
+              if (pendingRemoval == request.url) pendingRemovalFeedback = message
+              else addonNotice = Notice(message, StatusTone.Info)
+            }
+            SettingsMutationResult.Failed -> {
+              val message = context.getString(R.string.settings_remove_addon_failed, label)
+              if (pendingRemoval == request.url) pendingRemovalFeedback = message
+              else addonNotice = Notice(message, StatusTone.Danger)
+            }
+          }
+        }
+        SettingsMutationRequest.ClearTmdbKey -> when (result) {
+          SettingsMutationResult.Changed -> {
+            invalidateConnectionVerdict()
+            tmdbKey = ""
+            showTmdbKey = false
+            tmdbNotice = Notice(
+              context.getString(R.string.settings_tmdb_key_cleared),
+              StatusTone.Caution,
+            )
+            pendingClearKeyFeedback = null
+            pendingClearKey = false
+          }
+          SettingsMutationResult.Unchanged -> {
+            val message = context.getString(R.string.settings_no_saved_tmdb_key)
+            if (pendingClearKey) pendingClearKeyFeedback = message
+            else tmdbNotice = Notice(message, StatusTone.Info)
+          }
+          SettingsMutationResult.Failed -> {
+            val message = context.getString(R.string.settings_clear_tmdb_key_failed)
+            if (pendingClearKey) pendingClearKeyFeedback = message
+            else tmdbNotice = Notice(message, StatusTone.Danger)
+          }
+        }
+        is SettingsMutationRequest.PlaybackLanguages -> {
+          if (result == SettingsMutationResult.Changed) {
+            prefs?.let { saved ->
+              if (audioLanguage == request.audio) audioLanguage = saved.audioLanguage
+              if (subtitleLanguage == request.subtitles) {
+                subtitleLanguage = saved.subtitleLanguage
+              }
+            }
+          }
+          playbackNotice = when (result) {
+            SettingsMutationResult.Changed -> Notice(
+              context.getString(R.string.settings_language_preferences_saved),
+              StatusTone.Success,
+            )
+            SettingsMutationResult.Unchanged -> Notice(
+              context.getString(R.string.settings_language_preferences_unchanged),
+              StatusTone.Info,
+            )
+            SettingsMutationResult.Failed -> Notice(
+              context.getString(R.string.settings_language_preferences_failed),
+              StatusTone.Danger,
+            )
+          }
+        }
+        is SettingsMutationRequest.PlaybackSubtitleSize -> {
+          val size = SubtitleSize.fromStorage(request.storageName)
+          playbackNotice = if (result == SettingsMutationResult.Failed) {
+            Notice(context.getString(R.string.settings_subtitle_size_failed), StatusTone.Danger)
+          } else {
+            Notice(
+              context.getString(
+                R.string.settings_subtitle_size_saved,
+                context.getString(size.labelResource()),
+              ),
+              StatusTone.Success,
+            )
+          }
+        }
+        is SettingsMutationRequest.PlaybackAudioOutput -> {
+          val output = AudioOutputMode.fromStorage(request.storageName)
+          playbackNotice = if (result == SettingsMutationResult.Failed) {
+            Notice(context.getString(R.string.settings_audio_output_failed), StatusTone.Danger)
+          } else {
+            Notice(
+              context.getString(
+                R.string.settings_audio_output_saved,
+                context.getString(output.labelResource()),
+              ),
+              StatusTone.Success,
+            )
+          }
+        }
+        is SettingsMutationRequest.AutoPlayNext -> {
+          playbackNotice = if (result == SettingsMutationResult.Failed) {
+            Notice(context.getString(R.string.settings_autoplay_failed), StatusTone.Danger)
+          } else {
+            Notice(
+              context.getString(
+                if (request.enabled) {
+                  R.string.settings_autoplay_enabled
+                } else {
+                  R.string.settings_autoplay_disabled
+                },
+              ),
+              StatusTone.Success,
+            )
+          }
+        }
+        is SettingsMutationRequest.UpNextCountdown -> {
+          playbackNotice = if (result == SettingsMutationResult.Failed) {
+            Notice(context.getString(R.string.settings_countdown_failed), StatusTone.Danger)
+          } else {
+            Notice(
+              context.resources.getQuantityString(
+                R.plurals.settings_countdown_saved,
+                request.seconds,
+                request.seconds,
+              ),
+              StatusTone.Success,
+            )
+          }
+        }
+        SettingsMutationRequest.ResetPlayback -> when (result) {
+          SettingsMutationResult.Changed, SettingsMutationResult.Unchanged -> {
+            audioLanguage = ""
+            subtitleLanguage = ""
+            playbackNotice = Notice(
+              context.getString(R.string.settings_playback_defaults_reset),
+              StatusTone.Info,
+            )
+            pendingPlaybackResetFeedback = null
+            pendingPlaybackReset = false
+          }
+          SettingsMutationResult.Failed -> {
+            val message = context.getString(R.string.settings_reset_playback_failed)
+            if (pendingPlaybackReset) pendingPlaybackResetFeedback = message
+            else playbackNotice = Notice(message, StatusTone.Danger)
+          }
+        }
+      }
+    } finally {
+      viewModel.consumeSettingsMutation(operation.requestId)
+    }
+  }
+
   val startSave: () -> Unit = save@{
     if (!saving) {
-      if (playbackMutationInFlight) {
+      if (mutationBusy) {
         saveStatus = context.getString(R.string.settings_save_playback_in_progress)
         currentOnSaveComplete(false)
         return@save
@@ -849,40 +1114,17 @@ fun SettingsScreen(
             NebulaButton(
               text = stringResource(R.string.settings_move_up),
               icon = Icons.Filled.KeyboardArrowUp,
-              enabled = index > 0,
-              focusableWhenDisabled = false,
+              enabled = index > 0 && !mutationBusy,
+              // Keep the pressed node focused while its ViewModel-owned mutation is in flight.
+              focusableWhenDisabled = mutationBusy && index > 0,
               style = NebulaButtonStyle.Ghost,
               onClick = {
-                val label = addonLabels[index]
                 // Claimed before the write, not in its callback: the target then attaches to the
                 // button that already holds focus and the reshuffle migrates it, rather than the
                 // recovery having to find focus again from wherever the reorder dropped it.
                 movedAddonUrl = url
                 movedAddonDirection = -1
-                viewModel.moveAddon(url, -1) { result ->
-                  when (result) {
-                    SettingsMutationResult.Changed -> {
-                      invalidateConnectionVerdict()
-                      addonNotice = Notice(
-                        context.getString(R.string.settings_addon_moved_earlier, label),
-                        StatusTone.Success,
-                      )
-                      addonMoveTick++
-                    }
-                    SettingsMutationResult.Unchanged -> {
-                      addonNotice = Notice(
-                        context.getString(R.string.settings_addon_already_positioned, label),
-                        StatusTone.Info,
-                      )
-                    }
-                    SettingsMutationResult.Failed -> {
-                      addonNotice = Notice(
-                        context.getString(R.string.settings_addon_move_failed, label),
-                        StatusTone.Danger,
-                      )
-                    }
-                  }
-                }
+                viewModel.moveAddon(url, -1)
               },
               modifier = Modifier
                 .initialFocusTarget(
@@ -898,37 +1140,13 @@ fun SettingsScreen(
             NebulaButton(
               text = stringResource(R.string.settings_move_down),
               icon = Icons.Filled.KeyboardArrowDown,
-              enabled = index < addons.lastIndex,
-              focusableWhenDisabled = false,
+              enabled = index < addons.lastIndex && !mutationBusy,
+              focusableWhenDisabled = mutationBusy && index < addons.lastIndex,
               style = NebulaButtonStyle.Ghost,
               onClick = {
-                val label = addonLabels[index]
                 movedAddonUrl = url
                 movedAddonDirection = 1
-                viewModel.moveAddon(url, 1) { result ->
-                  when (result) {
-                    SettingsMutationResult.Changed -> {
-                      invalidateConnectionVerdict()
-                      addonNotice = Notice(
-                        context.getString(R.string.settings_addon_moved_later, label),
-                        StatusTone.Success,
-                      )
-                      addonMoveTick++
-                    }
-                    SettingsMutationResult.Unchanged -> {
-                      addonNotice = Notice(
-                        context.getString(R.string.settings_addon_already_positioned, label),
-                        StatusTone.Info,
-                      )
-                    }
-                    SettingsMutationResult.Failed -> {
-                      addonNotice = Notice(
-                        context.getString(R.string.settings_addon_move_failed, label),
-                        StatusTone.Danger,
-                      )
-                    }
-                  }
-                }
+                viewModel.moveAddon(url, 1)
               },
               modifier = Modifier
                 .initialFocusTarget(
@@ -943,6 +1161,7 @@ fun SettingsScreen(
             )
             NebulaButton(
               text = stringResource(R.string.settings_remove),
+              enabled = !mutationBusy,
               // Not Ghost: its focused fill is SurfaceVariant, which is exactly the colour of the
               // row it sits on, so the one control here that destroys configuration marked focus
               // with a ring and nothing else. Danger's plate is a step down from the row at rest
@@ -1041,6 +1260,7 @@ fun SettingsScreen(
           )
           NebulaButton(
             text = stringResource(R.string.settings_add_addon),
+            enabled = !mutationBusy,
             onClick = {
               // Persisted on press rather than staged behind Save: a list whose edits only
               // land later shows a configuration that is not the one being used.
@@ -1061,40 +1281,7 @@ fun SettingsScreen(
                     StatusTone.Caution,
                   )
                 else -> {
-                  viewModel.addAddon(submittedUrl) { result ->
-                    when (result) {
-                      SettingsMutationResult.Changed -> {
-                        invalidateConnectionVerdict()
-                        // Do not erase a second URL typed while the first write was completing.
-                        if (newAddonUrl == submittedUrl) {
-                          newAddonUrl = ""
-                          showAddonUrl = false
-                        }
-                        addonNotice = Notice(
-                          context.getString(
-                            R.string.settings_addon_added,
-                            AddonList.label(normalized),
-                          ),
-                          StatusTone.Success,
-                        )
-                      }
-                      SettingsMutationResult.Unchanged -> {
-                        addonNotice = Notice(
-                          context.getString(R.string.settings_addon_already_in_list),
-                          StatusTone.Caution,
-                        )
-                      }
-                      SettingsMutationResult.Failed -> {
-                        addonNotice = Notice(
-                          context.getString(
-                            R.string.settings_addon_add_failed,
-                            AddonList.label(normalized),
-                          ),
-                          StatusTone.Danger,
-                        )
-                      }
-                    }
-                  }
+                  viewModel.addAddon(submittedUrl)
                   null
                 }
               }
@@ -1235,36 +1422,7 @@ fun SettingsScreen(
           onClick = {
             val submittedAudio = audioLanguage
             val submittedSubtitles = subtitleLanguage
-            playbackMutationInFlight = true
-            viewModel.savePlaybackLanguages(submittedAudio, submittedSubtitles) { result ->
-              result.prefs?.let { playbackControls = it }
-              playbackMutationInFlight = false
-              playbackNotice = when (result.outcome) {
-                SettingsMutationResult.Changed -> {
-                  // Mirror the store's normalisation so the field is also the value now in use.
-                  result.prefs?.let { saved ->
-                    if (audioLanguage == submittedAudio) audioLanguage = saved.audioLanguage
-                    if (subtitleLanguage == submittedSubtitles) {
-                      subtitleLanguage = saved.subtitleLanguage
-                    }
-                  }
-                  Notice(
-                    context.getString(R.string.settings_language_preferences_saved),
-                    StatusTone.Success,
-                  )
-                }
-                SettingsMutationResult.Unchanged ->
-                  Notice(
-                    context.getString(R.string.settings_language_preferences_unchanged),
-                    StatusTone.Info,
-                  )
-                SettingsMutationResult.Failed ->
-                  Notice(
-                    context.getString(R.string.settings_language_preferences_failed),
-                    StatusTone.Danger,
-                  )
-              }
-            }
+            viewModel.savePlaybackLanguages(submittedAudio, submittedSubtitles)
           },
           modifier = Modifier.initialFocusTarget(playbackLanguageSaveFocus),
         )
@@ -1281,25 +1439,7 @@ fun SettingsScreen(
             enabled = playbackReady && !playbackBusy,
             onClick = {
               val next = SubtitleSize.stepped(playbackSubtitleSize, 1)
-              playbackMutationInFlight = true
-              viewModel.setPlaybackSubtitleSize(next.storageName) { result ->
-                result.prefs?.let { playbackControls = it }
-                playbackMutationInFlight = false
-                playbackNotice = if (result.outcome == SettingsMutationResult.Failed) {
-                  Notice(
-                    context.getString(R.string.settings_subtitle_size_failed),
-                    StatusTone.Danger,
-                  )
-                } else {
-                  Notice(
-                    context.getString(
-                      R.string.settings_subtitle_size_saved,
-                      context.getString(next.labelResource()),
-                    ),
-                    StatusTone.Success,
-                  )
-                }
-              }
+              viewModel.setPlaybackSubtitleSize(next.storageName)
             },
           )
           NebulaButton(
@@ -1310,25 +1450,7 @@ fun SettingsScreen(
             enabled = playbackReady && !playbackBusy,
             onClick = {
               val next = AudioOutputMode.stepped(playbackAudioOutput, 1)
-              playbackMutationInFlight = true
-              viewModel.setPlaybackAudioOutput(next.storageName) { result ->
-                result.prefs?.let { playbackControls = it }
-                playbackMutationInFlight = false
-                playbackNotice = if (result.outcome == SettingsMutationResult.Failed) {
-                  Notice(
-                    context.getString(R.string.settings_audio_output_failed),
-                    StatusTone.Danger,
-                  )
-                } else {
-                  Notice(
-                    context.getString(
-                      R.string.settings_audio_output_saved,
-                      context.getString(next.labelResource()),
-                    ),
-                    StatusTone.Success,
-                  )
-                }
-              }
+              viewModel.setPlaybackAudioOutput(next.storageName)
             },
           )
         }
@@ -1359,28 +1481,7 @@ fun SettingsScreen(
             enabled = playbackReady && !playbackBusy,
             onClick = {
               val next = !playback.autoPlayNext
-              playbackMutationInFlight = true
-              viewModel.setAutoPlayNext(next) { result ->
-                result.prefs?.let { playbackControls = it }
-                playbackMutationInFlight = false
-                playbackNotice = if (result.outcome == SettingsMutationResult.Failed) {
-                  Notice(
-                    context.getString(R.string.settings_autoplay_failed),
-                    StatusTone.Danger,
-                  )
-                } else {
-                  Notice(
-                    context.getString(
-                      if (next) {
-                        R.string.settings_autoplay_enabled
-                      } else {
-                        R.string.settings_autoplay_disabled
-                      },
-                    ),
-                    StatusTone.Success,
-                  )
-                }
-              }
+              viewModel.setAutoPlayNext(next)
             },
           )
           NebulaButton(
@@ -1394,26 +1495,7 @@ fun SettingsScreen(
               val next = PlaybackPreferencePolicy.nextCountdownSeconds(
                 playback.upNextCountdownSeconds,
               )
-              playbackMutationInFlight = true
-              viewModel.setUpNextCountdownSeconds(next) { result ->
-                result.prefs?.let { playbackControls = it }
-                playbackMutationInFlight = false
-                playbackNotice = if (result.outcome == SettingsMutationResult.Failed) {
-                  Notice(
-                    context.getString(R.string.settings_countdown_failed),
-                    StatusTone.Danger,
-                  )
-                } else {
-                  Notice(
-                    context.resources.getQuantityString(
-                      R.plurals.settings_countdown_saved,
-                      next,
-                      next,
-                    ),
-                    StatusTone.Success,
-                  )
-                }
-              }
+              viewModel.setUpNextCountdownSeconds(next)
             },
           )
         }
@@ -1427,6 +1509,57 @@ fun SettingsScreen(
           },
         )
         playbackNotice?.let { SectionNotice(it) }
+      }
+    }
+
+    settingsItem(SettingsItem.Updates) {
+      val checkBusy = updateStatus.phase == UpdateStatusPhase.CHECK_QUEUED ||
+        updateStatus.phase == UpdateStatusPhase.CHECKING
+      SettingsSection(
+        title = stringResource(R.string.settings_updates_title),
+        description = stringResource(R.string.settings_updates_description),
+      ) {
+        SectionNotice(updateStatusNotice(context, updateStatus))
+        updateStatus.failureKind?.let { failure ->
+          SectionNotice(updateFailureNotice(context, failure))
+        }
+        updateStatus.lastSuccessfulCheckAtMs?.let { checkedAtMs ->
+          Text(
+            stringResource(
+              R.string.settings_update_last_successful_check,
+              formatUpdateTimestamp(context, checkedAtMs),
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = NebulaPalette.TextMuted,
+          )
+        }
+        updateStatus.lastFailedCheckAtMs?.let { checkedAtMs ->
+          Text(
+            stringResource(
+              R.string.settings_update_last_failed_check,
+              formatUpdateTimestamp(context, checkedAtMs),
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = NebulaPalette.TextMuted,
+          )
+        }
+        NebulaButton(
+          text = stringResource(
+            if (checkBusy) {
+              R.string.settings_update_check_in_progress
+            } else {
+              R.string.settings_check_for_updates
+            },
+          ),
+          enabled = !checkBusy,
+          onClick = {
+            updateScope.launch {
+              withContext(Dispatchers.IO) {
+                UpdateWorkScheduler.requestManualCheck(context)
+              }
+            }
+          },
+        )
       }
     }
 
@@ -1670,32 +1803,7 @@ fun SettingsScreen(
       focusLabel = "Addon removal options",
       actions = listOf(
         CardAction(stringResource(R.string.settings_remove_addon), destructive = true) {
-          viewModel.removeAddon(url) { result ->
-            when (result) {
-              SettingsMutationResult.Changed -> {
-                invalidateConnectionVerdict()
-                addonNotice = Notice(
-                  context.getString(R.string.settings_addon_removed, label),
-                  StatusTone.Info,
-                )
-                pendingRemovalFeedback = null
-                pendingRemoval = null
-                addonEditTick++
-              }
-              SettingsMutationResult.Unchanged -> {
-                pendingRemovalFeedback = context.getString(
-                  R.string.settings_addon_not_found,
-                  label,
-                )
-              }
-              SettingsMutationResult.Failed -> {
-                pendingRemovalFeedback = context.getString(
-                  R.string.settings_remove_addon_failed,
-                  label,
-                )
-              }
-            }
-          }
+          viewModel.removeAddon(url)
         },
       ),
       onDismiss = {
@@ -1716,29 +1824,7 @@ fun SettingsScreen(
       focusLabel = "TMDB key removal options",
       actions = listOf(
         CardAction(stringResource(R.string.settings_clear_key), destructive = true) {
-          viewModel.clearTmdbKey { result ->
-            when (result) {
-              SettingsMutationResult.Changed -> {
-                invalidateConnectionVerdict()
-                tmdbKey = ""
-                showTmdbKey = false
-                tmdbNotice = Notice(
-                  context.getString(R.string.settings_tmdb_key_cleared),
-                  StatusTone.Caution,
-                )
-                pendingClearKeyFeedback = null
-                pendingClearKey = false
-              }
-              SettingsMutationResult.Unchanged -> {
-                pendingClearKeyFeedback = context.getString(R.string.settings_no_saved_tmdb_key)
-              }
-              SettingsMutationResult.Failed -> {
-                pendingClearKeyFeedback = context.getString(
-                  R.string.settings_clear_tmdb_key_failed,
-                )
-              }
-            }
-          }
+          viewModel.clearTmdbKey()
         },
       ),
       onDismiss = {
@@ -1759,32 +1845,7 @@ fun SettingsScreen(
       focusLabel = "Playback reset options",
       actions = listOf(
         CardAction(stringResource(R.string.settings_reset_playback_defaults), destructive = true) {
-          playbackMutationInFlight = true
-          viewModel.resetPlaybackPreferences { result ->
-            result.prefs?.let { playbackControls = it }
-            playbackMutationInFlight = false
-            when (result.outcome) {
-              SettingsMutationResult.Changed,
-              SettingsMutationResult.Unchanged,
-              -> {
-                // Reset also discards any unapplied language text on this screen, even when the
-                // persisted values were already defaults.
-                audioLanguage = ""
-                subtitleLanguage = ""
-                playbackNotice = Notice(
-                  context.getString(R.string.settings_playback_defaults_reset),
-                  StatusTone.Info,
-                )
-                pendingPlaybackResetFeedback = null
-                pendingPlaybackReset = false
-              }
-              SettingsMutationResult.Failed -> {
-                pendingPlaybackResetFeedback = context.getString(
-                  R.string.settings_reset_playback_failed,
-                )
-              }
-            }
-          }
+          viewModel.resetPlaybackPreferences()
         },
       ),
       onDismiss = {
@@ -1842,6 +1903,76 @@ private fun SubtitleSize.labelResource(): Int = when (this) {
 private fun AudioOutputMode.labelResource(): Int = when (this) {
   AudioOutputMode.Decode -> R.string.settings_audio_output_decode
   AudioOutputMode.Passthrough -> R.string.settings_audio_output_passthrough
+}
+
+private fun updateStatusNotice(context: Context, status: UpdateStatus): Notice {
+  val version = status.targetVersionName
+  val text = when (status.phase) {
+    UpdateStatusPhase.IDLE -> context.getString(R.string.settings_update_status_idle)
+    UpdateStatusPhase.CHECK_QUEUED -> context.getString(R.string.settings_update_status_queued)
+    UpdateStatusPhase.CHECKING -> context.getString(R.string.settings_update_status_checking)
+    UpdateStatusPhase.UP_TO_DATE -> context.getString(R.string.settings_update_status_up_to_date)
+    UpdateStatusPhase.DOWNLOAD_QUEUED -> if (version == null) {
+      context.getString(R.string.settings_update_status_download_queued)
+    } else {
+      context.getString(R.string.settings_update_status_download_queued_version, version)
+    }
+    UpdateStatusPhase.DOWNLOADING -> if (version == null) {
+      context.getString(R.string.settings_update_status_downloading)
+    } else {
+      context.getString(R.string.settings_update_status_downloading_version, version)
+    }
+    UpdateStatusPhase.READY -> if (version == null) {
+      context.getString(R.string.settings_update_status_ready)
+    } else {
+      context.getString(R.string.settings_update_status_ready_version, version)
+    }
+    UpdateStatusPhase.RETRY_SCHEDULED -> {
+      context.getString(R.string.settings_update_status_retry_scheduled)
+    }
+    UpdateStatusPhase.FAILED -> context.getString(R.string.settings_update_status_failed)
+  }
+  val tone = when (status.phase) {
+    UpdateStatusPhase.UP_TO_DATE, UpdateStatusPhase.READY -> StatusTone.Success
+    UpdateStatusPhase.RETRY_SCHEDULED -> StatusTone.Caution
+    UpdateStatusPhase.FAILED -> StatusTone.Danger
+    else -> StatusTone.Info
+  }
+  return Notice(text, tone)
+}
+
+/** Failure text is selected from a persisted category, never from Throwable.message. */
+private fun updateFailureNotice(context: Context, failure: UpdateFailureKind): Notice {
+  val textResource = when (failure) {
+    UpdateFailureKind.NETWORK -> R.string.settings_update_failure_network
+    UpdateFailureKind.RATE_LIMITED -> R.string.settings_update_failure_rate_limited
+    UpdateFailureKind.SERVER -> R.string.settings_update_failure_server
+    UpdateFailureKind.CONFIGURATION -> R.string.settings_update_failure_configuration
+    UpdateFailureKind.DOWNLOAD -> R.string.settings_update_failure_download
+    UpdateFailureKind.REJECTED_RELEASE -> R.string.settings_update_failure_rejected_release
+    UpdateFailureKind.SCHEDULING -> R.string.settings_update_failure_scheduling
+    UpdateFailureKind.UNKNOWN -> R.string.settings_update_failure_unknown
+  }
+  val tone = when (failure) {
+    UpdateFailureKind.NETWORK,
+    UpdateFailureKind.RATE_LIMITED,
+    UpdateFailureKind.SERVER,
+    UpdateFailureKind.DOWNLOAD,
+    UpdateFailureKind.SCHEDULING -> StatusTone.Caution
+    UpdateFailureKind.CONFIGURATION,
+    UpdateFailureKind.REJECTED_RELEASE,
+    UpdateFailureKind.UNKNOWN -> StatusTone.Danger
+  }
+  return Notice(context.getString(textResource), tone)
+}
+
+private fun formatUpdateTimestamp(context: Context, timestampMs: Long): String {
+  val instant = Date(timestampMs)
+  return context.getString(
+    R.string.settings_update_time_value,
+    DateFormat.getMediumDateFormat(context).format(instant),
+    DateFormat.getTimeFormat(context).format(instant),
+  )
 }
 
 @Composable
@@ -2157,6 +2288,7 @@ private enum class SettingsItem {
   Tmdb,
   Addons,
   Playback,
+  Updates,
   Support,
   Advanced,
   Save,

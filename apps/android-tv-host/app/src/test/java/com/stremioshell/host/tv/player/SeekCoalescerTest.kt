@@ -10,6 +10,32 @@ class SeekCoalescerTest {
   private fun coalescer() = SeekCoalescer(endGuardSec = 5.0, repeatMinIntervalMs = 120L)
 
   @Test
+  fun `modal transition rejects a seek already queued on the native worker`() {
+    val gate = SeekDispatchGate()
+    val seeker = coalescer()
+    seeker.press(
+      10.0,
+      positionSec = 100.0,
+      durationSec = 3_600.0,
+      isRepeat = false,
+      nowMs = 0L,
+    )
+    val queued = seeker.consumePendingRequest()!!
+    val queuedEpoch = gate.capture()
+
+    gate.invalidate()
+    seeker.reset()
+
+    assertFalse(gate.allows(queuedEpoch))
+    assertNull(seeker.previewSec)
+    assertNull(seeker.consumePendingRequest())
+    seeker.noteCommandAccepted(queued)
+    assertNull(seeker.restartOwner())
+    assertEquals(SeekSettleResult.Ignored, seeker.settle(queued))
+    assertTrue(gate.allows(gate.capture()))
+  }
+
+  @Test
   fun `single press seeks relative to the reported position`() {
     val seeker = coalescer()
 

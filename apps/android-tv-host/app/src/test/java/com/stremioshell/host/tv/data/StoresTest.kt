@@ -5,7 +5,9 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.mutablePreferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import com.stremioshell.host.tv.data.addon.StreamSelection
+import com.stremioshell.host.tv.data.subtitles.SubtitlesClient
 import java.io.IOException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -128,13 +130,256 @@ class WatchStateStoreTest {
     assertEquals(0L, store.get("movie:1")?.durationMs)
   }
 
-  private fun store(prefs: FakePreferencesStore) = WatchStateStore(prefs) { logged += it }
+  @Test
+  fun `a delayed progress save cannot undo a later finished mutation`() = runBlocking {
+    val store = store(FakePreferencesStore())
+    // Constructed in source order, then deliberately committed in reverse order.
+    val delayedProgress = entry("movie:1", positionMs = 60_000, updatedAtMs = 9_000)
+    val finishingSource = entry("movie:1", positionMs = 0, updatedAtMs = 1_000)
+    val finished = finishingSource.copy(watchedAtMs = 1_000)
+    assertEquals(finishingSource.pendingMutation, finished.pendingMutation)
+
+    store.upsert(finished)
+    store.upsert(delayedProgress)
+
+    val stored = requireNotNull(store.get("movie:1"))
+    assertTrue(stored.watched)
+    assertEquals(0L, stored.positionMs)
+    // Display time moved backwards, while mutation ordering still knew Finished was later.
+    assertEquals(1_000L, stored.updatedAtMs)
+    // Decoding persisted JSON is pure; only newly initiated mutations receive an action token.
+    assertFalse(stored.pendingMutation.assigned)
+  }
+
+  @Test
+  fun `a delayed save cannot resurrect a row removed by a later action`() = runBlocking {
+    val store = store(FakePreferencesStore())
+    val delayed = entry("movie:1", positionMs = 30_000, updatedAtMs = 9_000)
+    store.upsert(entry("movie:1", positionMs = 20_000, updatedAtMs = 10_000))
+
+    store.remove("movie:1", removedAtMs = 1_000)
+    store.upsert(delayed)
+
+    assertNull(store.get("movie:1"))
+  }
+
+  @Test
+  fun `a later save survives a backward wall clock correction`() = runBlocking {
+    val store = store(FakePreferencesStore())
+    val beforeCorrection = entry("movie:1", positionMs = 10_000, updatedAtMs = 50_000)
+    val afterCorrection = entry("movie:1", positionMs = 20_000, updatedAtMs = 5_000)
+
+    store.upsert(beforeCorrection)
+    store.upsert(afterCorrection)
+
+    val stored = requireNotNull(store.get("movie:1"))
+    assertEquals(20_000L, stored.positionMs)
+    assertEquals(5_000L, stored.updatedAtMs)
+    assertTrue(stored.mutationOrder > 0L)
+    assertFalse(stored.pendingMutation.assigned)
+  }
+
+  @Test
+  fun `legacy watch json without a logical order migrates on its next mutation`() = runBlocking {
+    val legacy = """[{"key":"movie:1","tmdbId":1,"mediaType":"movie","title":"Title","updatedAtMs":50000}]"""
+    val prefs = FakePreferencesStore(mutablePreferencesOf(KEY_WATCH to legacy))
+    val store = store(prefs)
+
+    store.upsert(entry("movie:1", positionMs = 25_000, updatedAtMs = 5_000))
+
+    val migrated = requireNotNull(store.get("movie:1"))
+    assertEquals(25_000L, migrated.positionMs)
+    assertTrue(migrated.mutationOrder > 0L)
+  }
+
+  @Test
+  fun `mark watched and remove remain effective after the wall clock moves backwards`() = runBlocking {
+    val store = store(FakePreferencesStore())
+    store.upsert(entry("movie:1", positionMs = 25_000, updatedAtMs = 50_000))
+
+    store.markWatched("movie:1", watchedAtMs = 5_000)
+
+    val watched = requireNotNull(store.get("movie:1"))
+    assertTrue(watched.watched)
+    assertEquals(5_000L, watched.updatedAtMs)
+
+    store.remove("movie:1", removedAtMs = 1_000)
+    assertNull(store.get("movie:1"))
+  }
+
+  @Test
+  fun `watch next refuses a degraded read instead of publishing authoritative empty state`() =
+    runBlocking {
+      val unreadable = object : DataStore<Preferences> {
+        override val data: Flow<Preferences> = flow { throw IOException("disk unavailable") }
+
+        override suspend fun updateData(
+          transform: suspend (t: Preferences) -> Preferences,
+        ): Preferences = throw UnsupportedOperationException()
+      }
+      val store = WatchStateStore(
+        store = unreadable,
+        log = {},
+        readLog = { _, _ -> },
+      )
+
+      assertNull(store.watchNextEntriesOrNull())
+    }
+
+  @Test
+  fun `watch next distinguishes malformed state from a healthy empty store`() = runBlocking {
+    val corrupt = FakePreferencesStore(mutablePreferencesOf(KEY_WATCH to "{{{"))
+
+    assertNull(store(corrupt).watchNextEntriesOrNull())
+    assertEquals(emptyList<WatchEntry>(), store(FakePreferencesStore()).watchNextEntriesOrNull())
+  }
+
+  @Test
+  fun `launcher dismissal survives store recreation without deleting app resume state`() =
+    runBlocking {
+      val prefs = FakePreferencesStore()
+      val first = store(prefs)
+      first.upsert(entry("movie:1", positionMs = 10_000, updatedAtMs = 10))
+
+      assertTrue(first.dismissFromWatchNext("movie:1"))
+
+      assertEquals("movie:1", first.get("movie:1")?.key)
+      assertEquals(emptyList<WatchEntry>(), first.watchNextEntriesOrNull())
+      assertEquals(emptyList<WatchEntry>(), store(prefs).watchNextEntriesOrNull())
+    }
+
+  @Test
+  fun `queued playback from before dismissal cannot resurrect the row but later playback can`() =
+    runBlocking {
+      val prefs = FakePreferencesStore()
+      val store = store(prefs)
+      val session = "watch-next-dismissal-test"
+      store.upsert(
+        entry(
+          "movie:1",
+          positionMs = 10_000,
+          updatedAtMs = 10,
+          pendingMutation = PersistenceMutationToken(session, 1),
+        ),
+      )
+      // Constructed before the launcher action, but deliberately committed after it.
+      val queuedBeforeDismissal = entry(
+        "movie:1",
+        positionMs = 20_000,
+        updatedAtMs = 20,
+        pendingMutation = PersistenceMutationToken(session, 2),
+      )
+
+      assertTrue(
+        store.dismissFromWatchNext(
+          "movie:1",
+          pendingMutation = PersistenceMutationToken(session, 3),
+        ),
+      )
+      store.upsert(queuedBeforeDismissal)
+
+      assertEquals(20_000L, store.get("movie:1")?.positionMs)
+      assertEquals(emptyList<WatchEntry>(), store.watchNextEntriesOrNull())
+
+      store.upsert(
+        entry(
+          "movie:1",
+          positionMs = 30_000,
+          updatedAtMs = 30,
+          pendingMutation = PersistenceMutationToken(session, 4),
+        ),
+      )
+
+      assertEquals(listOf("movie:1"), store.watchNextEntriesOrNull()?.map { it.key })
+    }
+
+  @Test
+  fun `later playback that commits before a delayed dismissal receiver still wins`() = runBlocking {
+    val store = store(FakePreferencesStore())
+    val session = "watch-next-delayed-receiver-test"
+    store.upsert(
+      entry(
+        "movie:1",
+        positionMs = 10_000,
+        updatedAtMs = 10,
+        pendingMutation = PersistenceMutationToken(session, 1),
+      ),
+    )
+    // Broadcast receipt captured order 2, then provider I/O delayed its DataStore transaction.
+    val dismissalAtReceipt = PersistenceMutationToken(session, 2)
+    store.upsert(
+      entry(
+        "movie:1",
+        positionMs = 20_000,
+        updatedAtMs = 20,
+        pendingMutation = PersistenceMutationToken(session, 3),
+      ),
+    )
+
+    assertTrue(store.dismissFromWatchNext("movie:1", dismissalAtReceipt))
+
+    assertEquals(listOf("movie:1"), store.watchNextEntriesOrNull()?.map { it.key })
+  }
+
+  @Test
+  fun `automatic next episode seeding does not clear a launcher dismissal`() = runBlocking {
+    val prefs = FakePreferencesStore()
+    val store = store(prefs)
+    assertTrue(store.dismissFromWatchNext("episode:1:1:2"))
+
+    store.upsertIfAbsent(entry("episode:1:1:2", updatedAtMs = 20))
+
+    assertEquals("episode:1:1:2", store.get("episode:1:1:2")?.key)
+    assertEquals(emptyList<WatchEntry>(), store.watchNextEntriesOrNull())
+  }
+
+  @Test
+  fun `legacy dismissal clears on the first playback upsert after upgrade`() = runBlocking {
+    val legacyEntry =
+      """[{"key":"movie:1","tmdbId":1,"mediaType":"movie","title":"Title","positionMs":10000,"updatedAtMs":10,"mutationOrder":1}]"""
+    val prefs = FakePreferencesStore(
+      mutablePreferencesOf(
+        KEY_WATCH to legacyEntry,
+        KEY_WATCH_NEXT_DISMISSED_LEGACY to setOf("movie:1"),
+      ),
+    )
+    val store = store(prefs)
+    assertEquals(emptyList<WatchEntry>(), store.watchNextEntriesOrNull())
+
+    store.upsert(entry("movie:1", positionMs = 20_000, updatedAtMs = 20))
+
+    assertEquals(listOf("movie:1"), store.watchNextEntriesOrNull()?.map { it.key })
+  }
+
+  @Test
+  fun `malformed dismissal state cannot become an authoritative launcher snapshot`() = runBlocking {
+    val prefs = FakePreferencesStore(
+      mutablePreferencesOf(
+        KEY_WATCH to "[]",
+        KEY_WATCH_NEXT_DISMISSALS to "{{{",
+      ),
+    )
+    val store = store(prefs)
+
+    assertNull(store.watchNextEntriesOrNull())
+    store.upsert(entry("movie:1", positionMs = 10_000, updatedAtMs = 10))
+
+    assertEquals("{{{", prefs.string(KEY_WATCH_NEXT_DISMISSALS))
+    assertEquals("movie:1", store.get("movie:1")?.key)
+    assertNull(store.watchNextEntriesOrNull())
+  }
+
+  private fun store(prefs: FakePreferencesStore) = WatchStateStore(
+    store = prefs,
+    log = { logged += it },
+  )
 
   private fun entry(
     key: String,
     positionMs: Long = 0,
     durationMs: Long = 0,
     updatedAtMs: Long,
+    pendingMutation: PersistenceMutationToken = PersistenceMutationClock.next(),
   ) = WatchEntry(
     key = key,
     tmdbId = 1,
@@ -143,11 +388,49 @@ class WatchStateStoreTest {
     positionMs = positionMs,
     durationMs = durationMs,
     updatedAtMs = updatedAtMs,
+    pendingMutation = pendingMutation,
   )
 
   private companion object {
     val KEY_WATCH = stringPreferencesKey("watch_state")
     val KEY_WATCH_REMOVALS = stringPreferencesKey("watch_state_removals")
+    val KEY_WATCH_NEXT_DISMISSALS = stringPreferencesKey("watch_next_dismissals_v2")
+    val KEY_WATCH_NEXT_DISMISSED_LEGACY = stringSetPreferencesKey("watch_next_dismissed_programs")
+  }
+}
+
+class WatchNextDismissalRetentionTest {
+  @Test
+  fun `dismissal retention is bounded and keeps the newest exact keys`() {
+    var retained = emptyList<WatchNextDismissal>()
+    for (index in 0..WatchNextDismissalPolicy.MAX_DISMISSALS) {
+      retained = WatchNextDismissalPolicy.record(
+        existing = retained,
+        key = "movie:$index",
+        mutationOrder = index + 1L,
+      )
+    }
+
+    assertEquals(WatchNextDismissalPolicy.MAX_DISMISSALS, retained.size)
+    assertFalse(retained.any { it.key == "movie:0" })
+    assertTrue(retained.any { it.key == "movie:${WatchNextDismissalPolicy.MAX_DISMISSALS}" })
+  }
+
+  @Test
+  fun `playback clears only the matching marker and only when its order is later`() {
+    val dismissed = listOf(
+      WatchNextDismissal("movie:1", mutationOrder = 10),
+      WatchNextDismissal("movie:2", mutationOrder = 11),
+    )
+
+    assertEquals(
+      dismissed,
+      WatchNextDismissalPolicy.afterPlayback(dismissed, "movie:1", mutationOrder = 10),
+    )
+    assertEquals(
+      listOf(WatchNextDismissal("movie:2", mutationOrder = 11)),
+      WatchNextDismissalPolicy.afterPlayback(dismissed, "movie:1", mutationOrder = 12),
+    )
   }
 }
 
@@ -231,6 +514,38 @@ class StreamPickStoreTest {
     assertTrue(logged.isEmpty())
   }
 
+  @Test
+  fun `stream picks use action order across backward clocks and reversed commits`() = runBlocking {
+    val store = StreamPickStore(FakePreferencesStore()) { logged += it }
+    val delayed = StreamSelection(seriesId = "tt2", label = "old", updatedAtMs = 50_000)
+    val later = StreamSelection(seriesId = "tt2", label = "new", updatedAtMs = 5_000)
+
+    store.remember(later)
+    store.remember(delayed)
+
+    val stored = requireNotNull(store.get("tt2"))
+    assertEquals("new", stored.label)
+    assertEquals(5_000L, stored.updatedAtMs)
+    assertTrue(stored.mutationOrder > 0L)
+    assertFalse(stored.pendingMutation.assigned)
+  }
+
+  @Test
+  fun `legacy stream pick json migrates even when its wall time is in the future`() = runBlocking {
+    val prefs = FakePreferencesStore(
+      mutablePreferencesOf(
+        KEY_PICKS to """[{"seriesId":"tt2","label":"legacy","updatedAtMs":50000}]""",
+      ),
+    )
+    val store = StreamPickStore(prefs) { logged += it }
+
+    store.remember(StreamSelection(seriesId = "tt2", label = "new", updatedAtMs = 5_000))
+
+    val migrated = requireNotNull(store.get("tt2"))
+    assertEquals("new", migrated.label)
+    assertTrue(migrated.mutationOrder > 0L)
+  }
+
   private companion object {
     val KEY_PICKS = stringPreferencesKey("stream_picks")
   }
@@ -243,6 +558,7 @@ class SettingsStoreSnapshotTest {
       mutablePreferencesOf(
         stringPreferencesKey("tmdb_api_key") to "abc123",
         stringPreferencesKey("addon_manifest_urls") to """["https://comet.example/manifest.json"]""",
+        stringPreferencesKey("subtitles_base_url") to "https://subs.example",
       ),
     )
 
@@ -251,6 +567,7 @@ class SettingsStoreSnapshotTest {
     assertTrue(snapshot.readable)
     assertEquals("abc123", snapshot.tmdbKey)
     assertEquals(listOf("https://comet.example/manifest.json"), snapshot.addonUrls)
+    assertEquals("https://subs.example", snapshot.subtitlesBaseUrl)
   }
 
   @Test
@@ -308,12 +625,147 @@ class SettingsStoreSnapshotTest {
     )
   }
 
+  @Test
+  fun `a degraded subtitle seed does not overwrite the stored custom addon`() = runBlocking {
+    val prefs = FakePreferencesStore(
+      mutablePreferencesOf(stringPreferencesKey("subtitles_base_url") to "https://saved-subs.example"),
+    )
+    val resolved = SettingsSaveGuard.resolve(
+      SettingsDraft("", emptyList(), SubtitlesClient.OPENSUBTITLES_V3_BASE),
+      StoredSettings("", emptyList(), readable = false),
+    )
+
+    SettingsStore(prefs).persist(resolved)
+
+    assertEquals(
+      "https://saved-subs.example",
+      prefs.string(stringPreferencesKey("subtitles_base_url")),
+    )
+  }
+
+  @Test
+  fun `addon mutation reads the commit snapshot even while the public read is degraded`() =
+    runBlocking {
+      val key = stringPreferencesKey("addon_manifest_urls")
+      val prefs = DegradedReadWritableStore(
+        mutablePreferencesOf(key to """["https://saved.example/manifest.json"]"""),
+      )
+
+      val changed = SettingsStore(prefs) { _, _ -> }.updateAddonManifestUrls { current ->
+        current + "https://new.example/manifest.json"
+      }
+
+      assertTrue(changed)
+      assertEquals(
+        """["https://saved.example/manifest.json","https://new.example/manifest.json"]""",
+        prefs.string(key),
+      )
+    }
+
+  @Test
+  fun `malformed addon json is not mistaken for an absent list or overwritten by a mutation`() =
+    runBlocking {
+      val key = stringPreferencesKey("addon_manifest_urls")
+      val corrupt = "{{{"
+      val prefs = FakePreferencesStore(
+        mutablePreferencesOf(
+          key to corrupt,
+          stringPreferencesKey("addon_manifest_url") to "https://legacy.example/manifest.json",
+        ),
+      )
+      val store = SettingsStore(prefs)
+
+      val result = runCatching {
+        store.updateAddonManifestUrls { it + "https://new.example/manifest.json" }
+      }
+      val directListResult = runCatching {
+        store.setAddonManifestUrls(listOf("https://new.example/manifest.json"))
+      }
+      val directConfigurationResult = runCatching {
+        store.setConfiguration("key", listOf("https://new.example/manifest.json"), "")
+      }
+
+      assertTrue(result.isFailure)
+      assertTrue(directListResult.isFailure)
+      assertTrue(directConfigurationResult.isFailure)
+      assertEquals(corrupt, prefs.string(key))
+      assertEquals(emptyList<String>(), store.addonManifestUrls.first())
+      val snapshot = store.storedSnapshot()
+      assertTrue(snapshot.readable)
+      assertFalse(snapshot.addonUrlsReadable)
+      assertEquals(emptyList<String>(), snapshot.addonUrls)
+    }
+
+  @Test
+  fun `a guarded settings save leaves malformed addon bytes untouched even with typed urls`() =
+    runBlocking {
+      val addonKey = stringPreferencesKey("addon_manifest_urls")
+      val tmdbKey = stringPreferencesKey("tmdb_api_key")
+      val subtitlesKey = stringPreferencesKey("subtitles_base_url")
+      val corrupt = "not-json"
+      val prefs = FakePreferencesStore(mutablePreferencesOf(addonKey to corrupt))
+      val store = SettingsStore(prefs)
+      val stored = store.storedSnapshot()
+      val resolved = SettingsSaveGuard.resolve(
+        SettingsDraft(
+          tmdbKey = "new-key",
+          addonUrls = listOf("https://new.example/manifest.json"),
+          subtitlesBaseUrl = "https://subs.example",
+        ),
+        stored,
+      )
+
+      store.persist(resolved)
+
+      assertTrue(resolved.keptAddonUrls)
+      assertTrue(resolved.addonUrlsUnreadable)
+      assertEquals(corrupt, prefs.string(addonKey))
+      assertEquals("new-key", prefs.string(tmdbKey))
+      assertEquals("https://subs.example", prefs.string(subtitlesKey))
+    }
+
+  @Test
+  fun `settings persist refuses malformed addon bytes that appeared after resolution`() =
+    runBlocking {
+      val addonKey = stringPreferencesKey("addon_manifest_urls")
+      val tmdbKey = stringPreferencesKey("tmdb_api_key")
+      val corrupt = "not-json"
+      val prefs = FakePreferencesStore(mutablePreferencesOf(addonKey to corrupt))
+      val resolved = SettingsSaveGuard.resolve(
+        SettingsDraft(
+          tmdbKey = "new-key",
+          addonUrls = listOf("https://new.example/manifest.json"),
+          subtitlesBaseUrl = "",
+        ),
+        // This represents the earlier healthy snapshot. The store contains malformed bytes by
+        // the time persist enters its transaction, and those current bytes must win the check.
+        StoredSettings(tmdbKey = "old-key", addonUrls = emptyList()),
+      )
+
+      val result = runCatching { SettingsStore(prefs).persist(resolved) }
+
+      assertTrue(result.isFailure)
+      assertEquals(corrupt, prefs.string(addonKey))
+      assertNull(prefs.string(tmdbKey))
+    }
+
   private class UnreadableStore : DataStore<Preferences> {
     override val data: Flow<Preferences> = flow { throw IOException("disk unavailable") }
 
     override suspend fun updateData(
       transform: suspend (t: Preferences) -> Preferences,
     ): Preferences = throw UnsupportedOperationException()
+  }
+
+  private class DegradedReadWritableStore(initial: Preferences) : DataStore<Preferences> {
+    private var stored = initial
+    override val data: Flow<Preferences> = flow { throw IOException("read path unavailable") }
+
+    override suspend fun updateData(
+      transform: suspend (t: Preferences) -> Preferences,
+    ): Preferences = transform(stored).also { stored = it }
+
+    fun string(key: Preferences.Key<String>): String? = stored[key]
   }
 }
 

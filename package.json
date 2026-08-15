@@ -1,7 +1,8 @@
 {
   "name": "stremio-shell-tv",
   "private": true,
-  "version": "0.6.1",
+  "version": "0.6.2",
+  "license": "GPL-3.0-or-later",
   "description": "Android/Google TV app for Stremio: native Jetpack Compose UI, TMDB metadata, Stremio stream addons, libmpv playback.",
   "scripts": {
     "android:tv:assemble": "node scripts/run-gradle.mjs :app:assembleDebug",

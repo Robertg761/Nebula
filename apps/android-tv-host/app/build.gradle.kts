@@ -1,3 +1,5 @@
+import groovy.json.JsonSlurper
+
 plugins {
   id("com.android.application")
   id("org.jetbrains.kotlin.android")
@@ -28,9 +30,56 @@ val githubReleaseRepo = (project.findProperty("githubReleaseRepo") as String?)
   .orEmpty()
   .ifBlank { "Nebula" }
 
+/*
+ * workflow_dispatch builds run from the branch commit, before the release tag exists, so Git does
+ * not expose the prerelease suffix to Gradle. GitHub does expose the validated dispatch inputs in
+ * its event file. Embedding that suffix in the shipped package version is what lets an installed
+ * beta distinguish itself from the stable release built from the same numeric source version.
+ */
+val githubPrereleaseVersionSuffix = run {
+  if (
+    System.getenv("GITHUB_ACTIONS") != "true" ||
+    System.getenv("GITHUB_EVENT_NAME") != "workflow_dispatch"
+  ) {
+    return@run ""
+  }
+  val eventPath = System.getenv("GITHUB_EVENT_PATH")?.takeIf { it.isNotBlank() }
+    ?: return@run ""
+  val inputs = runCatching {
+    val event = JsonSlurper().parse(file(eventPath)) as? Map<*, *>
+    event?.get("inputs") as? Map<*, *>
+  }.getOrNull() ?: return@run ""
+  if (inputs["prerelease"]?.toString() != "true") return@run ""
+  val suffix = inputs["tag_suffix"]?.toString()?.trim().orEmpty()
+  if (!suffix.matches(Regex("[0-9A-Za-z]+([.-][0-9A-Za-z]+)*")) || suffix.length > 64) {
+    throw GradleException("GitHub prerelease tag_suffix is missing or invalid")
+  }
+  "-$suffix"
+}
+
+val repositoryRoot = rootProject.layout.projectDirectory.dir("../..")
+val generatedLegalAssets = layout.buildDirectory.dir("generated/legal-assets")
+val syncLegalAssets = tasks.register<Sync>("syncLegalAssets") {
+  from(repositoryRoot.file("LICENSE")) {
+    into("licenses")
+    rename { "GPL-3.0-or-later.txt" }
+  }
+  from(repositoryRoot.file("THIRD_PARTY_NOTICES.md")) {
+    into("licenses")
+  }
+  from(repositoryRoot.file("apps/android-tv-host/licenses/Outfit-OFL.txt")) {
+    into("licenses")
+  }
+  into(generatedLegalAssets)
+}
+
 android {
   namespace = "com.stremioshell.host"
   compileSdk = 34
+  // AGP creates one instrumented-test target per configuration. Debug remains the local/PR
+  // default; the release workflow opts into the minified emulator target with a Gradle property.
+  testBuildType = providers.gradleProperty("nebulaInstrumentationBuildType")
+    .getOrElse("debug")
 
   defaultConfig {
     // Keep the historical .tv application id so self-updates keep installing
@@ -38,8 +87,8 @@ android {
     applicationId = "com.stremioshell.host.tv"
     minSdk = 26
     targetSdk = 34
-    versionCode = 17
-    versionName = "0.6.1"
+    versionCode = 18
+    versionName = "0.6.2"
     // app_name lives in res/values/strings.xml alone; a generated resValue of the same name used
     // to shadow it, so the launcher label and the in-app copy could disagree.
     buildConfigField("String", "GITHUB_RELEASE_OWNER", "\"$githubReleaseOwner\"")
@@ -65,6 +114,9 @@ android {
 
   buildTypes {
     debug {
+      // Keep Android's accented and RTL pseudolocales available on development builds so clipped
+      // copy and direction mistakes can be reproduced without maintaining test translations.
+      isPseudoLocalesEnabled = true
       // Android's API 26/34 TV system images are x86, while local generic
       // emulators are commonly x86_64. libmpv 0.4.1 ships both, so debug keeps
       // both emulator ABIs on top of the ABIs a physical device can sideload.
@@ -75,6 +127,7 @@ android {
       manifestPlaceholders["usesCleartextTraffic"] = "true"
     }
     release {
+      versionNameSuffix = githubPrereleaseVersionSuffix
       // Both ARM ABIs, neither x86. Dropping armeabi-v7a was tried and reverted:
       // the Google TV Streamer itself (kirkwood, this app's primary target)
       // reports ro.product.cpu.abilist=armeabi-v7a,armeabi - a 32-bit userspace -
@@ -96,6 +149,21 @@ android {
         signingConfig = signingConfigs.getByName("release")
       }
       manifestPlaceholders["usesCleartextTraffic"] = "false"
+    }
+    create("emulatorRelease") {
+      initWith(getByName("release"))
+      // GitHub's Android TV AVDs in this workflow are x86. Keep every release behavior that can be
+      // exercised there, including R8, resource shrinking, non-debuggable code, and the production
+      // cleartext policy. ABI, certificate, and the narrow cross-APK test keep rules below differ
+      // from the shipping ARM APK.
+      ndk {
+        abiFilters.clear()
+        abiFilters += listOf("x86", "x86_64")
+      }
+      signingConfig = signingConfigs.getByName("debug")
+      matchingFallbacks += listOf("release")
+      proguardFiles("proguard-emulator-release-rules.pro")
+      testProguardFiles("proguard-emulator-test-rules.pro")
     }
   }
 
@@ -165,7 +233,11 @@ android {
   testOptions {
     animationsDisabled = true
   }
+
+  sourceSets.getByName("main").assets.srcDir(generatedLegalAssets)
 }
+
+tasks.named("preBuild").configure { dependsOn(syncLegalAssets) }
 
 kotlin {
   jvmToolchain(17)

@@ -15,6 +15,7 @@ class BackgroundUpdateWorker(
 ) : Worker(appContext, workerParams) {
   private val updateRepository = UpdateRepository()
   private val apkUpdateManager = ApkUpdateManager()
+  private val statusStore = UpdateStatusStore(appContext)
 
   /**
    * Never returns [Result.failure]. This is the periodic release check, and WorkManager drops a
@@ -25,10 +26,18 @@ class BackgroundUpdateWorker(
    */
   override fun doWork(): Result {
     return try {
-      runUpdateCheck()
+      // Periodic and manual work have separate WorkManager names. Serialize their complete check
+      // paths so they cannot race status publication or spend two anonymous GitHub requests on the
+      // same moment. This lock does not cover prompt or Settings reads.
+      UpdateCheckExecution.exclusive { runUpdateCheck() }
     } catch (error: Throwable) {
-      Log.w(TAG, "Periodic update check threw: ${error.message}")
-      if (isRetryable(error)) Result.retry() else Result.success()
+      val retryable = isRetryable(error)
+      val kind = failureKind(error, duringDownload = false)
+      Log.w(TAG, "Update check stopped unexpectedly (${kind.name}).")
+      runCatching {
+        statusStore.recordFailedCheck(kind, retryScheduled = retryable)
+      }
+      if (retryable) Result.retry() else Result.success()
     }
   }
 
@@ -41,9 +50,14 @@ class BackgroundUpdateWorker(
     val repo = BuildConfig.GITHUB_RELEASE_REPO.trim()
     if (owner.isBlank() || repo.isBlank()) {
       Log.d(TAG, "Skipping periodic update check: release repository not configured.")
+      statusStore.recordFailedCheck(
+        UpdateFailureKind.CONFIGURATION,
+        retryScheduled = false,
+      )
       return Result.success()
     }
 
+    statusStore.recordChecking()
     val info = runCatching {
       updateRepository.checkForUpdate(
         owner = owner,
@@ -51,56 +65,107 @@ class BackgroundUpdateWorker(
         currentVersionName = BuildConfig.VERSION_NAME
       )
     }.getOrElse { error ->
-      Log.w(TAG, "Periodic update check failed: ${error.message}")
-      return if (isRetryable(error)) Result.retry() else Result.success()
+      val retryable = isRetryable(error)
+      val kind = failureKind(error, duringDownload = false)
+      Log.w(TAG, "Update check failed (${kind.name}).")
+      statusStore.recordFailedCheck(kind, retryScheduled = retryable)
+      return if (retryable) Result.retry() else Result.success()
     }
+    val checkedAtMs = System.currentTimeMillis()
 
-    // Query DownloadManager rather than trusting the persisted id. Failed,
-    // cancelled and system-pruned rows are reconciled here so they cannot wedge
-    // every future worker run in DOWNLOAD_IN_PROGRESS.
-    val hasActiveDownload = apkUpdateManager.isDownloadInProgress(applicationContext)
-    val hasDownloadedForVersion = !hasActiveDownload && (
-      info?.let {
-        apkUpdateManager.hasDownloadedApkForVersion(applicationContext, it.latestVersionName)
+    // Hold the updater's publication gate across observation, decision, cleanup, and enqueue so a
+    // prompt-side reconciliation cannot change ownership between those steps. The GitHub request
+    // above stays outside this gate, so Settings and the prompt are never blocked behind network
+    // I/O. The worker-level gate above independently prevents duplicate manual/periodic runs.
+    return DownloadStatePublication.exclusive {
+      // Query DownloadManager rather than trusting the persisted id. Failed,
+      // cancelled and system-pruned rows are reconciled here so they cannot wedge
+      // every future worker run in DOWNLOAD_IN_PROGRESS.
+      val hasActiveDownload = apkUpdateManager.isDownloadInProgress(applicationContext)
+      val hasDownloadedForVersion = !hasActiveDownload && (
+        info?.let {
+          apkUpdateManager.hasDownloadedApkForVersion(applicationContext, it.latestVersionName)
+        } ?: false
+      )
+      // Asking also forgets the stored rejection when this is a different release, which is how a
+      // new version un-sticks a device that refused the previous one.
+      val isRejectedRelease = info?.let {
+        apkUpdateManager.isRejectedRelease(applicationContext, it)
       } ?: false
-    )
-    // Asking also forgets the stored rejection when this is a different release, which is how a
-    // new version un-sticks a device that refused the previous one.
-    val isRejectedRelease = info?.let {
-      apkUpdateManager.isRejectedRelease(applicationContext, it.latestVersionName)
-    } ?: false
-    val decision = AutoUpdatePolicy.decide(
-      updateInfo = info,
-      hasDownloadedForVersion = hasDownloadedForVersion,
-      hasActiveDownload = hasActiveDownload,
-      isRejectedRelease = isRejectedRelease
-    )
+      val decision = AutoUpdatePolicy.decide(
+        updateInfo = info,
+        hasDownloadedForVersion = hasDownloadedForVersion,
+        hasActiveDownload = hasActiveDownload,
+        isRejectedRelease = isRejectedRelease
+      )
 
-    return when (decision) {
-      AutoUpdatePolicy.Decision.NO_UPDATE -> Result.success()
-      AutoUpdatePolicy.Decision.ALREADY_DOWNLOADED -> Result.success()
-      AutoUpdatePolicy.Decision.DOWNLOAD_IN_PROGRESS -> Result.success()
-      AutoUpdatePolicy.Decision.REJECTED_RELEASE -> {
-        Log.d(
-          TAG,
-          "Skipping ${info?.latestVersionName}: already rejected " +
-            "(${apkUpdateManager.getRejectedReleaseReason(applicationContext)}).",
-        )
-        Result.success()
-      }
-      AutoUpdatePolicy.Decision.START_DOWNLOAD -> {
-        val updateInfo = info ?: return Result.success()
-        runCatching {
-          apkUpdateManager.clearDownloadedState(applicationContext)
-          apkUpdateManager.startDownload(applicationContext, updateInfo)
-          Log.d(TAG, "Queued background update download for ${updateInfo.latestVersionName}.")
-        }.fold(
-          onSuccess = { Result.success() },
-          onFailure = { error ->
-            Log.w(TAG, "Failed to queue background update download: ${error.message}")
-            if (isRetryable(error)) Result.retry() else Result.success()
-          }
-        )
+      when (decision) {
+        AutoUpdatePolicy.Decision.NO_UPDATE -> {
+          statusStore.recordSuccessfulCheck(UpdateStatusPhase.UP_TO_DATE, checkedAtMs)
+          Result.success()
+        }
+        AutoUpdatePolicy.Decision.ALREADY_DOWNLOADED -> {
+          statusStore.recordSuccessfulCheck(
+            UpdateStatusPhase.READY,
+            checkedAtMs,
+            info?.latestVersionName,
+          )
+          Result.success()
+        }
+        AutoUpdatePolicy.Decision.DOWNLOAD_IN_PROGRESS -> {
+          // The active row may belong to a release older than the newest repository response.
+          // Report the bytes Android is actually transferring, not the release we cannot start yet.
+          val activeVersion = apkUpdateManager.getDownloadedVersionName(applicationContext)
+            ?: info?.latestVersionName
+          statusStore.recordSuccessfulCheck(
+            UpdateStatusPhase.DOWNLOADING,
+            checkedAtMs,
+            activeVersion,
+          )
+          Result.success()
+        }
+        AutoUpdatePolicy.Decision.REJECTED_RELEASE -> {
+          Log.d(
+            TAG,
+            "Skipping ${info?.latestVersionName}: already rejected " +
+              "(${apkUpdateManager.getRejectedReleaseReason(applicationContext)}).",
+          )
+          statusStore.recordFailedCheck(
+            failureKind = UpdateFailureKind.REJECTED_RELEASE,
+            retryScheduled = false,
+            successfulCheckAtMs = checkedAtMs,
+            targetVersionName = info?.latestVersionName,
+          )
+          Result.success()
+        }
+        AutoUpdatePolicy.Decision.START_DOWNLOAD -> {
+          val updateInfo = info ?: return@exclusive Result.success()
+          runCatching {
+            if (!apkUpdateManager.clearDownloadedState(applicationContext)) {
+              throw IOException("Update download ownership is still being reconciled")
+            }
+            apkUpdateManager.startDownload(applicationContext, updateInfo)
+            statusStore.recordSuccessfulCheck(
+              UpdateStatusPhase.DOWNLOAD_QUEUED,
+              checkedAtMs,
+              updateInfo.latestVersionName,
+            )
+            Log.d(TAG, "Queued background update download for ${updateInfo.latestVersionName}.")
+          }.fold(
+            onSuccess = { Result.success() },
+            onFailure = { error ->
+              val retryable = isRetryable(error)
+              Log.w(TAG, "Failed to queue background update download (DOWNLOAD).")
+              statusStore.recordFailedCheck(
+                failureKind = failureKind(error, duringDownload = true),
+                retryScheduled = retryable,
+                successfulCheckAtMs = checkedAtMs,
+                targetVersionName = updateInfo.latestVersionName,
+              )
+              if (retryable) Result.retry() else Result.success()
+            }
+          )
+        }
       }
     }
   }
@@ -114,9 +179,62 @@ class BackgroundUpdateWorker(
         return true
       }
 
+      findGitHubApiException(error)?.let { apiError ->
+        return apiError.rateLimited || apiError.statusCode in 500..599
+      }
+
       val message = error.message.orEmpty()
       val statusCode = GITHUB_ERROR_REGEX.find(message)?.groupValues?.getOrNull(1)?.toIntOrNull()
       return statusCode == 429 || (statusCode != null && statusCode in 500..599)
     }
+
+    internal fun failureKind(
+      error: Throwable,
+      duringDownload: Boolean,
+    ): UpdateFailureKind {
+      if (duringDownload) return UpdateFailureKind.DOWNLOAD
+
+      findGitHubApiException(error)?.let { apiError ->
+        return when {
+          apiError.rateLimited -> UpdateFailureKind.RATE_LIMITED
+          apiError.statusCode in 500..599 -> UpdateFailureKind.SERVER
+          else -> UpdateFailureKind.UNKNOWN
+        }
+      }
+
+      if (error is UnknownHostException || error is SocketTimeoutException || error is IOException) {
+        return UpdateFailureKind.NETWORK
+      }
+
+      val statusCode = GITHUB_ERROR_REGEX.find(error.message.orEmpty())
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.toIntOrNull()
+      return when {
+        statusCode == 429 -> UpdateFailureKind.RATE_LIMITED
+        statusCode != null && statusCode in 500..599 -> UpdateFailureKind.SERVER
+        else -> UpdateFailureKind.UNKNOWN
+      }
+    }
+
+    private fun findGitHubApiException(error: Throwable): GitHubApiException? {
+      var current: Throwable? = error
+      var depth = 0
+      while (current != null && depth < MAX_CAUSE_DEPTH) {
+        if (current is GitHubApiException) return current
+        current = current.cause
+        depth++
+      }
+      return null
+    }
+
+    private const val MAX_CAUSE_DEPTH = 8
   }
+}
+
+/** Process-local gate shared by every BackgroundUpdateWorker instance. */
+internal object UpdateCheckExecution {
+  private val lock = Any()
+
+  fun <T> exclusive(block: () -> T): T = synchronized(lock, block)
 }

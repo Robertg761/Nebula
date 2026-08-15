@@ -1,6 +1,24 @@
 package com.stremioshell.host.tv.player
 
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
+
+/**
+ * Cross-thread epoch for a seek that has left the main-thread coalescer but is still queued on the
+ * mpv worker. Up Next is a same-file modal transition, so the file generation cannot invalidate
+ * that command; this narrower gate can.
+ */
+internal class SeekDispatchGate {
+  private val epoch = AtomicLong(0L)
+
+  fun capture(): Long = epoch.get()
+
+  fun invalidate() {
+    epoch.incrementAndGet()
+  }
+
+  fun allows(capturedEpoch: Long): Boolean = epoch.get() == capturedEpoch
+}
 
 /**
  * How mpv should land a coalesced seek.

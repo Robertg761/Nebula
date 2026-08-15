@@ -4,11 +4,14 @@ import com.stremioshell.host.tv.data.addon.AddonList
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
+import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -26,11 +29,16 @@ import org.junit.Test
 class ConfigPairingServerTest {
   private val token = "abc123xyz0"
   private val submissions = LinkedBlockingQueue<PairingSubmission>()
+  private val directCompletionDispatcher: ((() -> Unit) -> Unit) = { completion -> completion() }
   private lateinit var server: ConfigPairingServer
 
   @Before
   fun startServer() {
-    server = ConfigPairingServer(token) { submission ->
+    server = ConfigPairingServer(
+      token,
+      LOOPBACK_V4,
+      responseCompletionDispatcher = directCompletionDispatcher,
+    ) { submission ->
       submissions.add(submission)
       PairingApplyResult.Saved(receiptFor(submission))
     }
@@ -42,10 +50,17 @@ class ConfigPairingServerTest {
     server.stop()
   }
 
-  private data class Reply(val code: Int, val body: String, val connection: String? = null)
+  private data class Reply(
+    val code: Int,
+    val body: String,
+    val connection: String? = null,
+    val contentSecurityPolicy: String? = null,
+    val referrerPolicy: String? = null,
+  )
 
-  private fun request(path: String, form: String? = null): Reply {
-    val connection = URL("http://127.0.0.1:${server.listeningPort}$path")
+  private fun request(path: String, form: String? = null, host: String = LOOPBACK_V4): Reply {
+    val urlHost = if (':' in host) "[$host]" else host
+    val connection = URL("http://$urlHost:${server.listeningPort}$path")
       .openConnection() as HttpURLConnection
     connection.connectTimeout = 5_000
     connection.readTimeout = 5_000
@@ -62,6 +77,8 @@ class ConfigPairingServerTest {
         code,
         stream?.bufferedReader()?.use { it.readText() }.orEmpty(),
         connection.getHeaderField("Connection"),
+        connection.getHeaderField("Content-Security-Policy"),
+        connection.getHeaderField("Referrer-Policy"),
       )
     } finally {
       connection.disconnect()
@@ -76,7 +93,7 @@ class ConfigPairingServerTest {
     contentType: String = "application/x-www-form-urlencoded",
     body: String = "",
     path: String = "/config?t=$token",
-  ): Reply = Socket("127.0.0.1", server.listeningPort).use { socket ->
+  ): Reply = Socket(LOOPBACK_V4, server.listeningPort).use { socket ->
     socket.soTimeout = 5_000
     val request = buildString {
       append("POST $path HTTP/1.1\r\n")
@@ -143,6 +160,34 @@ class ConfigPairingServerTest {
   }
 
   @Test
+  fun `the listener is bound only to the selected address rather than every interface`() {
+    val connectedOnAnotherLoopbackAddress = runCatching {
+      Socket().use { socket ->
+        socket.connect(InetSocketAddress("127.0.0.2", server.listeningPort), 500)
+      }
+    }.isSuccess
+
+    assertFalse("server also accepted 127.0.0.2", connectedOnAnotherLoopbackAddress)
+    assertEquals(200, request("/?t=$token").code)
+  }
+
+  @Test
+  fun `an IPv6-only selected interface can serve a bracketed QR authority`() {
+    server.stop()
+    server = ConfigPairingServer(
+      token,
+      LOOPBACK_V6,
+      responseCompletionDispatcher = directCompletionDispatcher,
+    ) { submission ->
+      submissions.add(submission)
+      PairingApplyResult.Saved(receiptFor(submission))
+    }
+    server.start()
+
+    assertEquals(200, request("/?t=$token", host = LOOPBACK_V6).code)
+  }
+
+  @Test
   fun `the tokened form never echoes the stored configuration back`() {
     val reply = request("/?t=$token")
 
@@ -160,6 +205,21 @@ class ConfigPairingServerTest {
     // ...and it carries the token onward in the action, where the server can authenticate before
     // parsing the credential-bearing body.
     assertTrue(reply.body, reply.body.contains("""action="/config?t=$token""""))
+    assertTrue(reply.body, reply.body.contains("https://www.themoviedb.org/settings/api"))
+    assertTrue(reply.body, reply.body.contains("Check and save to TV"))
+    assertTrue(
+      reply.body,
+      reply.body.contains("maxlength=\"${PairingSubmission.MAX_TMDB_KEY_CHARS}\""),
+    )
+    assertTrue(
+      reply.body,
+      reply.body.contains("maxlength=\"${PairingSubmission.MAX_ADDON_INPUT_CHARS}\""),
+    )
+    assertTrue(
+      reply.contentSecurityPolicy,
+      reply.contentSecurityPolicy?.contains("form-action 'self'") == true,
+    )
+    assertEquals("no-referrer", reply.referrerPolicy)
   }
 
   @Test
@@ -238,6 +298,43 @@ class ConfigPairingServerTest {
   }
 
   @Test
+  fun `stopping pairing does not interrupt an apply already in progress`() {
+    server.stop()
+    val applying = CountDownLatch(1)
+    val releaseApply = CountDownLatch(1)
+    val applied = CountDownLatch(1)
+    val interrupted = AtomicBoolean(false)
+    server = ConfigPairingServer(
+      token,
+      LOOPBACK_V4,
+      responseCompletionDispatcher = directCompletionDispatcher,
+    ) { submission ->
+      applying.countDown()
+      try {
+        releaseApply.await(5, TimeUnit.SECONDS)
+        applied.countDown()
+        PairingApplyResult.Saved(receiptFor(submission))
+      } catch (_: InterruptedException) {
+        interrupted.set(true)
+        PairingApplyResult.Failed("interrupted")
+      }
+    }
+    server.start()
+    val requester = Thread {
+      runCatching { request("/config?t=$token", form = "tmdb=my-key") }
+    }.apply { start() }
+
+    assertTrue(applying.await(2, TimeUnit.SECONDS))
+    // stop() closes the phone socket and returns, but the configuration callback owns its commit.
+    server.stop()
+    assertFalse(interrupted.get())
+    releaseApply.countDown()
+    assertTrue(applied.await(2, TimeUnit.SECONDS))
+    requester.join(2_000)
+    assertFalse(interrupted.get())
+  }
+
+  @Test
   fun `an addon box with nothing usable in it is reported, not half-applied`() {
     val reply = request("/config?t=$token", form = "tmdb=my-key&addon=stremio%3A%2F%2F")
 
@@ -269,10 +366,46 @@ class ConfigPairingServerTest {
   }
 
   @Test
+  fun `a successful apply dispatches receipt publication after its phone response has finished`() {
+    server.stop()
+    val responsesFinished = CountDownLatch(1)
+    val callbackCount = AtomicInteger()
+    val pendingCompletions = LinkedBlockingQueue<() -> Unit>()
+    server = ConfigPairingServer(
+      token = token,
+      bindHost = LOOPBACK_V4,
+      onApplyResponseFinished = {
+        callbackCount.incrementAndGet()
+        responsesFinished.countDown()
+      },
+      responseCompletionDispatcher = { completion -> pendingCompletions.add(completion) },
+      onConfig = { submission ->
+        submissions.add(submission)
+        PairingApplyResult.Saved(receiptFor(submission))
+      },
+    )
+    server.start()
+
+    val reply = request("/config?t=$token", form = "tmdb=first")
+
+    assertTrue(reply.body, reply.body.contains("Saved to your TV"))
+    assertEquals(0, callbackCount.get())
+    val completion = pendingCompletions.poll(2, TimeUnit.SECONDS)
+    assertTrue("response completion was not dispatched", completion != null)
+    completion!!.invoke()
+    assertTrue(responsesFinished.await(2, TimeUnit.SECONDS))
+    assertEquals(1, callbackCount.get())
+  }
+
+  @Test
   fun `a storage failure is reported and releases the token for a retry`() {
     server.stop()
     val attempts = AtomicInteger()
-    server = ConfigPairingServer(token) { submission ->
+    server = ConfigPairingServer(
+      token,
+      LOOPBACK_V4,
+      responseCompletionDispatcher = directCompletionDispatcher,
+    ) { submission ->
       if (attempts.getAndIncrement() == 0) {
         PairingApplyResult.Failed("Storage is temporarily unavailable.")
       } else {
@@ -419,6 +552,9 @@ class ConfigPairingServerTest {
   }
 
   private companion object {
+    const val LOOPBACK_V4 = "127.0.0.1"
+    const val LOOPBACK_V6 = "::1"
+
     /** Comfortably past the cap, and past any accept backlog the OS would absorb quietly. */
     const val FLOOD_CONNECTIONS = 40
   }

@@ -83,6 +83,48 @@ class WatchNextDeepLinkTest {
     assertEquals(WatchNextTarget("show", 1399), target)
   }
 
+  @Test
+  fun `negative and absurd episode coordinates are dropped`() {
+    assertEquals(
+      WatchNextTarget("show", 1399),
+      WatchNextDeepLink.parse(
+        "stremio-tv://watch-next?type=show&tmdb=1399&season=-1&episode=2147483647",
+      ),
+    )
+    assertEquals(
+      WatchNextTarget("show", 1399),
+      WatchNextDeepLink.parse(
+        "stremio-tv://watch-next?type=show&tmdb=1399&season=1001&episode=10001",
+      ),
+    )
+  }
+
+  @Test
+  fun `negative and overbound resume positions are rejected`() {
+    assertEquals(
+      WatchNextTarget("movie", 550),
+      WatchNextDeepLink.parse(
+        "stremio-tv://watch-next?type=movie&tmdb=550&position=-1",
+      ),
+    )
+    assertEquals(
+      WatchNextTarget("movie", 550),
+      WatchNextDeepLink.parse(
+        "stremio-tv://watch-next?type=movie&tmdb=550&position=${Long.MAX_VALUE}",
+      ),
+    )
+  }
+
+  @Test
+  fun `builder omits an unsafe resume position`() {
+    assertEquals(
+      "stremio-tv://watch-next?type=movie&tmdb=550",
+      WatchNextDeepLink.build(
+        WatchNextTarget("movie", 550, resumePositionMs = Long.MAX_VALUE),
+      ),
+    )
+  }
+
   private fun entry(
     key: String,
     tmdbId: Int,

@@ -42,6 +42,7 @@ class StreamQualityTest {
     assertFalse(StreamQuality.of("Movie UHD BluRay x265").hdr)
     assertTrue(StreamQuality.of("Movie 2160p HDR10+ WEB-DL").hdr)
     assertTrue(StreamQuality.of("Movie 2160p hdr").hdr)
+    assertTrue(StreamQuality.of("Movie 2160p HDR10Plus WEB-DL").hdr)
   }
 
   @Test
@@ -72,6 +73,13 @@ class StreamQualityTest {
 
     // Still not a licence to read a height out of arbitrary trailing text.
     assertNull(StreamQuality.of("[RD+] 1080price drop").resolutionHeight)
+  }
+
+  @Test
+  fun `a frame rate suffix does not hide the pixel height`() {
+    assertEquals(1080, StreamQuality.of("Show.S01E01.1080p60.WEB-DL").resolutionHeight)
+    assertEquals(1080, StreamQuality.of("Show.1080p60.dts-hd.ma").resolutionHeight)
+    assertEquals(2160, StreamQuality.of("Movie.2160p120fps.HDR").resolutionHeight)
   }
 
   @Test

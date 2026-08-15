@@ -6,10 +6,10 @@ level, and physical playback boundaries must be stated explicitly.
 
 ## Before starting
 
-The root project-license decision is still pending. Do not assume a license
-grant beyond GitHub's terms. External contributors should discuss substantial
-work with the maintainer before investing time; the maintainer must settle
-project licensing and contribution terms before accepting outside code.
+Nebula is licensed under GPL-3.0-or-later. By submitting a contribution, you
+agree to license that contribution under the same terms. External contributors
+should still discuss substantial work with the maintainer before investing
+time so product direction and TV validation expectations are clear.
 
 Never use production TMDB, addon, debrid, or signing credentials in tests,
 screenshots, issues, commits, shell history, or CI artifacts.

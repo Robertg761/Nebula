@@ -1,6 +1,7 @@
 package com.stremioshell.host.update
 
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
@@ -27,6 +28,33 @@ class BackgroundUpdateWorkerTest {
   @Test
   fun `returns true for generic exception with GitHub API error 429`() {
     assertTrue(BackgroundUpdateWorker.isRetryable(RuntimeException("GitHub API error 429")))
+  }
+
+  @Test
+  fun `returns true for a typed GitHub rate limit 403`() {
+    val error = GitHubReleaseApi.apiException(
+      statusCode = 403,
+      retryAfterHeader = "60",
+      rateLimitRemainingHeader = null,
+      rateLimitResetHeader = null,
+      body = "secondary rate limit",
+    )
+
+    assertTrue(BackgroundUpdateWorker.isRetryable(error))
+    assertTrue(BackgroundUpdateWorker.isRetryable(RuntimeException("wrapped", error)))
+  }
+
+  @Test
+  fun `returns false for an ordinary typed GitHub forbidden response`() {
+    val error = GitHubReleaseApi.apiException(
+      statusCode = 403,
+      retryAfterHeader = null,
+      rateLimitRemainingHeader = "59",
+      rateLimitResetHeader = null,
+      body = "Resource not accessible",
+    )
+
+    assertFalse(BackgroundUpdateWorker.isRetryable(error))
   }
 
   @Test
@@ -77,5 +105,46 @@ class BackgroundUpdateWorkerTest {
   @Test
   fun `returns false for general Exception`() {
     assertFalse(BackgroundUpdateWorker.isRetryable(Exception("Unknown error")))
+  }
+
+  @Test
+  fun `classifies check failures without retaining throwable messages`() {
+    val rateLimit = GitHubReleaseApi.apiException(
+      statusCode = 429,
+      retryAfterHeader = "60",
+      rateLimitRemainingHeader = "0",
+      rateLimitResetHeader = null,
+      body = "request body that must not be retained",
+    )
+    val server = GitHubReleaseApi.apiException(
+      statusCode = 503,
+      retryAfterHeader = null,
+      rateLimitRemainingHeader = null,
+      rateLimitResetHeader = null,
+      body = "provider details",
+    )
+
+    assertEquals(
+      UpdateFailureKind.RATE_LIMITED,
+      BackgroundUpdateWorker.failureKind(rateLimit, duringDownload = false),
+    )
+    assertEquals(
+      UpdateFailureKind.SERVER,
+      BackgroundUpdateWorker.failureKind(server, duringDownload = false),
+    )
+    assertEquals(
+      UpdateFailureKind.NETWORK,
+      BackgroundUpdateWorker.failureKind(
+        UnknownHostException("private host name"),
+        duringDownload = false,
+      ),
+    )
+    assertEquals(
+      UpdateFailureKind.DOWNLOAD,
+      BackgroundUpdateWorker.failureKind(
+        IOException("private local path"),
+        duringDownload = true,
+      ),
+    )
   }
 }

@@ -48,6 +48,13 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: gradle
+      - name: Install 16 KB APK verification tools
+        run: |
+          (
+            set +o pipefail
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+              "build-tools;35.0.0"
+          )
       - name: JVM tests, lint, debug APK, and Baseline Profile producer
         run: |
           cd apps/android-tv-host
@@ -57,6 +64,10 @@ jobs:
             :app:lintDebug \
             :app:assembleDebug \
             :baselineprofile:assembleBenchmarkRelease
+      - name: Verify signed debug APK 16 KB compatibility
+        run: >-
+          ./scripts/verify-android-16k-page-size.sh
+          apps/android-tv-host/app/build/outputs/apk/debug/app-debug.apk
       - name: Upload Android host evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -70,7 +81,7 @@ jobs:
           retention-days: 14
 
   tv-instrumentation:
-    name: TV instrumentation (${{ matrix.api }})
+    name: Debug TV instrumentation (${{ matrix.api }})
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
@@ -101,15 +112,15 @@ jobs:
               "emulator" \
               "system-images;android-${{ matrix.api }};android-tv;x86"
           )
-      - name: Run credential-free Android TV instrumentation
+      - name: Run credential-free debug Android TV instrumentation
         env:
           NEBULA_EMULATOR_GPU: lavapipe
         run: ./scripts/run-tv-instrumentation.sh "${{ matrix.api }}"
-      - name: Upload Android TV instrumentation evidence
+      - name: Upload debug Android TV instrumentation evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: tv-instrumentation-api-${{ matrix.api }}
+          name: debug-tv-instrumentation-api-${{ matrix.api }}
           path: |
             apps/android-tv-host/app/build/reports/androidTests/connected/
             apps/android-tv-host/app/build/outputs/androidTest-results/connected/

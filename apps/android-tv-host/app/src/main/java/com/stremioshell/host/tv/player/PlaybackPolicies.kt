@@ -111,8 +111,7 @@ object StreamRequestHeaders {
    * identification; same-origin subtitle downloads may still use the complete sanitized set.
    */
   fun mpvValue(headers: Map<String, String>): String =
-    sanitize(headers)
-      .filterKeys { it.lowercase(Locale.ROOT) in NATIVE_PLAYBACK_HEADERS }
+    sanitize(headers.filterKeys { it.lowercase(Locale.ROOT) in NATIVE_PLAYBACK_HEADERS })
       .entries
       .joinToString(",") { (name, value) ->
         "$name: ${value.replace("\\", "").replace(",", "\\,")}"
@@ -143,10 +142,24 @@ object StreamRequestHeaders {
     return sanitize(headers)
   }
 
+  /**
+   * Header set for one app-controlled playback hop. Credentials stay on the exact stream origin;
+   * ordinary content negotiation may follow a redirect to a CDN.
+   */
+  fun forPlaybackHop(
+    streamUrl: String,
+    resourceUrl: String,
+    headers: Map<String, String>,
+  ): Map<String, String> {
+    val sameOrigin = forSameOrigin(streamUrl, resourceUrl, headers)
+    if (sameOrigin.isNotEmpty()) return sameOrigin
+    return sanitize(headers.filterKeys { it.lowercase(Locale.ROOT) in NATIVE_PLAYBACK_HEADERS })
+  }
+
   private const val MAX_HEADERS = 32
   private const val MAX_NAME_CHARS = 128
   private const val MAX_VALUE_CHARS = 8 * 1024
-  private const val MAX_TOTAL_CHARS = 64 * 1024
+  internal const val MAX_TOTAL_CHARS = 16 * 1024
 }
 
 /**
@@ -274,4 +287,48 @@ object PlaybackResumePolicy {
     resetRequested -> ResumeSaveAction.Reset
     else -> ResumeSaveAction.Ignore
   }
+}
+
+enum class PlaybackLoadReason { Common, ExplicitSelection, Retry, NextEpisode }
+
+/**
+ * A common file-open must preserve a pause carried by recreation. User-initiated replacement
+ * paths are explicit play requests and therefore consume it before they reach the shared loader.
+ */
+object PlaybackLoadPausePolicy {
+  fun pauseRequested(current: Boolean, reason: PlaybackLoadReason): Boolean =
+    current && reason == PlaybackLoadReason.Common
+}
+
+/** The final, race-safe verdict used when a cache-stall watchdog reaches its deadline. */
+object PlaybackStallPolicy {
+  fun shouldReportFailure(
+    generationMatches: Boolean,
+    buffering: Boolean,
+    paused: Boolean,
+    activityStarted: Boolean,
+    hasPlaybackError: Boolean,
+  ): Boolean =
+    generationMatches && buffering && !paused && activityStarted && !hasPlaybackError
+}
+
+/** A sleep deadline retires every resolver that began before it. */
+object PlaybackResolutionPolicy {
+  fun acceptsResult(startSleepExpiryGeneration: Long, currentSleepExpiryGeneration: Long): Boolean =
+    startSleepExpiryGeneration == currentSleepExpiryGeneration
+}
+
+/** Transport behind an Up Next offer is modal, whichever kind of controller sent the command. */
+object PlaybackTransportPolicy {
+  fun seekAllowed(
+    transportAllowed: Boolean,
+    upNextVisible: Boolean,
+    nextEpisodeResolving: Boolean,
+  ): Boolean = transportAllowed && !upNextVisible && !nextEpisodeResolving
+}
+
+/** Manual Next follows the same watched-threshold verdict whether auto-pick succeeds or not. */
+object PlaybackNextPolicy {
+  fun marksCurrentWatched(positionSec: Double, durationSec: Double): Boolean =
+    WatchedThreshold.isFinished(positionSec, durationSec)
 }

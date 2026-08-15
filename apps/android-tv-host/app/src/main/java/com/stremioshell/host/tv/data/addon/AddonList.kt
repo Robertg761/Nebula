@@ -23,6 +23,9 @@ object AddonList {
    */
   const val MAX_ADDONS = 8
 
+  /** A manifest URL may contain a provider token, but never needs an unbounded path or query. */
+  const val MAX_URL_CHARS = 4 * 1024
+
   /** Fallback for a URL with nothing host-shaped in it, so a row is never nameless. */
   private const val UNNAMED = "Addon"
 
@@ -42,6 +45,7 @@ object AddonList {
    * what lets migration run it over a value that has been working for months.
    */
   fun normalize(raw: String): String {
+    if (raw.length > MAX_URL_CHARS) return ""
     var value = raw.trim()
     if (value.isEmpty()) return ""
     for (scheme in STREMIO_SCHEMES) {
@@ -79,12 +83,13 @@ object AddonList {
     } else {
       path + MANIFEST_SUFFIX
     }
-    return parsed.newBuilder()
+    val normalized = parsed.newBuilder()
       // A fragment is local browser state and is never part of an addon route.
       .fragment(null)
       .encodedPath(manifestPath)
       .build()
       .toString()
+    return normalized.takeIf { it.length <= MAX_URL_CHARS }.orEmpty()
   }
 
   /**

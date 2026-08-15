@@ -26,6 +26,18 @@ class TrackPreferencesTest {
   }
 
   @Test
+  fun `common OpenSubtitles and bibliographic codes fold onto container languages`() {
+    assertEquals("por", LanguageCodes.normalize("pob"))
+    assertEquals("zho", LanguageCodes.normalize("zhs"))
+    assertEquals("zho", LanguageCodes.normalize("zht"))
+    assertEquals("mkd", LanguageCodes.normalize("mac"))
+    assertEquals("cnr", LanguageCodes.normalize("mne"))
+    assertTrue(TrackPreferences.slangValue("pob")!!.contains("pt"))
+    assertEquals("Chinese", LanguageCodes.displayName("zhs"))
+    assertTrue(LanguageCodes.aliases("zho").containsAll(listOf("zh", "zhs", "zht")))
+  }
+
+  @Test
   fun `an absent or undetermined tag normalizes to nothing`() {
     assertEquals("", LanguageCodes.normalize(null))
     assertEquals("", LanguageCodes.normalize("  "))

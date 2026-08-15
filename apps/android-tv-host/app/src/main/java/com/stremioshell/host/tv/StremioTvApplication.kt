@@ -40,8 +40,8 @@ class StremioTvApplication : Application(), ImageLoaderFactory, Configuration.Pr
     // Held back until the main thread first runs dry, which on a launch is after the first frame:
     // the publish reads the whole watch list out of DataStore and writes it across to the TV
     // provider, and that competes with the launch for the Streamer's eMMC. Nothing is lost by
-    // waiting - the rows are only looked at once the viewer leaves, and TvAppActivity.onStop
-    // force-publishes then.
+    // waiting - explicit watch-state mutations and the player's terminal saves publish their
+    // changes immediately, while ordinary progress ticks use the shared throttle.
     Looper.myQueue().addIdleHandler {
       WatchNextSync.publish(this)
       // The player hands this file to mpv on every open, and generating it is a one-time

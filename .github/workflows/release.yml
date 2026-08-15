@@ -30,6 +30,7 @@ jobs:
       version: ${{ steps.ver.outputs.version_name }}
       tag_name: ${{ steps.meta.outputs.tag_name }}
       release_name: ${{ steps.meta.outputs.release_name }}
+      package_version: ${{ steps.meta.outputs.package_version }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
       release_exists: ${{ steps.slot.outputs.exists }}
       release_draft: ${{ steps.slot.outputs.draft }}
@@ -95,13 +96,16 @@ jobs:
 
           if [ -n "$SUFFIX" ]; then
             TAG_NAME="v${VERSION}-${SUFFIX}"
+            PACKAGE_VERSION="${VERSION}-${SUFFIX}"
           else
             TAG_NAME="v${VERSION}"
+            PACKAGE_VERSION="$VERSION"
           fi
 
           {
             echo "tag_name=$TAG_NAME"
             echo "release_name=$TAG_NAME"
+            echo "package_version=$PACKAGE_VERSION"
             echo "prerelease=$PRERELEASE"
           } >> "$GITHUB_OUTPUT"
 
@@ -109,9 +113,6 @@ jobs:
         env:
           VERSION: ${{ steps.ver.outputs.version_name }}
         run: node scripts/extract_changelog_section.js "$VERSION" > /dev/null
-
-      - name: Require reviewed SBOM and native corresponding source
-        run: node scripts/check_release_supply_chain.js
 
       - name: Validate the release slot
         id: slot
@@ -181,7 +182,7 @@ jobs:
 
   release-tv-instrumentation:
     needs: preflight
-    name: Release TV instrumentation (${{ matrix.api }})
+    name: Minified release-like TV instrumentation (${{ matrix.api }})
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -222,27 +223,29 @@ jobs:
               "system-images;android-${{ matrix.api }};android-tv;x86"
           )
 
-      - name: Run credential-free release instrumentation
+      - name: Run credential-free minified release-like instrumentation
         env:
           NEBULA_EMULATOR_GPU: lavapipe
-        run: ./scripts/run-tv-instrumentation.sh "${{ matrix.api }}"
+        run: ./scripts/run-tv-instrumentation.sh "${{ matrix.api }}" release-like
 
-      - name: Upload release instrumentation evidence
+      - name: Upload minified release-like instrumentation evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-tv-instrumentation-api-${{ matrix.api }}
+          name: minified-release-like-tv-instrumentation-api-${{ matrix.api }}
           path: |
             apps/android-tv-host/app/build/reports/androidTests/connected/
             apps/android-tv-host/app/build/outputs/androidTest-results/connected/
             apps/android-tv-host/app/build/outputs/tv-emulator/
+            apps/android-tv-host/app/build/outputs/apk/emulatorRelease/
+            apps/android-tv-host/app/build/outputs/mapping/emulatorRelease/
           if-no-files-found: ignore
           retention-days: 30
 
   build-and-publish:
     needs: [preflight, release-tv-instrumentation]
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     environment:
       name: release
     permissions:
@@ -267,6 +270,14 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
+
+      - name: Install 16 KB APK verification tools
+        run: |
+          (
+            set +o pipefail
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+              "build-tools;35.0.0"
+          )
 
       - name: Prepare release signing
         id: signing
@@ -320,6 +331,7 @@ jobs:
         shell: bash
         env:
           SS_SIGNING_CERT_SHA256: ${{ vars.SS_SIGNING_CERT_SHA256 }}
+          PACKAGE_VERSION: ${{ needs.preflight.outputs.package_version }}
           VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           set -euo pipefail
@@ -365,6 +377,54 @@ jobs:
             exit 1
           fi
 
+          AAPT="$(find "$ANDROID_HOME/build-tools" -name aapt -type f | sort -V | tail -n 1)"
+          if [ -z "$AAPT" ]; then
+            echo "Could not locate Android aapt." >&2
+            exit 1
+          fi
+          BADGING="$($AAPT dump badging "$TV_APK")"
+          ACTUAL_PACKAGE="$(
+            sed -n "s/^package: name='\([^']*\)'.*/\1/p" <<< "$BADGING" | head -n 1
+          )"
+          ACTUAL_VERSION="$(
+            sed -n "s/^package:.* versionName='\([^']*\)'.*/\1/p" <<< "$BADGING" | head -n 1
+          )"
+          if [ "$ACTUAL_PACKAGE" != "com.stremioshell.host.tv" ]; then
+            echo "Release APK has unexpected application id: $ACTUAL_PACKAGE" >&2
+            exit 1
+          fi
+          if [ "$ACTUAL_VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "Release APK versionName is $ACTUAL_VERSION, expected $PACKAGE_VERSION." >&2
+            exit 1
+          fi
+
+          MAPPING="apps/android-tv-host/app/build/outputs/mapping/release/mapping.txt"
+          if [ ! -s "$MAPPING" ]; then
+            echo "R8 mapping is missing for the shipping release APK." >&2
+            exit 1
+          fi
+
+          mapfile -t APK_ABIS < <(
+            unzip -Z1 "$TV_APK" |
+              sed -n 's#^lib/\([^/]*\)/.*#\1#p' |
+              sort -u
+          )
+          if [ "${APK_ABIS[*]}" != "arm64-v8a armeabi-v7a" ]; then
+            printf 'Release APK has unexpected ABI set: %s\n' "${APK_ABIS[*]}" >&2
+            exit 1
+          fi
+
+          LEGAL_DIR="$RUNNER_TEMP/nebula-apk-legal"
+          mkdir -p "$LEGAL_DIR"
+          unzip -p "$TV_APK" assets/licenses/GPL-3.0-or-later.txt > "$LEGAL_DIR/LICENSE"
+          unzip -p "$TV_APK" assets/licenses/THIRD_PARTY_NOTICES.md > \
+            "$LEGAL_DIR/THIRD_PARTY_NOTICES.md"
+          unzip -p "$TV_APK" assets/licenses/Outfit-OFL.txt > \
+            "$LEGAL_DIR/Outfit-OFL.txt"
+          cmp LICENSE "$LEGAL_DIR/LICENSE"
+          cmp THIRD_PARTY_NOTICES.md "$LEGAL_DIR/THIRD_PARTY_NOTICES.md"
+          cmp apps/android-tv-host/licenses/Outfit-OFL.txt "$LEGAL_DIR/Outfit-OFL.txt"
+
           mkdir -p dist
           OUT_TV="dist/StremioShell-tv-${VERSION}.apk"
           cp "$TV_APK" "$OUT_TV"
@@ -374,6 +434,9 @@ jobs:
             echo "sha256=$(sha256sum "$OUT_TV" | cut -d' ' -f1)"
             echo "size=$(stat -c '%s' "$OUT_TV")"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Verify signed release APK 16 KB compatibility
+        run: ./scripts/verify-android-16k-page-size.sh "${{ steps.apk.outputs.file }}"
 
       - name: Remove release signing material
         if: always()
@@ -393,6 +456,13 @@ jobs:
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
         run: node scripts/extract_changelog_section.js "$VERSION" > dist/release-notes.md
+
+      - name: Regenerate and verify release supply-chain materials
+        run: |
+          set -euo pipefail
+          node scripts/generate_release_sboms.js
+          node scripts/generate_native_source_archive.js
+          node scripts/check_release_supply_chain.js
 
       - name: Select reviewed supply-chain release assets
         id: supply

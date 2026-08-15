@@ -2,6 +2,7 @@ package com.stremioshell.host.tv.data
 
 import com.stremioshell.host.tv.data.addon.AddonClient
 import com.stremioshell.host.tv.data.addon.StreamCatalog
+import com.stremioshell.host.tv.data.addon.StreamMerge
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.delay
@@ -216,6 +217,26 @@ class StreamCatalogTest {
     // The earlier addon in the viewer's list is the one whose row survives.
     assertEquals("Comet", fetch.streams.single().source)
   }
+
+  @Test
+  fun `invalid high-ranked rows cannot crowd a healthy addons playable row out of the cap`() =
+    runBlocking {
+      val invalidRows = (1..StreamMerge.MAX_MERGED_STREAMS + 20).joinToString(",") { index ->
+        """{"name":"Broken 2160p $index","url":"file:///private/$index.mkv"}"""
+      }
+      val catalog = catalog { url ->
+        if (url.contains("comet")) {
+          """{"streams":[$invalidRows]}"""
+        } else {
+          streamsJson("Healthy 1080p")
+        }
+      }
+
+      val fetch = catalog.fetch(listOf(comet, torrentio), "tt0111161")
+
+      assertEquals(listOf("Healthy 1080p"), fetch.streams.map { it.label })
+      assertEquals(listOf("Torrentio"), fetch.streams.map { it.source })
+    }
 
   @Test
   fun `a single addon leaves its rows unbadged`() = runBlocking {

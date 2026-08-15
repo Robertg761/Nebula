@@ -78,4 +78,33 @@ class MpvTlsCertificatesTest {
     assertEquals(listOf(64, 64, 22), body.map { it.length })
     assertEquals(encoded, body.joinToString(""))
   }
+
+  @Test
+  fun `cache requires the complete write sentinel rather than only a begin line`() {
+    val complete = bundle(listOf("system:a1b2.0"))!!
+
+    assertTrue(MpvTlsCertificates.isCompleteCachedBundle(header, complete.lineSequence()))
+    assertFalse(
+      MpvTlsCertificates.isCompleteCachedBundle(
+        header,
+        sequenceOf(header, "-----BEGIN CERTIFICATE-----"),
+      ),
+    )
+    assertFalse(
+      MpvTlsCertificates.isCompleteCachedBundle(
+        header,
+        sequenceOf(
+          header,
+          "-----BEGIN CERTIFICATE-----",
+          "# nebula-ca-bundle-complete",
+        ),
+      ),
+    )
+    assertFalse(
+      MpvTlsCertificates.isCompleteCachedBundle(
+        header,
+        complete.substringBefore("-----END CERTIFICATE-----").lineSequence(),
+      ),
+    )
+  }
 }

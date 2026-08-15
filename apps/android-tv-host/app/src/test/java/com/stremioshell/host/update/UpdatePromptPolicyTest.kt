@@ -6,6 +6,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class UpdatePromptPolicyTest {
+  private fun snapshot(
+    version: String,
+    downloadId: Long = 41L,
+    assetIdentity: String? = "github-asset:1001",
+  ) = DownloadedUpdateSnapshot(downloadId, version, assetIdentity)
+
   @Test
   fun `no prompt when nothing is downloaded`() {
     assertEquals(
@@ -157,16 +163,16 @@ class UpdatePromptPolicyTest {
     // its "Check download" button have to still be there.
     assertTrue(
       UpdatePromptPolicy.retainsError(
-        previousVersionName = "0.4.1",
+        previousUpdate = snapshot("0.4.1"),
         nextPrompt = UpdatePromptPolicy.Prompt.INSTALL,
-        nextVersionName = "0.4.1",
+        nextUpdate = snapshot("0.4.1"),
       )
     )
     assertTrue(
       UpdatePromptPolicy.retainsError(
-        previousVersionName = "v0.4.1-tv",
+        previousUpdate = snapshot("v0.4.1-tv"),
         nextPrompt = UpdatePromptPolicy.Prompt.ENABLE_UNKNOWN_SOURCES,
-        nextVersionName = "0.4.1",
+        nextUpdate = snapshot("0.4.1"),
       )
     )
   }
@@ -177,16 +183,16 @@ class UpdatePromptPolicyTest {
     // re-surface on the next release's prompt.
     assertFalse(
       UpdatePromptPolicy.retainsError(
-        previousVersionName = "0.4.1",
+        previousUpdate = snapshot("0.4.1"),
         nextPrompt = UpdatePromptPolicy.Prompt.NONE,
-        nextVersionName = null,
+        nextUpdate = null,
       )
     )
     assertFalse(
       UpdatePromptPolicy.retainsError(
-        previousVersionName = "0.4.1",
+        previousUpdate = snapshot("0.4.1"),
         nextPrompt = UpdatePromptPolicy.Prompt.INSTALL,
-        nextVersionName = null,
+        nextUpdate = null,
       )
     )
   }
@@ -195,16 +201,16 @@ class UpdatePromptPolicyTest {
   fun `an error does not follow one version onto another`() {
     assertFalse(
       UpdatePromptPolicy.retainsError(
-        previousVersionName = "0.4.1",
+        previousUpdate = snapshot("0.4.1"),
         nextPrompt = UpdatePromptPolicy.Prompt.INSTALL,
-        nextVersionName = "0.4.2",
+        nextUpdate = snapshot("0.4.2"),
       )
     )
     assertFalse(
       UpdatePromptPolicy.retainsError(
-        previousVersionName = "0.4.1-beta.1",
+        previousUpdate = snapshot("0.4.1-beta.1"),
         nextPrompt = UpdatePromptPolicy.Prompt.INSTALL,
-        nextVersionName = "0.4.1",
+        nextUpdate = snapshot("0.4.1"),
       )
     )
   }
@@ -213,10 +219,30 @@ class UpdatePromptPolicyTest {
   fun `there is nothing to retain before a version has been prompted for`() {
     assertFalse(
       UpdatePromptPolicy.retainsError(
-        previousVersionName = null,
+        previousUpdate = null,
         nextPrompt = UpdatePromptPolicy.Prompt.INSTALL,
-        nextVersionName = "0.4.1",
+        nextUpdate = snapshot("0.4.1"),
       )
+    )
+  }
+
+  @Test
+  fun `an error does not follow a same-version replacement attempt`() {
+    val previous = snapshot("0.4.1", downloadId = 41L, assetIdentity = "github-asset:1001")
+
+    assertFalse(
+      UpdatePromptPolicy.retainsError(
+        previousUpdate = previous,
+        nextPrompt = UpdatePromptPolicy.Prompt.INSTALL,
+        nextUpdate = previous.copy(downloadId = 42L),
+      ),
+    )
+    assertFalse(
+      UpdatePromptPolicy.retainsError(
+        previousUpdate = previous,
+        nextPrompt = UpdatePromptPolicy.Prompt.INSTALL,
+        nextUpdate = previous.copy(assetIdentity = "github-asset:1002"),
+      ),
     )
   }
 }

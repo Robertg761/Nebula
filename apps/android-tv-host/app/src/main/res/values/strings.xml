@@ -9,15 +9,29 @@
   <string name="update_ready_title">Update ready</string>
   <string name="update_ready_permission_body">Nebula %1$s is downloaded. Android needs your permission to let Nebula install apps \u2014 we\u2019ll open that setting, then come back here. You\u2019re on %2$s.</string>
   <string name="update_ready_body">Nebula %1$s is downloaded and ready. You\u2019re on %2$s.</string>
+  <string name="update_whats_new">What\u2019s new</string>
   <string name="update_checking">Checking update\u2026</string>
   <string name="update_check_download">Check download</string>
   <string name="update_open_android_settings">Open Android settings</string>
   <string name="update_install">Install</string>
   <string name="update_later">Later</string>
+  <string name="update_later_hint">Choosing Later hides this update until Nebula restarts.</string>
   <string name="playback_url_blocked">This addon returned a stream address Nebula cannot open safely.</string>
 
   <!-- Native player. Format names, upstream track labels, and remote key names stay literal. -->
-  <string name="player_start_failed">The video player could not start.</string>
+  <string name="player_recovery_brand" translatable="false">NEBULA PLAYER</string>
+  <string name="player_release_blocked_title">This release can’t be opened</string>
+  <string name="player_still_closing_title">Player is still closing</string>
+  <string name="player_still_closing_message">Nebula is finishing the previous video. Wait a moment, then retry.</string>
+  <string name="player_start_failed_title">Player couldn’t start</string>
+  <string name="player_start_failed_message">The playback engine did not initialize. Retry, or share diagnostics if it keeps happening.</string>
+  <string name="player_recovery_back_hint">BACK returns to the previous screen.</string>
+  <string name="player_choose_another_release">Choose another release</string>
+  <string name="player_share_diagnostics">Share diagnostics</string>
+  <string name="player_preparing_diagnostics">Preparing diagnostics…</string>
+  <string name="player_share_diagnostics_chooser">Share %1$s diagnostics</string>
+  <string name="player_share_diagnostics_failed">Android could not open the share menu.</string>
+  <string name="player_create_diagnostics_failed">%1$s could not create the diagnostics report.</string>
   <string name="player_unknown_language">Unknown language</string>
   <string name="player_subtitle_included">Included with this stream</string>
   <string name="player_stream_subtitle_number">Stream subtitle %1$d</string>
@@ -32,7 +46,7 @@
   <string name="player_seeking">Seeking</string>
   <string name="player_buffering">Buffering</string>
   <string name="player_playback_failed">Playback failed</string>
-  <string name="player_retry_hint">OK retries from where it stopped   |   BACK tries another stream</string>
+  <string name="player_retry_hint">PLAY retries from where it stopped   |   BACK returns to releases</string>
   <string name="player_paused">Paused</string>
   <string name="player_none">none</string>
   <string name="player_off">off</string>
@@ -208,6 +222,12 @@
   <string name="home_empty_hint">TMDB returned no catalog titles. Check your key or try refreshing.</string>
   <string name="home_action_refresh">Refresh</string>
   <string name="home_loading_catalogs">Loading the rest of your catalogs\u2026</string>
+  <string name="saved_content_offline">Offline. Showing saved content.</string>
+  <string name="saved_content_offline_just_now">Offline. Showing content saved just now.</string>
+  <string name="saved_content_offline_age">Offline. Showing content saved %1$s.</string>
+  <string name="saved_content_refresh_unavailable">Couldn’t refresh. Showing saved content.</string>
+  <string name="saved_content_refresh_unavailable_just_now">Couldn’t refresh. Showing content saved just now.</string>
+  <string name="saved_content_refresh_unavailable_age">Couldn’t refresh. Showing content saved %1$s.</string>
   <string name="home_action_remove_continue_watching">Remove from Continue Watching</string>
   <string name="home_action_mark_watched">Mark watched</string>
   <string name="home_action_view_details">View details</string>
@@ -241,8 +261,9 @@
   <string name="settings_version">%1$s %2$s</string>
   <string name="settings_save_playback_in_progress">A playback preference is still being saved. Try again in a moment.</string>
   <string name="settings_addon_draft_pending">Press Add addon to use the URL you typed \u2014 Save does not add it.</string>
-  <string name="settings_save_playback_languages_failed">Could not save playback language preferences. Try again.</string>
+  <string name="settings_save_playback_languages_failed">App settings were saved, but Nebula could not confirm the playback language preferences. Retry to finish.</string>
   <string name="settings_save_watchdog_persisted">Settings saved. Connection tests are taking too long; you can leave and test again later.</string>
+  <string name="settings_save_probe_failed">Settings saved, but connection tests could not finish. You can leave and test again later.</string>
   <string name="settings_save_watchdog_unconfirmed">%1$s could not confirm that Settings were saved. Try again.</string>
   <string name="settings_quick_setup_title">Quick setup</string>
   <string name="settings_quick_setup_description">Type your key and addon URLs on your phone instead of with the remote.</string>
@@ -323,6 +344,33 @@
     <item quantity="other">Up-next countdown set to %d seconds.</item>
   </plurals>
   <string name="settings_reset_playback_defaults">Reset playback defaults</string>
+  <string name="settings_updates_title">App updates</string>
+  <string name="settings_updates_description">Checks the official release repository on an unmetered connection. A queued check is not reported as complete.</string>
+  <string name="settings_check_for_updates">Check for updates</string>
+  <string name="settings_update_check_in_progress">Checking for updates…</string>
+  <string name="settings_update_status_idle">No update check has run yet.</string>
+  <string name="settings_update_status_queued">Update check queued.</string>
+  <string name="settings_update_status_checking">Checking official releases…</string>
+  <string name="settings_update_status_up_to_date">Nebula is up to date.</string>
+  <string name="settings_update_status_download_queued">Update download queued.</string>
+  <string name="settings_update_status_download_queued_version">Nebula %1$s download queued.</string>
+  <string name="settings_update_status_downloading">Downloading update.</string>
+  <string name="settings_update_status_downloading_version">Downloading Nebula %1$s.</string>
+  <string name="settings_update_status_ready">Update ready to install.</string>
+  <string name="settings_update_status_ready_version">Nebula %1$s is ready to install.</string>
+  <string name="settings_update_status_retry_scheduled">Update check will retry automatically.</string>
+  <string name="settings_update_status_failed">Update check needs attention.</string>
+  <string name="settings_update_last_successful_check">Last successful check: %1$s</string>
+  <string name="settings_update_last_failed_check">Last failed check: %1$s</string>
+  <string name="settings_update_time_value">%1$s at %2$s</string>
+  <string name="settings_update_failure_network">Could not reach GitHub. Check this TV’s internet connection; Nebula will retry automatically.</string>
+  <string name="settings_update_failure_rate_limited">GitHub asked Nebula to wait. A retry is scheduled automatically.</string>
+  <string name="settings_update_failure_server">GitHub is temporarily unavailable. Nebula will retry automatically.</string>
+  <string name="settings_update_failure_configuration">This build cannot check the configured release repository. Install an official release build or share diagnostics below.</string>
+  <string name="settings_update_failure_download">Android could not keep the update download. Check free space, then check again.</string>
+  <string name="settings_update_failure_rejected_release">The release APK failed Nebula’s package, version, or signer checks. Install only a corrected official release.</string>
+  <string name="settings_update_failure_scheduling">Android could not queue the check. Restart Nebula and try again.</string>
+  <string name="settings_update_failure_unknown">The update check stopped unexpectedly. Try again. If it repeats, share diagnostics below.</string>
   <string name="settings_support_title">Support &amp; local data</string>
   <string name="settings_support_description">Diagnostics stay on this TV until you explicitly share a redacted report.</string>
   <string name="settings_preparing_diagnostics">Preparing diagnostics\u2026</string>
@@ -363,6 +411,10 @@
   <!-- Search. -->
   <string name="search_idle_title">What do you want to watch?</string>
   <string name="search_idle_hint">Type a title, or press the mic key on your remote.</string>
+  <string name="search_recent_title">Recent searches</string>
+  <string name="search_clear_history">Clear history</string>
+  <string name="search_remove_recent">Remove</string>
+  <string name="search_remove_recent_description">Remove %1$s from recent searches</string>
   <string name="search_searching">Searching\u2026</string>
   <string name="search_empty_all">No results for \u201c%1$s\u201d</string>
   <string name="search_empty_movies">No movies match \u201c%1$s\u201d</string>

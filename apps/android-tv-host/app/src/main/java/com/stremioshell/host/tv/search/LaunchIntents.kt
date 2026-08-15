@@ -6,6 +6,44 @@ import com.stremioshell.host.tv.channel.WatchNextTarget
 /** A request to open Search; [query] is empty when only the destination was asked for. */
 data class SearchLaunch(val query: String)
 
+/** One normalization policy for text fields, launch intents, ViewModel state, and TMDB requests. */
+object SearchQuery {
+  /** Long enough for a title plus qualifiers, while bounding field state and request URLs. */
+  const val MAX_CHARS = 120
+
+  /**
+   * Sanitizes text as it enters the field without removing its trailing space. Trimming that space
+   * on every keystroke makes it impossible to type a second word with an ordinary IME.
+   */
+  fun forField(raw: String?): String = normalize(raw, trimEdges = false)
+
+  /** Sanitizes and trims the value used as a request identity and TMDB query parameter. */
+  fun forRequest(raw: String?): String = normalize(raw, trimEdges = true)
+
+  private fun normalize(raw: String?, trimEdges: Boolean): String {
+    if (raw.isNullOrEmpty()) return ""
+    val flattened = buildString(minOf(raw.length, MAX_CHARS * 2)) {
+      var index = 0
+      while (index < raw.length) {
+        val codePoint = Character.codePointAt(raw, index)
+        val width = Character.charCount(codePoint)
+        index += width
+        val space = Character.isWhitespace(codePoint) ||
+          Character.isSpaceChar(codePoint) ||
+          Character.isISOControl(codePoint)
+        if (space) {
+          if (isNotEmpty() && last() != ' ' && length < MAX_CHARS) append(' ')
+        } else {
+          // Refuse the whole code point if it would split a surrogate pair at the UTF-16 cap.
+          if (length + width > MAX_CHARS) break
+          appendCodePoint(codePoint)
+        }
+      }
+    }
+    return if (trimEdges) flattened.trim() else flattened
+  }
+}
+
 /** What the intent that started (or re-entered) the app is asking for. */
 sealed interface LaunchRequest {
   /** A launcher tap, or an intent nothing here recognises: Home, as before. */
@@ -51,11 +89,8 @@ object LaunchIntents {
    */
   const val EXTRA_USER_QUERY = "user_query"
 
-  /**
-   * Long enough for any title plus a qualifier ("the thing 1982"), short enough that a
-   * pasted-in megabyte of text never reaches the field, the ViewModel or TMDB.
-   */
-  const val MAX_QUERY_CHARS = 120
+  /** Kept for intent callers and tests; [SearchQuery] owns the policy. */
+  const val MAX_QUERY_CHARS = SearchQuery.MAX_CHARS
 
   fun isSearchAction(action: String?): Boolean = when (action) {
     ACTION_SEARCH, ACTION_MEDIA_PLAY_FROM_SEARCH, ACTION_GMS_SEARCH -> true
@@ -63,9 +98,15 @@ object LaunchIntents {
   }
 
   /**
-   * @param query the QUERY extra, already read off the intent (see [EXTRA_QUERY]); null
-   *   when it was absent or was not a string.
+   * Chooses the viewer's original speech over a surface-rewritten query, after independently
+   * sanitizing both. An unusable USER_QUERY must not hide a usable QUERY fallback.
    */
+  fun preferredQuery(userQuery: String?, rewrittenQuery: String?): String? {
+    val spoken = sanitize(userQuery)
+    if (spoken.isNotEmpty()) return spoken
+    return sanitize(rewrittenQuery).ifEmpty { null }
+  }
+
   /**
    * `stremio-tv://settings`, exactly: a startsWith would let `settings.evil.example` paths
    * through, and a destination-only link has no parameters to carry. Trailing slash included
@@ -97,30 +138,5 @@ object LaunchIntents {
    * mangle or reject. So a code point that would straddle the cap ends the query instead of being
    * half-admitted.
    */
-  fun sanitize(raw: String?): String {
-    if (raw.isNullOrEmpty()) return ""
-    val flattened = buildString(minOf(raw.length, MAX_QUERY_CHARS * 2)) {
-      var index = 0
-      while (index < raw.length) {
-        val codePoint = Character.codePointAt(raw, index)
-        val width = Character.charCount(codePoint)
-        index += width
-        // Tabs, newlines and the C0/C1 ranges all become plain gaps rather than being
-        // dropped, so "dune\npart two" stays two words. isSpaceChar as well as isWhitespace,
-        // which is what Char.isWhitespace did here before: a non-breaking space is a gap too.
-        val space = Character.isWhitespace(codePoint) ||
-          Character.isSpaceChar(codePoint) ||
-          Character.isISOControl(codePoint)
-        if (space) {
-          if (isNotEmpty() && last() != ' ') append(' ')
-        } else {
-          // Stopping *before* the character that would overflow is what keeps a pair whole; the
-          // one collapsed space this can leave behind is trimmed off below.
-          if (length + width > MAX_QUERY_CHARS) break
-          appendCodePoint(codePoint)
-        }
-      }
-    }
-    return flattened.trim()
-  }
+  fun sanitize(raw: String?): String = SearchQuery.forRequest(raw)
 }

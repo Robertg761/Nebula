@@ -74,13 +74,24 @@ export ANDROID_SERIAL="<device serial>"
 bash scripts/capture-tv-performance.sh
 ```
 
-The capture records `gfxinfo`, `meminfo`, launch timing, and filtered `TvFocus`
-and `NebulaDiagnostics` logs beneath
-`apps/android-tv-host/app/build/outputs/tv-performance/`. Run it once without
-the baseline profile and once with the accepted profile, keeping display mode,
-network route, app data, and background workloads unchanged. Compare frame
-counts/slow frames, longest frames, memory, GC pressure, and focus warnings;
-do not treat emulator numbers as Streamer evidence.
+The capture records launch timing, `gfxinfo`, `meminfo`, selected app/device
+properties, display/window state, thermal and battery state, process-exit
+history, and bounded output from the app's real logcat tags beneath
+`apps/android-tv-host/app/build/outputs/tv-performance/`. On a debuggable build
+it also reads at most 160 already-redacted events from the private diagnostics
+ring with Android `run-as`. Shipping builds correctly deny that read, and the
+artifact says so instead of pretending a nonexistent logcat tag was captured.
+
+Run it once without the baseline profile and once with the accepted profile,
+keeping display mode, network route, app data, and background workloads
+unchanged. Compare frame counts/slow frames, longest frames, memory, GC
+pressure, focus warnings, and the recorded thermal state. Check `app.txt`,
+`device.txt`, and `build.txt` before comparing two runs. They must describe the
+intended app version, device build, ABI, and source commit. The script does not
+record Perfetto because one portable trace configuration does not work across
+the supported API 26 through current physical-device range. Capture a separate
+bounded system trace on a known compatible device when frame data needs a call
+stack. Do not treat emulator numbers as Streamer evidence.
 
 1. Display cadence and surface lifecycle:
    - Play known 23.976, 24, 25, 50, and 59.94 fps samples on a display that
@@ -187,10 +198,15 @@ source scripts/android-env.sh
 )
 ./scripts/run-tv-instrumentation.sh 26
 ./scripts/run-tv-instrumentation.sh 34
+# The release workflow uses the same harness with the minified release-like target:
+./scripts/run-tv-instrumentation.sh 34 release-like
 ```
 
 The instrumentation harness creates a temporary, isolated AVD from each
-official x86 Android TV image and requires no TMDB or addon credential. It
+official x86 Android TV image and requires no TMDB or addon credential. Its default mode tests the
+debug APK; `release-like` tests the R8-minified, resource-shrunk, non-debuggable
+`emulatorRelease` APK signed with the local test certificate. Narrow keep rules preserve the APIs
+the separate test APK calls directly; other app code remains release-optimized. It
 covers cold launch, focus, D-pad entry to Settings, Back,
 search/watch-next routing, and DataStore persistence. It does not load libmpv
 or sign off playback hardware. Baseline-profile generation has its own

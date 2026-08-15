@@ -81,6 +81,33 @@ class ConfigMergeTest {
   }
 
   @Test
+  fun `interactive addon validation rejects an oversized text box`() {
+    val raw = "https://a.example/?q=" + "x".repeat(PairingSubmission.MAX_ADDON_INPUT_CHARS)
+
+    assertEquals(
+      "Those addon links are too long. Shorten them and try again.",
+      PairingSubmission.addonInputError(raw),
+    )
+    assertEquals(
+      "Those addon links are too long. Shorten them and try again.",
+      PairingSubmission.addonInputError(" ".repeat(PairingSubmission.MAX_ADDON_INPUT_CHARS + 1)),
+    )
+  }
+
+  @Test
+  fun `interactive key validation rejects an oversized token`() {
+    assertEquals(
+      "That TMDB key is too long. Check it and try again.",
+      PairingSubmission.tmdbKeyInputError("x".repeat(PairingSubmission.MAX_TMDB_KEY_CHARS + 1)),
+    )
+    assertEquals(
+      "That TMDB key is too long. Check it and try again.",
+      PairingSubmission.tmdbKeyInputError(" ".repeat(PairingSubmission.MAX_TMDB_KEY_CHARS + 1)),
+    )
+    assertNull(PairingSubmission.tmdbKeyInputError("x".repeat(PairingSubmission.MAX_TMDB_KEY_CHARS)))
+  }
+
+  @Test
   fun `blank fields are read as absent, not as an empty value`() {
     val submission = PairingSubmission.of(rawTmdbKey = "  ", rawAddonUrls = null)
 

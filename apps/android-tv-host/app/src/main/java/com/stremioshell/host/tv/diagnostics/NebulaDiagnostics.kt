@@ -23,8 +23,10 @@ import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -46,7 +48,9 @@ object NebulaDiagnostics {
   private const val EVENT_FILE = "events.log"
 
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+  private val orderedWrites = OrderedLaunchBarrier(scope)
   private val fileMutex = Mutex()
+  private val failedEventWrites = AtomicInteger()
   @Volatile private var appContext: Context? = null
 
   fun initialize(application: Application) {
@@ -65,9 +69,11 @@ object NebulaDiagnostics {
     val safeArea = DiagnosticSanitizer.sanitize(area).take(40)
     val safeDetail = DiagnosticSanitizer.sanitize(detail)
     val line = "${Instant.now()}\t$safeArea\t$safeDetail"
-    scope.launch {
+    orderedWrites.launch {
       fileMutex.withLock {
-        runCatching { appendBounded(eventFile(context), line) }
+        if (runCatching { appendBounded(eventFile(context), line) }.isFailure) {
+          failedEventWrites.incrementAndGet()
+        }
       }
     }
   }
@@ -78,6 +84,9 @@ object NebulaDiagnostics {
    * The report remains private unless the caller grants read access through an explicit intent.
    */
   suspend fun export(context: Context): Result<Uri> = withContext(Dispatchers.IO) {
+    // Linearization point for support reports: every record call that returned before export began
+    // is now queued and must reach disk, or increment the visible failure count, before rendering.
+    orderedWrites.awaitSubmitted()
     runCatching {
       val report = fileMutex.withLock {
         val outputDirectory = reportDirectory(context)
@@ -225,6 +234,7 @@ object NebulaDiagnostics {
     appendLine("Version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
     appendLine("Package: ${context.packageName}")
     appendLine("Build type: ${BuildConfig.BUILD_TYPE}")
+    appendLine("Diagnostic write failures: ${failedEventWrites.get()}")
     appendLine()
     appendLine("[Device]")
     appendLine("Manufacturer: ${DiagnosticSanitizer.sanitize(Build.MANUFACTURER)}")
@@ -335,5 +345,30 @@ object NebulaDiagnostics {
     override fun onActivityPaused(activity: Activity) = Unit
     override fun onActivityStopped(activity: Activity) = Unit
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+  }
+}
+
+/**
+ * Launches non-blocking work in submission order and lets a reader wait for everything submitted
+ * before its call. The barrier does not wait for later work, so a busy recorder cannot starve an
+ * export indefinitely.
+ */
+internal class OrderedLaunchBarrier(private val scope: CoroutineScope) {
+  private val lock = Any()
+  private var tail: Job? = null
+
+  fun launch(block: suspend () -> Unit) {
+    synchronized(lock) {
+      val predecessor = tail
+      tail = scope.launch {
+        predecessor?.join()
+        block()
+      }
+    }
+  }
+
+  suspend fun awaitSubmitted() {
+    val submitted = synchronized(lock) { tail }
+    submitted?.join()
   }
 }

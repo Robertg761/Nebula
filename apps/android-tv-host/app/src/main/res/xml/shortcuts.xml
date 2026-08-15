@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Static launcher shortcuts, declared from the manifest's LEANBACK_LAUNCHER entry.
+  Static launcher shortcuts, declared from the manifest alias that carries both the
+  LEANBACK_LAUNCHER entry and the standard LAUNCHER entry ShortcutService requires.
 
   Both intents name the component explicitly (targetPackage is the applicationId,
   com.stremioshell.host.tv; targetClass is the real class behind the .TvLauncherActivity alias). That

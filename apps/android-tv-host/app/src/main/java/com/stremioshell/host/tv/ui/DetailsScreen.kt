@@ -88,6 +88,7 @@ import com.stremioshell.host.R
 import com.stremioshell.host.tv.DetailsRequestKey
 import com.stremioshell.host.tv.SeasonRequestKey
 import com.stremioshell.host.tv.TvAppViewModel
+import com.stremioshell.host.tv.data.SavedContentProvenance
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.WatchlistEntry
 import com.stremioshell.host.tv.data.tmdb.AirDate
@@ -275,8 +276,10 @@ fun DetailsScreen(
   val tmdbId = screen.tmdbId
   val detailsState by viewModel.details.collectAsStateWithLifecycle()
   val detailsRequest by viewModel.detailsRequest.collectAsStateWithLifecycle()
+  val savedDetailsState by viewModel.detailsSavedContent.collectAsStateWithLifecycle()
   val episodesState by viewModel.episodes.collectAsStateWithLifecycle()
   val seasonRequest by viewModel.seasonRequest.collectAsStateWithLifecycle()
+  val savedSeasonState by viewModel.seasonSavedContent.collectAsStateWithLifecycle()
   val apiKey by viewModel.tmdbApiKey.collectAsStateWithLifecycle()
   // Every record, watched ones included: this screen marks finished episodes as well as
   // part-watched ones, so it cannot use the Continue Watching projection.
@@ -350,6 +353,15 @@ fun DetailsScreen(
     // show, and would leave the episode list stuck on an empty request.
     var pickedSeason by rememberSaveable(type, tmdbId) { mutableIntStateOf(defaultSeason) }
     val selectedSeason = if (pickedSeason in seasonNumbers) pickedSeason else defaultSeason
+    val savedDetails = savedDetailsState
+      ?.takeIf { it.request == DetailsRequestKey(type, tmdbId) }
+      ?.provenance
+    val savedSeason = savedSeasonState
+      ?.takeIf { it.request == SeasonRequestKey(tmdbId, selectedSeason) }
+      ?.provenance
+    val savedContent = remember(savedDetails, savedSeason) {
+      SavedContentProvenance.oldest(savedDetails, savedSeason)
+    }
     // Aiming focus at the stopped-at episode is a one-shot arrival gesture; picking a season by
     // hand hands focus control back to the user.
     var resumeAimArmed by rememberSaveable(type, tmdbId) { mutableStateOf(screen.initialEpisode != null) }
@@ -1085,6 +1097,17 @@ fun DetailsScreen(
             }
           }
         }
+      }
+      savedContent?.let { provenance ->
+        SavedContentBadge(
+          provenance = provenance,
+          modifier = Modifier
+            .align(Alignment.TopEnd)
+            .padding(
+              top = NebulaDimens.ScreenEdgeVertical,
+              end = NebulaDimens.ScreenEdge,
+            ),
+        )
       }
     }
   }

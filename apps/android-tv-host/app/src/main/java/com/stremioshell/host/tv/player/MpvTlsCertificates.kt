@@ -35,6 +35,7 @@ object MpvTlsCertificates {
   private const val SYSTEM_ALIAS_PREFIX = "system:"
   private const val PEM_BEGIN = "-----BEGIN CERTIFICATE-----"
   private const val PEM_END = "-----END CERTIFICATE-----"
+  private const val BUNDLE_COMPLETE = "# nebula-ca-bundle-complete"
 
   /** PEM's own line length. Not cosmetic: mbedtls's parser expects wrapped base64. */
   private const val PEM_LINE_LENGTH = 64
@@ -43,8 +44,8 @@ object MpvTlsCertificates {
    * Returns the PEM bundle of the platform's trusted system roots, writing it on
    * first use. Cached per OS build: the system store only changes with the
    * firmware, so the header records [Build.FINGERPRINT] and the bundle
-   * regenerates when it no longer matches. The cached path is a stat plus two
-   * line reads; the first launch pays a one-time export (~150 roots) that is far
+   * regenerates when it no longer matches. The cached path is one small sequential boundary scan;
+   * the first launch pays a one-time export (~150 roots) that is far
    * cheaper than the failed-playback alternative - and the Application warms it
    * off the main thread at first idle, so the player's synchronous call normally
    * finds the file already written. Synchronized because of exactly that pair of
@@ -58,14 +59,18 @@ object MpvTlsCertificates {
    * internet, and the fingerprint fast-path would keep serving that emptiness for
    * the life of the firmware. Hence both the null and the [File.delete] below,
    * and hence the fast path checking for a certificate rather than only for the
-   * header - a bundle written by an older build of this file may be exactly that.
+   * header - a bundle written by an older build of this file may be exactly that. A private footer
+   * also proves the complete temp file reached its final path; merely finding a BEGIN line would
+   * accept a bundle truncated before its first certificate ended.
    */
   @Synchronized
   fun ensureBundle(context: Context): File? = runCatching {
     val bundle = File(context.filesDir, BUNDLE_NAME)
     val header = "# ${Build.FINGERPRINT}"
-    val cachedHead = if (bundle.isFile) bundle.useLines { it.take(2).toList() } else emptyList()
-    if (cachedHead.firstOrNull() == header && cachedHead.getOrNull(1) == PEM_BEGIN) {
+    val cacheIsComplete = bundle.isFile && bundle.useLines { lines ->
+      isCompleteCachedBundle(header, lines)
+    }
+    if (cacheIsComplete) {
       return@runCatching bundle
     }
     val keyStore = KeyStore.getInstance("AndroidCAStore").apply { load(null) }
@@ -123,7 +128,22 @@ object MpvTlsCertificates {
         appendLine(encoded.chunked(PEM_LINE_LENGTH).joinToString("\n"))
         appendLine(PEM_END)
       }
+      if (exported > 0) append(BUNDLE_COMPLETE)
     }
     return text.takeIf { exported > 0 }
+  }
+
+  /** Pure cache-boundary check so partial writes and the legacy header-only case stay covered. */
+  internal fun isCompleteCachedBundle(header: String, lines: Sequence<String>): Boolean {
+    val iterator = lines.iterator()
+    if (!iterator.hasNext() || iterator.next() != header) return false
+    if (!iterator.hasNext() || iterator.next() != PEM_BEGIN) return false
+    var previousLine: String? = null
+    var lastLine: String? = null
+    while (iterator.hasNext()) {
+      previousLine = lastLine
+      lastLine = iterator.next()
+    }
+    return previousLine == PEM_END && lastLine == BUNDLE_COMPLETE
   }
 }

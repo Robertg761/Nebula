@@ -29,6 +29,8 @@ sealed interface Screen : Parcelable {
     val tmdbId: Int,
     val initialSeason: Int? = null,
     val initialEpisode: Int? = null,
+    /** Launcher-provided position used only when no local record exists for the item being played. */
+    val resumePositionFallbackMs: Long = 0L,
   ) : Screen
 
   /**
@@ -45,5 +47,7 @@ sealed interface Screen : Parcelable {
     val season: Int? = null,
     val episode: Int? = null,
     val startOver: Boolean = false,
+    /** Deep-link fallback; a local watch record remains authoritative when playback is launched. */
+    val resumePositionFallbackMs: Long = 0L,
   ) : Screen
 }

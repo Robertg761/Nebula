@@ -8,28 +8,27 @@ Its wrapper source is tagged at:
 - <https://github.com/jarnedemeulemeester/libmpv-android/releases/tag/v0.4.1>
 - commit `293d1a606413be36886a2ec922aee3d358690e07`
 
-That repository contains the wrapper and build definitions and pins its native
-inputs. The AAR also contains mpv and FFmpeg-family binaries whose applicable
-license/source obligations depend on the exact build flags.
+That repository contains the wrapper and Android build definitions. The pinned
+recipe builds mpv 0.39.0 and FFmpeg 7.1. FFmpeg enables GPL and version 3 code,
+so the complete distributed native bundle is GPL-3.0-or-later effective.
 
-This repository does not currently make a formal written source offer or claim
-that the existing public APK has a complete corresponding-source package. The
-maintainer must obtain license advice appropriate to the exact native build and
-choose a compliant distribution/source-availability method before another
-public release.
+For every new public release, the workflow now publishes a deterministic
+`Nebula-native-sources.tar.gz` beside the APK. The archive contains the exact
+wrapper, mpv, FFmpeg, and dependency source revisions, including separately
+pinned submodules and the build recipe. The accompanying native CycloneDX BOM
+maps every shared library and ABI to a file hash, license, and source component.
 
-Before the next public release, the release owner must:
+The release gate verifies that:
 
-1. verify the exact libmpv-android tag/commit and its pinned mpv/FFmpeg inputs;
-2. determine the native build's effective licenses and required notices;
-3. archive those source trees, patches, configuration, and build scripts in a
-   durable public release location;
-4. link that archive and its SHA-256 from the GitHub Release notes; and
-5. preserve all required license texts in the distribution or adjacent release
-   materials.
+1. the reviewed AAR digest and exact upstream commits have not changed;
+2. GPL and version 3 build options remain enabled and documented;
+3. the source archive contains every path in the pinned manifest without links
+   or unsafe paths;
+4. the archive embeds that manifest verbatim and matches its reviewed SHA-256;
+5. the source archive and both SBOMs are uploaded and remotely digest-checked
+   before the draft release becomes public.
 
-The repository currently documents this obligation but does not yet automate
-the native source archive. Public promotion is blocked until the inventory,
-SBOM, and archive satisfy the checks in
-[release-supply-chain.md](release-supply-chain.md); APK signing and provenance
-cannot prove those materials.
+See [release-supply-chain.md](release-supply-chain.md) for regeneration and
+review instructions. This process applies to releases made by the updated
+workflow and does not make claims about older published artifacts. APK signing
+and provenance complement these materials but cannot replace them.

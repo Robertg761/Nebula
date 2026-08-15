@@ -1,5 +1,6 @@
 package com.stremioshell.host.update
 
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -21,6 +22,7 @@ class GitHubReleaseApiTest {
           {
             "name": "StremioShell-tv-0.6.2.apk",
             "browser_download_url": "https://example.invalid/StremioShell-tv-0.6.2.apk",
+            "id": 987654321,
             "size": 117000000,
             "digest": "sha256:$sha256"
           }
@@ -32,6 +34,7 @@ class GitHubReleaseApiTest {
     val asset = parsed.assets.single()
     assertEquals(117_000_000L, asset.size)
     assertEquals(sha256, asset.sha256)
+    assertEquals(987_654_321L, asset.id)
   }
 
   @Test
@@ -118,5 +121,52 @@ class GitHubReleaseApiTest {
 
     assertEquals("v0.6.2-beta.1", parsed.tagName)
     assertEquals("2026-08-10T00:00:00Z", parsed.publishedAt)
+  }
+
+  @Test
+  fun `release lists retain prerelease and draft provenance`() {
+    val releases = GitHubReleaseApi.parseReleases(
+      JSONArray(
+        """[
+          {"tag_name":"v0.6.2-beta.1","prerelease":true},
+          {"tag_name":"v0.6.2","draft":true}
+        ]""",
+      ),
+    )
+
+    assertEquals(listOf("v0.6.2-beta.1", "v0.6.2"), releases.map { it.tagName })
+    assertEquals(true, releases[0].prerelease)
+    assertEquals(true, releases[1].draft)
+  }
+
+  @Test
+  fun `rate limit 403 is distinguished from an ordinary forbidden response`() {
+    val primaryLimit = GitHubReleaseApi.apiException(
+      statusCode = 403,
+      retryAfterHeader = null,
+      rateLimitRemainingHeader = "0",
+      rateLimitResetHeader = "1750000000",
+      body = "API rate limit exceeded",
+    )
+    val secondaryLimit = GitHubReleaseApi.apiException(
+      statusCode = 403,
+      retryAfterHeader = "60",
+      rateLimitRemainingHeader = "59",
+      rateLimitResetHeader = null,
+      body = "secondary limit",
+    )
+    val forbidden = GitHubReleaseApi.apiException(
+      statusCode = 403,
+      retryAfterHeader = null,
+      rateLimitRemainingHeader = "59",
+      rateLimitResetHeader = null,
+      body = "Resource not accessible",
+    )
+
+    assertEquals(true, primaryLimit.rateLimited)
+    assertEquals(1_750_000_000L, primaryLimit.rateLimitResetEpochSeconds)
+    assertEquals(true, secondaryLimit.rateLimited)
+    assertEquals(60L, secondaryLimit.retryAfterSeconds)
+    assertEquals(false, forbidden.rateLimited)
   }
 }

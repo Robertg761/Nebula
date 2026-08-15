@@ -41,6 +41,11 @@ internal object MpvCoreCoordinator {
 
     /** Identifies one launch attempt so a delayed failed launcher cannot run after a retry. */
     internal var retirementAttempt: Any? = null
+
+    /** A throwing native destroy is retried before the next generation can be claimed. */
+    internal var pendingDestroy: (() -> Unit)? = null
+
+    internal var pendingFailureHandler: ((Throwable) -> Unit)? = null
   }
 
   private val stateMonitor = Object()
@@ -59,12 +64,30 @@ internal object MpvCoreCoordinator {
     val timeoutNanos = TimeUnit.MILLISECONDS.toNanos(timeoutMs.coerceAtLeast(0L))
     val deadline = System.nanoTime() + timeoutNanos
     while (true) {
+      var retry: (() -> Unit)? = null
+      var retryFailureHandler: ((Throwable) -> Unit)? = null
+      var retryLease: Lease? = null
       val waitFor = synchronized(stateMonitor) {
         val current = owner
         if (current == null) {
           return Lease(generations.incrementAndGet()).also { owner = it }
         }
+        if (!current.retiring && current.pendingDestroy != null) {
+          retryLease = current
+          retry = current.pendingDestroy
+          retryFailureHandler = current.pendingFailureHandler
+        }
         current.released
+      }
+      val leaseToRetry = retryLease
+      val destroyToRetry = retry
+      if (leaseToRetry != null && destroyToRetry != null) {
+        destroyAsync(
+          lease = leaseToRetry,
+          threadName = "mpv-destroy-retry-${leaseToRetry.generation}",
+          onFailure = retryFailureHandler ?: {},
+          destroy = destroyToRetry,
+        )
       }
       val remaining = deadline - System.nanoTime()
       if (remaining <= 0L) return null
@@ -95,6 +118,7 @@ internal object MpvCoreCoordinator {
     lease: Lease,
     threadName: String = "mpv-destroy-${lease.generation}",
     launcher: DestroyThreadLauncher = defaultDestroyThreadLauncher,
+    onFailure: (Throwable) -> Unit = {},
     destroy: () -> Unit,
   ): Boolean {
     val attempt = Any()
@@ -102,6 +126,8 @@ internal object MpvCoreCoordinator {
       if (owner !== lease || lease.retiring) return false
       lease.retiring = true
       lease.retirementAttempt = attempt
+      lease.pendingDestroy = null
+      lease.pendingFailureHandler = null
     }
 
     /** Guarded by [stateMonitor], including the launch-failure check below. */
@@ -124,9 +150,14 @@ internal object MpvCoreCoordinator {
 
       lock.lock()
       var destroyed = false
+      var destroyFailure: Throwable? = null
       try {
-        destroy()
-        destroyed = true
+        try {
+          destroy()
+          destroyed = true
+        } catch (error: Throwable) {
+          destroyFailure = error
+        }
       } finally {
         lock.unlock()
         synchronized(stateMonitor) {
@@ -140,9 +171,13 @@ internal object MpvCoreCoordinator {
           if (destroyed && owner === lease) {
             owner = null
             lease.released.countDown()
+          } else if (!destroyed && owner === lease) {
+            lease.pendingDestroy = destroy
+            lease.pendingFailureHandler = onFailure
           }
         }
       }
+      destroyFailure?.let { failure -> runCatching { onFailure(failure) } }
     }
 
     return try {
@@ -157,6 +192,8 @@ internal object MpvCoreCoordinator {
           if (owner === lease && lease.retirementAttempt === attempt) {
             lease.retiring = false
             lease.retirementAttempt = null
+            lease.pendingDestroy = destroy
+            lease.pendingFailureHandler = onFailure
           }
           false
         }
@@ -174,6 +211,7 @@ internal object MpvCoreCoordinator {
    */
   fun destroyBlocking(
     lease: Lease,
+    onFailure: (Throwable) -> Unit = {},
     destroy: () -> Unit,
   ): Boolean {
     val attempt = Any()
@@ -181,13 +219,20 @@ internal object MpvCoreCoordinator {
       if (owner !== lease || lease.retiring) return false
       lease.retiring = true
       lease.retirementAttempt = attempt
+      lease.pendingDestroy = null
+      lease.pendingFailureHandler = null
     }
 
     lock.lock()
     var destroyed = false
+    var destroyFailure: Throwable? = null
     try {
-      destroy()
-      destroyed = true
+      try {
+        destroy()
+        destroyed = true
+      } catch (error: Throwable) {
+        destroyFailure = error
+      }
     } finally {
       lock.unlock()
       synchronized(stateMonitor) {
@@ -198,9 +243,13 @@ internal object MpvCoreCoordinator {
         if (destroyed && owner === lease) {
           owner = null
           lease.released.countDown()
+        } else if (!destroyed && owner === lease) {
+          lease.pendingDestroy = destroy
+          lease.pendingFailureHandler = onFailure
         }
       }
     }
-    return true
+    destroyFailure?.let { failure -> runCatching { onFailure(failure) } }
+    return destroyed
   }
 }

@@ -78,6 +78,47 @@ class SubtitleCharsetTest {
   }
 
   @Test
+  fun `legacy japanese shift jis is converted before reaching mpv`() {
+    val text = "日本語の字幕です。映画を楽しんでください。"
+    val bytes = text.toByteArray(charset("windows-31j"))
+
+    assertEquals(text, decoded(SubtitleCharset.toUtf8(bytes, "jpn")))
+    assertEquals(text, decoded(SubtitleCharset.toUtf8(bytes, "ja-JP")))
+  }
+
+  @Test
+  fun `legacy chinese chooses gb18030 or big5 from script and catalog tags`() {
+    val simplified = "这是简体中文字幕。"
+    val traditional = "這是繁體中文字幕。"
+
+    assertEquals(
+      simplified,
+      decoded(SubtitleCharset.toUtf8(simplified.toByteArray(charset("GB18030")), "zho")),
+    )
+    assertEquals(
+      simplified,
+      decoded(SubtitleCharset.toUtf8(simplified.toByteArray(charset("GB18030")), "zhs")),
+    )
+    assertEquals(
+      traditional,
+      decoded(SubtitleCharset.toUtf8(traditional.toByteArray(charset("Big5")), "zh-Hant")),
+    )
+    assertEquals(
+      traditional,
+      decoded(SubtitleCharset.toUtf8(traditional.toByteArray(charset("Big5")), "zht")),
+    )
+  }
+
+  @Test
+  fun `legacy korean windows 949 is converted before reaching mpv`() {
+    val text = "한국어 자막입니다. 영화를 즐기세요."
+    val bytes = text.toByteArray(charset("x-windows-949"))
+
+    assertEquals(text, decoded(SubtitleCharset.toUtf8(bytes, "kor")))
+    assertEquals(text, decoded(SubtitleCharset.toUtf8(bytes, "ko-KR")))
+  }
+
+  @Test
   fun `greek, turkish, hebrew, arabic, thai and the baltic all get their own page`() {
     assertEquals("windows-1253", SubtitleCharset.fallbackCharset("el").name())
     assertEquals("windows-1254", SubtitleCharset.fallbackCharset("tr").name())
@@ -109,8 +150,11 @@ class SubtitleCharsetTest {
 
   @Test
   fun `a regional tag lands on the same page as the language`() {
-    assertEquals("windows-1251", SubtitleCharset.fallbackCharset("sr-Latn").name())
+    assertEquals("windows-1250", SubtitleCharset.fallbackCharset("sr-Latn").name())
+    assertEquals("windows-1251", SubtitleCharset.fallbackCharset("sr-Cyrl").name())
     assertEquals("windows-1251", SubtitleCharset.fallbackCharset("RU").name())
+    assertEquals("windows-1251", SubtitleCharset.fallbackCharset("mac").name())
+    assertEquals("windows-1250", SubtitleCharset.fallbackCharset("mne").name())
   }
 
   @Test

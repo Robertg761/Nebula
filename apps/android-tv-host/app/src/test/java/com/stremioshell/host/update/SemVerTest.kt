@@ -3,6 +3,7 @@ package com.stremioshell.host.update
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -104,5 +105,11 @@ class SemVerTest {
   fun `coreLabel drops the pre-release, because the release asset name has none`() {
     assertEquals("0.6.2", SemVer.coreLabel("v0.6.2-beta.1"))
     assertEquals("0.6.2", SemVer.coreLabel("v0.6.2"))
+  }
+
+  @Test
+  fun `overflowing numeric components are rejected rather than reset to zero`() {
+    assertNull(SemVer.parseOrNull("1.999999999999999999999.2"))
+    assertNull(SemVer.parseOrNull("1.2.999999999999999999999"))
   }
 }

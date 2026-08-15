@@ -146,8 +146,8 @@ class SettingsSaveGuardTest {
     assertTrue(resolved.storedUnreadable)
     // Kept means "do not write this key at all"; see SettingsStore.persist.
     assertEquals(
-      "Couldn't read your saved settings just now, so your TMDB key and addons were left " +
-        "as they are. Try Save again in a moment.",
+      "Couldn't read your saved settings just now, so the values that could not be read were " +
+        "left as they are. Try Save again in a moment.",
       SettingsSaveGuard.keptNotice(resolved),
     )
   }
@@ -155,15 +155,54 @@ class SettingsSaveGuardTest {
   @Test
   fun `a failed read still lets the viewer write values they actually typed`() {
     val resolved = SettingsSaveGuard.resolve(
-      draft(tmdbKey = "typed-key", addonUrls = listOf("comet.example")),
+      draft(
+        tmdbKey = "typed-key",
+        addonUrls = listOf("comet.example"),
+        subtitlesBaseUrl = "subs.example",
+      ),
       StoredSettings(tmdbKey = "", addonUrls = emptyList(), readable = false),
     )
 
     assertFalse(resolved.keptTmdbKey)
     assertFalse(resolved.keptAddonUrls)
+    assertFalse(resolved.keptSubtitlesBaseUrl)
     assertEquals("typed-key", resolved.tmdbKey)
     assertEquals(listOf("https://comet.example/manifest.json"), resolved.addonUrls)
     assertNull(SettingsSaveGuard.keptNotice(resolved))
+  }
+
+  @Test
+  fun `a malformed stored addon list is always kept even when the draft has urls`() {
+    val resolved = SettingsSaveGuard.resolve(
+      draft(tmdbKey = "typed-key", addonUrls = listOf("new.example")),
+      StoredSettings(
+        tmdbKey = "old-key",
+        addonUrls = emptyList(),
+        addonUrlsReadable = false,
+      ),
+    )
+
+    assertFalse(resolved.keptTmdbKey)
+    assertTrue(resolved.keptAddonUrls)
+    assertTrue(resolved.addonUrlsUnreadable)
+    assertEquals(emptyList<String>(), resolved.addonUrls)
+    assertTrue(SettingsSaveGuard.keptNotice(resolved)!!.contains("left untouched"))
+  }
+
+  @Test
+  fun `a degraded default subtitle seed does not reset an unknown custom addon`() {
+    val resolved = SettingsSaveGuard.resolve(
+      draft(subtitlesBaseUrl = SubtitlesClient.OPENSUBTITLES_V3_BASE),
+      StoredSettings(
+        tmdbKey = "",
+        addonUrls = emptyList(),
+        readable = false,
+        subtitlesBaseUrl = "https://saved-subs.example",
+      ),
+    )
+
+    assertTrue(resolved.keptSubtitlesBaseUrl)
+    assertEquals("https://saved-subs.example", resolved.subtitlesBaseUrl)
   }
 
   @Test

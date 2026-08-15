@@ -1,16 +1,20 @@
 # Baseline Profile regeneration
 
-The committed `apps/android-tv-host/app/src/main/baseline-prof.txt` is a
-device-generated performance artifact, not a rule list to edit by hand. The
-repository now has a `:baselineprofile` producer that records cold startup,
-Home navigation, Search, Settings, one fixed movie's Details and Streams, and a
-15-second playback sample. The producer now drives a sustained multi-rail
-D-pad path; `NavigationBenchmark` measures the same path with and without the
-profile. Generation is explicit and does not run during a normal build.
+The committed `apps/android-tv-host/app/src/main/baseline-prof.txt` and
+`startup-prof.txt` are device-generated performance artifacts, not rule lists
+to edit by hand. The `:baselineprofile` producer has a launch-only collection
+for startup layout and a separate full collection covering cold startup, Home
+navigation, Search, Settings, one fixed movie's Details and Streams, and a
+15-second playback sample. The full collection is excluded from startup
+layout. `NavigationBenchmark` measures the sustained multi-rail path with and
+without the profile. Generation is explicit and does not run during a normal
+build.
 
 The generator intentionally fails before producing an acceptable candidate if
-the fixture cannot reach Details, a non-empty stream list, and playback. This
-prevents a green startup-only run from replacing broader profile coverage.
+the fixture cannot reach Details, a non-empty stream list, and playback. The
+wrapper also rejects identical startup/baseline files, a startup file that is
+not smaller, or startup rules missing from the full baseline. This prevents a
+green launch-only run from replacing broader profile coverage.
 
 ## Profiling device and fixture
 
@@ -27,9 +31,11 @@ come from the physical TV class being optimized.
    ./gradlew :app:installNonMinifiedRelease
    ```
 
-   The shipping `release` build type runs R8 with resource shrinking, so the
-   minified path is exercised by the standard release smoke rather than a
-   separate trial variant.
+   The shipping `release` build type runs R8 with resource shrinking. Release CI exercises the same
+   shrinker configuration, non-debuggable code, and network policy through the x86
+   `emulatorRelease` target. That target has narrow keep rules for APIs called across the separate
+   test APK boundary. The shipping ARM APK and its release certificate still require the
+   physical-device smoke below.
 
 3. On that installed build, configure a non-production TMDB key and an HTTPS
    stream addon backed by a dedicated test account. Never put either credential
@@ -51,11 +57,12 @@ bash scripts/regenerate-baseline-profile.sh
 ```
 
 The wrapper verifies API level, refuses to overwrite a previous candidate,
-runs `:app:generateBaselineProfile`, requires all critical app paths in the
-output, and records whether the source worktree was dirty before generation.
+runs `:app:generateBaselineProfile`, checks the launch and full-journey
+outputs, and records whether the source worktree was dirty before generation.
 It writes untracked build artifacts:
 
 - `apps/android-tv-host/app/build/baseline-profile-candidate/baseline-prof.txt`
+- `apps/android-tv-host/app/build/baseline-profile-candidate/startup-prof.txt`
 - `apps/android-tv-host/app/build/baseline-profile-candidate/evidence.txt`
 - `apps/android-tv-host/app/build/baseline-profile-candidate/generated-source-*`
 
@@ -63,8 +70,9 @@ The Gradle plugin temporarily stages generated output beneath
 `app/src/<variant>/generated/baselineProfiles`, because source output is the
 supported explicit-generation mode. The wrapper refuses to run if that
 directory already exists, then moves every directory it created into the
-candidate before exiting—even on a failed coverage check. It never overwrites
-`src/main/baseline-prof.txt`, and it does not delete unknown source content.
+candidate before exiting, including after a failed coverage check. It never
+overwrites either committed profile, and it does not delete unknown source
+content.
 Review the instrumentation result and evidence first. Keep the evidence with
 the pull request or QA artifacts; do not commit device serials or generated
 reports to the repository. A dirty-worktree run remains useful diagnostically,
@@ -79,6 +87,8 @@ Only after the generator passed on the documented device:
 ```bash
 cp apps/android-tv-host/app/build/baseline-profile-candidate/baseline-prof.txt \
   apps/android-tv-host/app/src/main/baseline-prof.txt
+cp apps/android-tv-host/app/build/baseline-profile-candidate/startup-prof.txt \
+  apps/android-tv-host/app/src/main/startup-prof.txt
 
 cd apps/android-tv-host
 ./gradlew :baselineprofile:connectedNonMinifiedReleaseAndroidTest \
@@ -96,6 +106,7 @@ A candidate is acceptable only when:
   accepted device run;
 - the generated file still contains every critical path enforced by the
   wrapper;
+- the startup profile remains a smaller strict subset of the full baseline;
 - the normal unit-test, lint, and assemble gates pass; and
 - the release APK contains the compiled profile:
 
@@ -105,9 +116,9 @@ A candidate is acceptable only when:
   ```
 
 Record the source commit, device model/build fingerprint, Android security
-patch, candidate SHA-256, benchmark medians, and result location in the release
-or pull-request QA notes. If device evidence or metrics are absent, leave the
-committed profile unchanged and report regeneration as outstanding.
+patch, both candidate SHA-256 values, benchmark medians, and result location in
+the release or pull-request QA notes. If device evidence or metrics are absent,
+leave the committed profiles unchanged and report regeneration as outstanding.
 
 The producer follows Android's supported Baseline Profile Gradle-plugin and
 Macrobenchmark flow:

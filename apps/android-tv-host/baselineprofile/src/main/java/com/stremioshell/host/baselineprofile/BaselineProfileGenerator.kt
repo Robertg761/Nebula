@@ -12,29 +12,32 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/**
- * Records startup and the TV's critical user journey on a provisioned device.
- *
- * This deliberately fails instead of emitting a startup-only profile when the
- * test TMDB/addon fixture is missing. A short but green generator would give a
- * false sense that Details, Streams and playback were represented.
- */
+/** Records launch-only startup rules and the wider TV journey on a provisioned device. */
 @RunWith(AndroidJUnit4::class)
 class BaselineProfileGenerator {
   @get:Rule
   val baselineProfileRule = BaselineProfileRule()
 
   @Test
-  fun generate() = baselineProfileRule.collect(
+  fun collectStartup() = baselineProfileRule.collect(
     packageName = PACKAGE_NAME,
     includeInStartupProfile = true,
   ) {
-    pressHome()
-    startActivityAndWait()
-    // The collapsed nav rail is icons-only, so the literal text "Home" exists nowhere on a
-    // settled Home screen; the first rail's heading is what proves the fixture is browsable.
-    // Generous timeout: this is a cold TMDB fetch over the profiling device's Wi-Fi.
-    waitForText("Trending Movies", HOME_TIMEOUT_MS)
+    launchHome()
+  }
+
+  /**
+   * Records the full baseline journey without putting it in the startup profile.
+   *
+   * This deliberately fails when the test TMDB/addon fixture is missing. A short but green
+   * generator would give a false sense that Details, Streams and playback were represented.
+   */
+  @Test
+  fun collectCriticalUserJourney() = baselineProfileRule.collect(
+    packageName = PACKAGE_NAME,
+    includeInStartupProfile = false,
+  ) {
+    launchHome()
 
     // The two side routes run before the rail scroll, and that ordering is load-bearing: the
     // marker this journey returns to is Home's *first* rail heading, and scrolling puts it off
@@ -81,6 +84,15 @@ class BaselineProfileGenerator {
     SystemClock.sleep(PLAYBACK_SAMPLE_MS)
     device.pressBack()
     device.waitForIdle()
+  }
+
+  private fun MacrobenchmarkScope.launchHome() {
+    pressHome()
+    startActivityAndWait()
+    // The collapsed nav rail is icons-only, so the literal text "Home" exists nowhere on a
+    // settled Home screen; the first rail's heading is what proves the fixture is browsable.
+    // Generous timeout: this is a cold TMDB fetch over the profiling device's Wi-Fi.
+    waitForText("Trending Movies", HOME_TIMEOUT_MS)
   }
 
   /**

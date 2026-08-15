@@ -26,9 +26,9 @@ object WatchStateRetention {
    * caller assembled.
    */
   fun prune(entries: List<WatchEntry>): List<WatchEntry> {
-    val newestFirst = entries.sortedByDescending { it.updatedAtMs }
+    val newestFirst = entries.sortedWith(watchEntryNewestFirst)
     val watched = newestFirst.filter { it.watched }.take(MAX_WATCHED)
     val resumable = newestFirst.filterNot { it.watched }.take(MAX_RESUMABLE)
-    return (watched + resumable).sortedByDescending { it.updatedAtMs }
+    return (watched + resumable).sortedWith(watchEntryNewestFirst)
   }
 }

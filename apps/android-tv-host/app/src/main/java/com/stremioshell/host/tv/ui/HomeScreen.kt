@@ -1,5 +1,6 @@
 package com.stremioshell.host.tv.ui
 
+import android.text.format.DateUtils
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -65,6 +66,8 @@ import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -81,6 +84,8 @@ import com.stremioshell.host.R
 import com.stremioshell.host.tv.HomeRail
 import com.stremioshell.host.tv.LoadState
 import com.stremioshell.host.tv.TvAppViewModel
+import com.stremioshell.host.tv.data.SavedContentProvenance
+import com.stremioshell.host.tv.data.SavedContentReason
 import com.stremioshell.host.tv.data.WatchEntry
 import com.stremioshell.host.tv.data.WatchlistEntry
 import com.stremioshell.host.tv.data.tmdb.DetailsMetadata
@@ -155,12 +160,14 @@ private fun HomeBrowseBody(
 ) {
   val rails by viewModel.homeRails.collectAsStateWithLifecycle()
   val railsNotice by viewModel.railsNotice.collectAsStateWithLifecycle()
+  val savedContent by viewModel.homeSavedContent.collectAsStateWithLifecycle()
   val railPaging by viewModel.railPaging.collectAsStateWithLifecycle()
   val continueWatching by viewModel.continueWatching.collectAsStateWithLifecycle()
   val watchlist by viewModel.watchlistEntries.collectAsStateWithLifecycle()
   val heroLogoUrl by viewModel.heroLogoUrl.collectAsStateWithLifecycle()
   val loadingHomeDescription = stringResource(R.string.home_loading_description)
   val firstContentFocus = rememberInitialFocusTarget()
+  val returnContentFocus = rememberInitialFocusTarget()
   // Own targets for the two managed rows, so a card removed by the options dialog hands focus back
   // to the row it was removed from rather than to the billboard. See the row-edit request below.
   val continueRowFocus = rememberInitialFocusTarget()
@@ -188,6 +195,8 @@ private fun HomeBrowseBody(
   var watchlistOptions by remember { mutableStateOf<WatchlistEntry?>(null) }
   var rowEditTick by remember { mutableIntStateOf(0) }
   var editedRow by remember { mutableStateOf<String?>(null) }
+  var editedEntryKey by remember { mutableStateOf<String?>(null) }
+  var returnFocusKey by rememberSaveable { mutableStateOf<String?>(null) }
   // Pressing Retry on the whole-page failure disposes the only focusable that state had; the tick
   // re-aims at the new one so a second failure does not paint with nothing lit.
   var retryTick by remember { mutableIntStateOf(0) }
@@ -224,6 +233,16 @@ private fun HomeBrowseBody(
   // The billboard is the top of the screen, so it owns first focus when it exists: landing on a
   // rail below it would scroll it off before the user ever saw it.
   val hasHero = hero != null
+  val visibleReturnKeys = remember(hero, continueWatching, watchlist, railList) {
+    buildSet {
+      hero?.let { add(homeHeroFocusKey(it)) }
+      continueWatching.forEach { add(homeContinueFocusKey(it)) }
+      watchlist.forEach { add(homeWatchlistFocusKey(it)) }
+      railList.forEach { rail ->
+        rail.items.forEach { add(homeRailFocusKey(rail.title, it)) }
+      }
+    }
+  }
 
   // Fetched once per featured title, and written through the same cache the Details screen
   // reads - so the one extra request also makes pressing OK on the billboard instant.
@@ -252,6 +271,16 @@ private fun HomeBrowseBody(
       !landedFocus &&
       (rails is LoadState.Ready || hasContinueWatching || hasWatchlist),
   )
+  val pendingReturnFocusKey = returnFocusKey
+  RequestInitialFocus(
+    target = returnContentFocus,
+    key = "return:$pendingReturnFocusKey",
+    label = "Home card after Details",
+    enabled = pendingReturnFocusKey != null && pendingReturnFocusKey in visibleReturnKeys,
+  )
+  LaunchedEffect(returnContentFocus.focused) {
+    if (returnContentFocus.focused) returnFocusKey = null
+  }
 
   // Separate request, because the one above is deliberately dead once the user has driven
   // focus themselves - which they always have by the time they long-press a card.
@@ -265,9 +294,16 @@ private fun HomeBrowseBody(
       ROW_WATCHLIST -> if (hasWatchlist) watchlistRowFocus else null
       else -> null
     } ?: firstContentFocus,
-    key = "row-edit:$rowEditTick",
+    key = "row-edit:$rowEditTick:$editedEntryKey",
     label = "Home focus after row edit",
-    enabled = rowEditTick > 0 && options == null && watchlistOptions == null,
+    enabled = rowEditTick > 0 &&
+      options == null &&
+      watchlistOptions == null &&
+      when (editedRow) {
+        ROW_CONTINUE -> continueWatching.none { it.key == editedEntryKey }
+        ROW_WATCHLIST -> watchlist.none { it.key == editedEntryKey }
+        else -> false
+      },
   )
 
   // Continue Watching and My List come from local storage, so a TMDB outage must not take them
@@ -391,15 +427,16 @@ private fun HomeBrowseBody(
   // One smooth scroll that settles the focused row at a stable "focus line"
   // ~18% down, so up/down is consistent instead of jamming rows at the edge.
   CompositionLocalProvider(LocalBringIntoViewSpec provides FocusLineBringIntoViewSpec) {
-    LazyColumn(
-      state = listState,
-      verticalArrangement = Arrangement.spacedBy(NebulaDimens.RailGap),
-      contentPadding = PaddingValues(
-        top = NebulaDimens.ScreenEdgeVertical,
-        bottom = NebulaDimens.ScreenEdgeVertical,
-      ),
-      modifier = Modifier
-        .fillMaxSize()
+    Box(modifier = Modifier.fillMaxSize()) {
+      LazyColumn(
+        state = listState,
+        verticalArrangement = Arrangement.spacedBy(NebulaDimens.RailGap),
+        contentPadding = PaddingValues(
+          top = NebulaDimens.ScreenEdgeVertical,
+          bottom = NebulaDimens.ScreenEdgeVertical,
+        ),
+        modifier = Modifier
+          .fillMaxSize()
         // Each row already remembers its card; this is what makes the column remember the row, so
         // returning from Details or the nav rail lands where the viewer left rather than back at
         // the billboard. The one-shot initial-focus request above still wins on a cold open:
@@ -407,13 +444,13 @@ private fun HomeBrowseBody(
         .focusRequester(columnFocus)
         .restoreColumnFocus()
         // Notes that the user is driving focus themselves; observed only, never consumed.
-        .onPreviewKeyEvent { event ->
-          if (event.type == KeyEventType.KeyDown && event.key.isDirectional()) {
-            userNavigated = true
-          }
-          false
-        },
-    ) {
+          .onPreviewKeyEvent { event ->
+            if (event.type == KeyEventType.KeyDown && event.key.isDirectional()) {
+              userNavigated = true
+            }
+            false
+          },
+      ) {
       // contentType on every item kind: without it Compose treats a 320dp billboard and a poster
       // rail as interchangeable subcomposition slots and recomposes one into the other on the
       // app's hottest scroll path.
@@ -422,8 +459,14 @@ private fun HomeBrowseBody(
           HeroBillboard(
             featured = hero,
             logoUrl = heroLogoUrl,
-            onClick = { onItemClick(hero.type, hero.tmdbId) },
+            onClick = {
+              returnFocusKey = homeHeroFocusKey(hero)
+              onItemClick(hero.type, hero.tmdbId)
+            },
             focusTarget = firstContentFocus,
+            returnFocusTarget = returnContentFocus.takeIf {
+              returnFocusKey == homeHeroFocusKey(hero)
+            },
           )
         }
       }
@@ -431,10 +474,15 @@ private fun HomeBrowseBody(
         item(key = "continue", contentType = "continue") {
           ContinueWatchingRow(
             entries = continueCards,
-            onResumeClick = onResumeClick,
+            onResumeClick = { entry ->
+              returnFocusKey = homeContinueFocusKey(entry)
+              onResumeClick(entry)
+            },
             onOptions = { options = it },
             firstCardFocus = if (hasHero) null else firstContentFocus,
             rowFocus = continueRowFocus,
+            returnFocusKey = returnFocusKey,
+            returnFocusTarget = returnContentFocus,
           )
         }
       }
@@ -444,10 +492,15 @@ private fun HomeBrowseBody(
         item(key = "watchlist", contentType = "watchlist") {
           WatchlistRow(
             entries = watchlistCards,
-            onItemClick = { entry -> onItemClick(entry.type, entry.tmdbId) },
+            onItemClick = { entry ->
+              returnFocusKey = homeWatchlistFocusKey(entry)
+              onItemClick(entry.type, entry.tmdbId)
+            },
             onOptions = { watchlistOptions = it },
             firstCardFocus = if (hasHero || hasContinueWatching) null else firstContentFocus,
             rowFocus = watchlistRowFocus,
+            returnFocusKey = returnFocusKey,
+            returnFocusTarget = returnContentFocus,
           )
         }
       }
@@ -469,7 +522,12 @@ private fun HomeBrowseBody(
           },
           loadingMore = railPaging[rail.title]?.loading == true,
           onLastVisibleIndex = { last -> paginateRail(rail.title, last) },
-          onItemClick = { item -> onItemClick(item.type, item.tmdbId) },
+          onItemClick = { item ->
+            returnFocusKey = homeRailFocusKey(rail.title, item)
+            onItemClick(item.type, item.tmdbId)
+          },
+          returnFocusKey = returnFocusKey,
+          returnFocusTarget = returnContentFocus,
         )
       }
       if (rails is LoadState.Loading) {
@@ -484,6 +542,18 @@ private fun HomeBrowseBody(
             onFocusedChange = { statusFocused = it },
           )
         }
+      }
+      }
+      savedContent?.let { provenance ->
+        SavedContentBadge(
+          provenance = provenance,
+          modifier = Modifier
+            .align(Alignment.TopEnd)
+            .padding(
+              top = NebulaDimens.ScreenEdgeVertical,
+              end = NebulaDimens.ScreenEdge,
+            ),
+        )
       }
     }
   }
@@ -503,12 +573,14 @@ private fun HomeBrowseBody(
           viewModel.forgetWatchEntry(entry)
           options = null
           editedRow = ROW_CONTINUE
+          editedEntryKey = entry.key
           rowEditTick++
         },
         CardAction(stringResource(R.string.home_action_mark_watched)) {
           viewModel.markWatched(entry)
           options = null
           editedRow = ROW_CONTINUE
+          editedEntryKey = entry.key
           rowEditTick++
         },
       ),
@@ -527,6 +599,7 @@ private fun HomeBrowseBody(
           viewModel.removeFromWatchlist(entry)
           watchlistOptions = null
           editedRow = ROW_WATCHLIST
+          editedEntryKey = entry.key
           rowEditTick++
         },
       ),
@@ -614,6 +687,12 @@ private fun HomeSetupBody(
 private const val ROW_CONTINUE = "continue"
 private const val ROW_WATCHLIST = "watchlist"
 
+private fun homeHeroFocusKey(item: MediaItem): String = "hero:${item.key}"
+private fun homeContinueFocusKey(entry: WatchEntry): String = "continue:${entry.key}"
+private fun homeWatchlistFocusKey(entry: WatchlistEntry): String = "watchlist:${entry.key}"
+private fun homeRailFocusKey(railTitle: String, item: MediaItem): String =
+  "rail:$railTitle:${item.key}"
+
 /**
  * Localizes the known catalog headings without changing the English titles used as paging keys.
  *
@@ -698,6 +777,72 @@ private fun RailsStatusRow(
     if (onRetry != null) {
       NebulaButton(text = stringResource(R.string.action_retry), onClick = onRetry, icon = Icons.Filled.Refresh)
     }
+  }
+}
+
+/** A pinned, non-focusable provenance badge that never changes a lazy list's item geometry. */
+@Composable
+internal fun SavedContentBadge(
+  provenance: SavedContentProvenance,
+  modifier: Modifier = Modifier,
+) {
+  val message = savedContentMessage(provenance)
+  Row(
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(NebulaSpace.sm),
+    modifier = modifier
+      .widthIn(max = 320.dp)
+      .background(NebulaPalette.Surface, NebulaShapes.medium)
+      .border(1.dp, NebulaPalette.Outline, NebulaShapes.medium)
+      .semantics { liveRegion = LiveRegionMode.Polite }
+      .padding(horizontal = NebulaSpace.md, vertical = NebulaSpace.sm),
+  ) {
+    Icon(
+      Icons.Filled.Warning,
+      contentDescription = null,
+      tint = NebulaPalette.Caution,
+      modifier = Modifier.size(NebulaIcon.sm),
+    )
+    Text(
+      message,
+      style = MaterialTheme.typography.bodySmall,
+      color = NebulaPalette.TextMuted,
+      maxLines = 2,
+    )
+  }
+}
+
+@Composable
+private fun savedContentMessage(provenance: SavedContentProvenance): String {
+  val savedAt = provenance.savedAtMillis
+  val now = System.currentTimeMillis()
+  val age = provenance.ageMillis(now)
+  val plain = if (provenance.reason == SavedContentReason.Offline) {
+    R.string.saved_content_offline
+  } else {
+    R.string.saved_content_refresh_unavailable
+  }
+  val justNow = if (provenance.reason == SavedContentReason.Offline) {
+    R.string.saved_content_offline_just_now
+  } else {
+    R.string.saved_content_refresh_unavailable_just_now
+  }
+  val withAge = if (provenance.reason == SavedContentReason.Offline) {
+    R.string.saved_content_offline_age
+  } else {
+    R.string.saved_content_refresh_unavailable_age
+  }
+  return when {
+    savedAt == null || age == null -> stringResource(plain)
+    age < DateUtils.MINUTE_IN_MILLIS -> stringResource(justNow)
+    else -> stringResource(
+      withAge,
+      DateUtils.getRelativeTimeSpanString(
+        savedAt,
+        now,
+        DateUtils.MINUTE_IN_MILLIS,
+      ),
+    )
   }
 }
 
@@ -821,6 +966,7 @@ private fun HeroBillboard(
   logoUrl: String?,
   onClick: () -> Unit,
   focusTarget: InitialFocusTarget?,
+  returnFocusTarget: InitialFocusTarget?,
 ) {
   val score = remember(featured.rating) { DetailsMetadata.scoreLabel(featured.rating) }
   val mediaType = stringResource(
@@ -852,7 +998,8 @@ private fun HeroBillboard(
   Box(
     modifier = Modifier
       .padding(horizontal = NebulaDimens.ScreenEdge)
-      .initialFocusTarget(focusTarget),
+      .initialFocusTarget(focusTarget)
+      .initialFocusTarget(returnFocusTarget),
   ) {
     Card(
       onClick = onClick,
@@ -1002,6 +1149,8 @@ private fun MediaRowFocusable(
   loadingMore: Boolean,
   onLastVisibleIndex: (Int) -> Unit,
   onItemClick: (MediaItem) -> Unit,
+  returnFocusKey: String?,
+  returnFocusTarget: InitialFocusTarget,
 ) {
   val items = rail.items
   if (items.isEmpty()) return
@@ -1031,7 +1180,13 @@ private fun MediaRowFocusable(
           MediaCard(
             item = item,
             onClick = { onItemClick(item) },
-            modifier = Modifier.initialFocusTarget(if (index == 0) firstCardFocus else null),
+            modifier = Modifier
+              .initialFocusTarget(if (index == 0) firstCardFocus else null)
+              .initialFocusTarget(
+                returnFocusTarget.takeIf {
+                  returnFocusKey == homeRailFocusKey(rail.title, item)
+                },
+              ),
           )
         }
         if (loadingMore) {
@@ -1084,6 +1239,8 @@ private fun WatchlistRow(
   onOptions: (WatchlistEntry) -> Unit,
   firstCardFocus: InitialFocusTarget?,
   rowFocus: InitialFocusTarget,
+  returnFocusKey: String?,
+  returnFocusTarget: InitialFocusTarget,
 ) {
   val saved = entries.items
   Column(modifier = Modifier.fillMaxWidth()) {
@@ -1101,7 +1258,10 @@ private fun WatchlistRow(
             onClick = { onItemClick(entry) },
             modifier = Modifier
               .initialFocusTarget(if (index == 0) firstCardFocus else null)
-              .initialFocusTarget(if (index == 0) rowFocus else null),
+              .initialFocusTarget(if (index == 0) rowFocus else null)
+              .initialFocusTarget(
+                returnFocusTarget.takeIf { returnFocusKey == homeWatchlistFocusKey(entry) },
+              ),
             onLongClick = { onOptions(entry) },
           )
         }
@@ -1130,6 +1290,8 @@ private fun ContinueWatchingRow(
   onOptions: (WatchEntry) -> Unit,
   firstCardFocus: InitialFocusTarget?,
   rowFocus: InitialFocusTarget,
+  returnFocusKey: String?,
+  returnFocusTarget: InitialFocusTarget,
 ) {
   val records = entries.items
   Column(modifier = Modifier.fillMaxWidth()) {
@@ -1147,8 +1309,17 @@ private fun ContinueWatchingRow(
             onClick = { onResumeClick(entry) },
             modifier = Modifier
               .initialFocusTarget(if (index == 0) firstCardFocus else null)
-              .initialFocusTarget(if (index == 0) rowFocus else null),
+              .initialFocusTarget(if (index == 0) rowFocus else null)
+              .initialFocusTarget(
+                returnFocusTarget.takeIf { returnFocusKey == homeContinueFocusKey(entry) },
+              ),
             subtitle = continueCaption(entry),
+            accessibilityLabel = A11yLabels.continueWatching(
+              entry.title,
+              entry.season,
+              entry.episode,
+              entry.progress,
+            ),
             onLongClick = { onOptions(entry) },
             progress = entry.progress,
           )

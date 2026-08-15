@@ -4,6 +4,7 @@ import android.app.SearchManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.SystemClock
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -209,6 +210,16 @@ class TvNavigationInstrumentedTest {
   private fun waitForFocusedText(text: String): UiObject2 {
     val deadline = SystemClock.uptimeMillis() + TIMEOUT_MS
     while (SystemClock.uptimeMillis() < deadline) {
+      // API 34 can retain UiAutomator's Compose accessibility cache across the preceding activity
+      // recreation test. Refreshing the active root keeps this assertion on the current semantics
+      // tree; otherwise it can poll the button that was focused before a successful lazy-list
+      // scroll for the entire timeout.
+      val uiAutomation = InstrumentationRegistry.getInstrumentation().uiAutomation
+      if (Build.VERSION.SDK_INT >= 34) {
+        uiAutomation.clearCache()
+      } else {
+        uiAutomation.rootInActiveWindow?.refresh()
+      }
       val label = device.findObject(By.text(text))
       var node = label
       while (node != null) {
@@ -220,7 +231,12 @@ class TvNavigationInstrumentedTest {
       }
       SystemClock.sleep(POLL_INTERVAL_MS)
     }
-    throw IllegalArgumentException("Timed out waiting for focused text: $text")
+    val focusedNodes = device.findObjects(By.focused(true)).joinToString { node ->
+      "text=${node.text} desc=${node.contentDescription} bounds=${node.visibleBounds}"
+    }
+    throw IllegalArgumentException(
+      "Timed out waiting for focused text: $text; focused nodes: [$focusedNodes]",
+    )
   }
 
   private fun waitForFocusedDescription(description: String): UiObject2 {

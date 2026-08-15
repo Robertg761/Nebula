@@ -33,6 +33,7 @@ object LanguageCodes {
     Triple("bul", "bg", "Bulgarian"),
     Triple("hrv", "hr", "Croatian"),
     Triple("srp", "sr", "Serbian"),
+    Triple("mkd", "mk", "Macedonian"),
     Triple("slv", "sl", "Slovenian"),
     Triple("ell", "el", "Greek"),
     Triple("tur", "tr", "Turkish"),
@@ -75,12 +76,21 @@ object LanguageCodes {
     put("may", "msa")
     put("scr", "hrv")
     put("scc", "srp")
+    put("mac", "mkd")
+    // OpenSubtitles and legacy Stremio catalogs use these non-ISO aliases heavily.
+    put("pob", "por")
+    put("zhs", "zho")
+    put("zht", "zho")
+    // ISO 639-2 added Montenegrin as `cnr`; older subtitle catalogs commonly use `mne`.
+    put("cnr", "cnr")
+    put("mne", "cnr")
     put("tgl", "fil")
     put("iw", "heb")
     put("in", "ind")
   }
 
-  private val NAMES: Map<String, String> = TABLE.associate { (three, _, name) -> three to name }
+  private val NAMES: Map<String, String> =
+    TABLE.associate { (three, _, name) -> three to name } + ("cnr" to "Montenegrin")
 
   private val SHORT: Map<String, String> = TABLE.associate { (three, two, _) -> three to two }
 

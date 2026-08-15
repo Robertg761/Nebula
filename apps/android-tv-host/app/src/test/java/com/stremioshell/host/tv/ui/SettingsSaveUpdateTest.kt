@@ -28,6 +28,15 @@ class SettingsSaveUpdateTest {
   }
 
   @Test
+  fun partialCrossStoreSaveKeepsTheViewerOnSettingsForRecovery() {
+    val update = SettingsSaveUpdate.Partial("configuration saved; languages unconfirmed")
+
+    assertEquals("configuration saved; languages unconfirmed", update.message)
+    assertFalse(update.completionSuccess()!!)
+    assertFalse(SettingsSaveOperation(requestId = 1, update = update).running)
+  }
+
+  @Test
   fun operationRemainsRunningAfterPersistenceUntilProbeFinishes() {
     assertTrue(SettingsSaveOperation(requestId = 1).running)
     assertTrue(

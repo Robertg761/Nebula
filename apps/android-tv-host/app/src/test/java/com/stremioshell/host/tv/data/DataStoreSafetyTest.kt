@@ -4,6 +4,7 @@ import androidx.datastore.core.CorruptionException
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import java.io.IOException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
@@ -15,6 +16,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DataStoreSafetyTest {
+  @Test
+  fun `detached persistence failure boundary logs errors but ignores cancellation`() {
+    val logged = mutableListOf<Pair<String, Throwable>>()
+    val failure = IOException("disk full")
+
+    reportPersistenceScopeFailure(failure) { message, error -> logged += message to error }
+    reportPersistenceScopeFailure(CancellationException("stopped")) { message, error ->
+      logged += message to error
+    }
+
+    assertEquals(listOf("Detached persistence work failed" to failure), logged)
+  }
+
   @Test
   fun `protobuf corruption is replaced by empty preferences and recorded`() = runBlocking {
     val logged = mutableListOf<String>()

@@ -323,6 +323,27 @@ enum class AudioOutputMode(
   }
 }
 
+enum class AudioRouteAction { None, RefreshPassthrough, Decode }
+
+/**
+ * What a live route change must do to the audio chain.
+ *
+ * A non-empty codec list is not by itself unchanged: moving from a full AVR to an AC-3-only sink
+ * still requires rewriting `audio-spdif` and reopening the selected audio track.
+ */
+object AudioRoutePolicy {
+  fun action(
+    mode: AudioOutputMode,
+    appliedSpdifCodecs: String,
+    supportedSpdifCodecs: String,
+  ): AudioRouteAction = when {
+    mode != AudioOutputMode.Passthrough -> AudioRouteAction.None
+    supportedSpdifCodecs.isEmpty() -> AudioRouteAction.Decode
+    supportedSpdifCodecs != appliedSpdifCodecs -> AudioRouteAction.RefreshPassthrough
+    else -> AudioRouteAction.None
+  }
+}
+
 /**
  * Audio and subtitle delay stepping, for the lip-sync drift a Bluetooth speaker
  * or a soundbar's own processing introduces.

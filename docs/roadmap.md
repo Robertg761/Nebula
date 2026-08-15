@@ -14,20 +14,30 @@ proof.
 - Use manual release promotion, immutable action pins, Gradle wrapper checksum,
   dependency locks/verification, APK digest checks, and provenance attestation.
 - Regenerate and benchmark the Baseline Profile for the current UI/player
-  changes on a physical Google TV class.
+  changes on a physical Google TV class. Adopt both outputs from the split
+  generator so `startup-prof.txt` contains only the launch collection.
 - Record physical playback signoff for at least one Google TV and, when
   available, one non-Google OEM device.
-- Choose and add a root project license before accepting outside contributions.
-- Verify the native libmpv/FFmpeg license configuration and archive the exact
-  corresponding source/build inputs for releases.
-- Resolve the intentionally failing release supply-chain gate with a reviewed
-  Gradle SBOM and complete native inventory/source archive.
 
 ## Recently implemented
 
+- The project is licensed under GPL-3.0-or-later, matching the GPLv3-effective
+  native playback bundle.
+- The locked release graph now has a deterministic CycloneDX inventory. Every
+  embedded native ABI file is hashed, and all 18 pinned native source trees can
+  be rebuilt into a digest-gated corresponding-source archive.
 - Bounded, redacted local diagnostics and explicit share reports now include
   app/device/network context and recent `ApplicationExitInfo`; Settings can
   erase all app data.
+- Direct media now uses a tokened loopback proxy. OkHttp owns each remote DNS
+  lookup and redirect, while origin-bound addon headers never reach libmpv.
+- Bounded HLS master/media playlists now stay inside that boundary: child
+  playlists, segments, keys, and maps receive opaque loopback routes and the
+  same public-network policy. DASH and Smooth Streaming remain explicitly out
+  of scope instead of being passed through to libmpv.
+- Baseline Profile generation now records launch-only startup rules separately
+  from the full navigation/playback journey. The candidate wrapper rejects
+  identical files and requires startup rules to be a strict subset.
 - Search pagination, trailer launch, pairing validation, stream filtering, and
   playback-default controls now have product paths and policy tests.
 
@@ -35,15 +45,8 @@ proof.
 
 - Continue extracting mpv, audio-route/focus, display-mode, MediaSession, and
   Up Next state controllers behind injectable interfaces.
-- Put native stream traffic behind a policy-enforcing transport, or add an
-  equivalent audited libmpv resolver/redirect hook, so every DNS answer and
-  redirect target receives the same public-HTTPS checks already used for
-  subtitle downloads.
 - Split the remaining `TvAppViewModel` responsibilities into screen
   repositories/use cases with coroutine-test coverage.
-- Separate watch-state mutation ordering from wall-clock display timestamps so
-  a backward system-time correction cannot make a persisted entry reject valid
-  progress or removal until the clock catches up.
 - Add deterministic update installation tests using old/new test-signed APKs,
   including wrong signer, downgrade, truncation, and launcher/data retention.
 - Add coverage reporting for pure policy/orchestration packages after the
@@ -58,12 +61,8 @@ proof.
   the full hardware matrix.
 - R8/resource shrinking now ships in `release` with explicit JNI/serialization
   keep rules; retain it only while APK/startup measurements justify the risk.
-- Split the Baseline Profile generator into a launch-only collect plus the full
-  journey, so the startup profile is tighter than the whole-journey copy of the
-  baseline profile it currently duplicates and dex layout favors launch alone.
-- Automate the currently blocked, reviewed CycloneDX/SPDX release inventory only
-  after its generator/schema and embedded native inputs are pinned and
-  dependency-verified.
+- Keep the CycloneDX generators, reviewed component counts, embedded native
+  inputs, and corresponding-source digest pinned as dependencies evolve.
 
 ## Product work after the quality floor
 

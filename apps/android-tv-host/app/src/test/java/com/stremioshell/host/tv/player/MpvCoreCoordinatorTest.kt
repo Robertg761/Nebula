@@ -3,7 +3,9 @@ package com.stremioshell.host.tv.player
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -89,61 +91,52 @@ class MpvCoreCoordinatorTest {
   }
 
   @Test
-  fun `throwing blocking fallback also keeps the lease retryable`() {
+  fun `throwing blocking fallback is contained and retried by the next acquire`() {
     val lease = requireNotNull(MpvCoreCoordinator.acquire(100))
+    val attempts = AtomicInteger()
+    val observed = AtomicReference<Throwable?>()
 
-    assertTrue(
-      runCatching {
-        MpvCoreCoordinator.destroyBlocking(lease) {
+    assertFalse(
+      MpvCoreCoordinator.destroyBlocking(
+        lease,
+        onFailure = observed::set,
+      ) {
+        if (attempts.incrementAndGet() == 1) {
           throw IllegalStateException("native destroy failed")
         }
-      }.isFailure,
+      },
     )
-    assertNull(MpvCoreCoordinator.acquire(20))
-    assertTrue(MpvCoreCoordinator.destroyBlocking(lease) {})
+    assertTrue(observed.get() is IllegalStateException)
 
-    val replacement = requireNotNull(MpvCoreCoordinator.acquire(100))
+    val replacement = requireNotNull(MpvCoreCoordinator.acquire(2_000))
+    assertEquals(2, attempts.get())
     assertTrue(MpvCoreCoordinator.abandon(replacement))
   }
 
   @Test
-  fun `throwing destroy retains ownership until the same lease is retired successfully`() {
+  fun `throwing async destroy is contained and retried before a replacement is acquired`() {
     val lease = requireNotNull(MpvCoreCoordinator.acquire(100))
     val expected = IllegalStateException("native destroy failed")
     val observed = AtomicReference<Throwable?>()
     val failureObserved = CountDownLatch(1)
-    val catchingLauncher = MpvCoreCoordinator.DestroyThreadLauncher { threadName, task ->
-      Thread({
-        try {
-          task.run()
-        } catch (failure: Throwable) {
-          observed.set(failure)
-          failureObserved.countDown()
-        }
-      }, threadName).start()
-    }
+    val attempts = AtomicInteger()
 
     assertTrue(
       MpvCoreCoordinator.destroyAsync(
         lease,
         threadName = "throwing-destroy-test",
-        launcher = catchingLauncher,
+        onFailure = { failure ->
+          observed.set(failure)
+          failureObserved.countDown()
+        },
       ) {
-        throw expected
+        if (attempts.incrementAndGet() == 1) throw expected
       },
     )
     assertTrue(failureObserved.await(2, TimeUnit.SECONDS))
     assertSame(expected, observed.get())
-    assertNull(MpvCoreCoordinator.acquire(20))
-
-    val retryFinished = CountDownLatch(1)
-    assertTrue(
-      MpvCoreCoordinator.destroyAsync(lease, threadName = "retry-after-throw-test") {
-        retryFinished.countDown()
-      },
-    )
-    assertTrue(retryFinished.await(2, TimeUnit.SECONDS))
     val replacement = requireNotNull(MpvCoreCoordinator.acquire(2_000))
+    assertEquals(2, attempts.get())
     assertTrue(MpvCoreCoordinator.abandon(replacement))
   }
 

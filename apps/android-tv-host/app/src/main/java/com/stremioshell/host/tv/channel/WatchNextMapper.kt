@@ -1,6 +1,7 @@
 package com.stremioshell.host.tv.channel
 
 import com.stremioshell.host.tv.data.WatchEntry
+import com.stremioshell.host.tv.data.watchEntryNewestFirst
 
 /** Mirrors TvContractCompat.WatchNextPrograms.TYPE_*, kept out of the mapping so it stays JVM-pure. */
 enum class WatchNextProgramType { Movie, TvEpisode }
@@ -51,7 +52,7 @@ object WatchNextMapper {
   fun resumable(entries: List<WatchEntry>): List<WatchEntry> = entries
     .filterNot { it.watched }
     .filter { it.tmdbId > 0 && it.title.isNotBlank() }
-    .sortedByDescending { it.updatedAtMs }
+    .sortedWith(watchEntryNewestFirst)
     .take(MAX_PROGRAMS)
 
   fun programsFor(entries: List<WatchEntry>): List<WatchNextProgramData> =

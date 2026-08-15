@@ -16,8 +16,8 @@ data class PairingValidation(
 }
 
 /**
- * User-facing validation copy that names only short source labels, never credential-bearing URLs
- * or the TMDB key.
+ * Phone-facing validation copy. It names only categories, never stored source labels,
+ * credential-bearing URLs, or the TMDB key; the TV renders its local checklist separately.
  */
 object PairingValidationPolicy {
   fun failureMessage(validation: PairingValidation): String {
@@ -28,9 +28,11 @@ object PairingValidationPolicy {
       }
       if (validation.addons.isEmpty()) {
         add("Enter at least one stream addon manifest URL.")
-      } else {
-        val failed = validation.addons.filterNot { it.connected }.joinToString(", ") { it.label }
-        if (failed.isNotEmpty()) add("$failed did not connect; check those addon URLs.")
+      } else if (validation.addons.any { !it.connected }) {
+        // A blank phone field means "keep what is stored", so these labels may describe a saved
+        // credential-bearing addon. The cleartext phone response remains write-only by reporting
+        // only the category; the TV's local checklist can still show the short labels.
+        add("One or more stream addons did not connect; check the addon URLs.")
       }
     }
     return issues.joinToString(" ")

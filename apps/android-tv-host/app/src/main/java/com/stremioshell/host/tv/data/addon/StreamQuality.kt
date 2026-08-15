@@ -59,7 +59,7 @@ data class StreamQuality(
         // filter and the remembered-selection auto-pick for the next episode.
         // "hdr10" earns a token of its own so that "hdr10" and "hdr10+" still
         // match once "hdr" alone stops matching inside them.
-        hdr = lower.containsToken("hdr", "hdr10", "pq10", "pq", "hlg"),
+        hdr = lower.containsToken("hdr", "hdr10", "hdr10plus", "pq10", "pq", "hlg"),
         dolbyVision = lower.containsAny("dolby vision", "dolbyvision", "dovi") ||
           lower.containsToken("dv"),
         sizeBytes = sizeHintBytes?.takeIf { it > 0 } ?: size(lower),
@@ -115,7 +115,19 @@ data class StreamQuality(
      * meant thousands of fresh Regex compilations on the main thread for one press of a filter
      * chip. Same discipline as StreamPresentation's own token table.
      */
-    private val TOKENS = listOf("hdr", "hdr10", "pq10", "pq", "hlg", "dv", "4k", "fhd", "hd", "sd")
+    private val TOKENS = listOf(
+      "hdr",
+      "hdr10",
+      "hdr10plus",
+      "pq10",
+      "pq",
+      "hlg",
+      "dv",
+      "4k",
+      "fhd",
+      "hd",
+      "sd",
+    )
       .associateWith { Regex("(?<![a-z0-9])$it(?![a-z0-9])") }
 
     /**
@@ -124,10 +136,13 @@ data class StreamQuality(
      * The trailing lookahead is what keeps "1080price" and "720px" out, but on its own it also
      * threw away "1080p10" and "2160p10bit" - the ordinary way a 10-bit encode is spelled - which
      * left those rows ranked unknown, sorted below every labelled row and skipped by auto-pick.
-     * Only the three real bit depths are accepted after the `p`, so a frame rate ("1080p60") still
-     * does not silently become part of the height.
+     * Only the three real bit depths or a two/three-digit frame-rate suffix are accepted after the
+     * `p`. The suffix is discarded; it merely lets ordinary names such as `1080p60` reach the
+     * height while the final lookahead still rejects `1080price` and `720px`.
      */
-    private val PIXEL_HEIGHT = Regex("(?<!\\d)(\\d{3,4})p(?:(?:8|10|12)(?:bit)?)?(?![a-z0-9])")
+    private val PIXEL_HEIGHT = Regex(
+      "(?<!\\d)(\\d{3,4})p(?:(?:8|10|12)(?:bit)?|\\d{2,3}(?:fps)?)?(?![a-z0-9])",
+    )
     private val SIZE = Regex("(\\d+(?:[.,]\\d+)?)\\s*(gib|gb|mib|mb)(?![a-z])")
     private const val MIN_HEIGHT = 240
     private const val MAX_HEIGHT = 4320

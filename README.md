@@ -106,9 +106,9 @@ Before dispatching a release:
    accepted).
 4. Confirm the protected environment and branch/tag rules in
    `docs/repository-settings.md` are configured.
-5. Resolve the current native inventory/SBOM/source-archive blockers described
-   in `docs/release-supply-chain.md`. The workflow intentionally refuses public
-   promotion until `scripts/check_release_supply_chain.js` passes.
+5. Regenerate and review the Gradle SBOM, native SBOM, and deterministic native
+   source archive as described in `docs/release-supply-chain.md`. The workflow
+   refuses public promotion if any reviewed digest or inventory check differs.
 
 ## Further reading
 
@@ -123,4 +123,10 @@ Before dispatching a release:
 - `PRIVACY.md`, `SECURITY.md`, and `THIRD_PARTY_NOTICES.md` - data handling,
   private reporting, and third-party/source obligations.
 
-The root project-license decision is still pending; see `CONTRIBUTING.md`.
+## License
+
+Nebula is free software licensed under
+[GPL-3.0-or-later](LICENSE). The native playback bundle has the same effective
+license because its FFmpeg build enables GPL and version 3 code. See
+`THIRD_PARTY_NOTICES.md` and `docs/release-supply-chain.md` for dependency and
+corresponding-source details.

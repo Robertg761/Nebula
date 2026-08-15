@@ -1,13 +1,19 @@
 package com.stremioshell.host.tv.pairing
 
+import android.os.Handler
+import android.os.Looper
 import com.stremioshell.host.tv.data.addon.AddonList
 import fi.iki.elonen.NanoHTTPD
+import java.io.ByteArrayInputStream
+import java.io.OutputStream
+import java.nio.charset.StandardCharsets
 import java.util.Collections
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -15,8 +21,9 @@ import java.util.concurrent.atomic.AtomicReference
  * page, submits the TMDB key and its stream addon URLs from its own keyboard,
  * and the values are handed back via [onConfig] (called on a server thread).
  *
- * Runs only while the pairing screen is visible; bound to port 0 so the OS
- * assigns a free port, read back from [listeningPort] after start().
+ * Runs only while the pairing screen is visible; bound to [bindHost] and port 0 so the OS assigns a
+ * free port, read back from [listeningPort] after start(). Binding the address selected by the
+ * caller's physical-LAN policy rather than the wildcard keeps every other interface out of scope.
  *
  * Security: this is cleartext HTTP reachable by every host on the LAN, so
  * every request - GET and POST alike - must carry [token], which is only ever
@@ -34,8 +41,11 @@ import java.util.concurrent.atomic.AtomicReference
  */
 class ConfigPairingServer(
   private val token: String,
+  bindHost: String,
+  private val onApplyResponseFinished: (PairingApplyResult) -> Unit = {},
+  private val responseCompletionDispatcher: ((() -> Unit) -> Unit) = ::dispatchCompletionOnMain,
   private val onConfig: (PairingSubmission) -> PairingApplyResult,
-) : NanoHTTPD(0) {
+) : NanoHTTPD(bindHost, 0) {
 
   private val guard = PairingTokenGuard(token)
   private val submissionState = AtomicReference(SubmissionState.Available)
@@ -98,6 +108,11 @@ class ConfigPairingServer(
       submissionState.compareAndSet(SubmissionState.Applying, SubmissionState.Available)
       return badRequest("That form could not be read. Please try again.")
     }
+    val rawTmdbKey = session.parameters["tmdb"]?.firstOrNull()
+    PairingSubmission.tmdbKeyInputError(rawTmdbKey)?.let { error ->
+      submissionState.compareAndSet(SubmissionState.Applying, SubmissionState.Available)
+      return html(formPage(error = error))
+    }
     val rawAddons = session.parameters["addon"]?.firstOrNull()
     // The single gate on the addon box, and the reason nothing below has to second-guess it: it
     // rejects any box that would lose a line to sanitising - unusable, duplicated, or more than
@@ -110,30 +125,49 @@ class ConfigPairingServer(
       return html(formPage(error = error))
     }
     val submission = PairingSubmission.of(
-      rawTmdbKey = session.parameters["tmdb"]?.firstOrNull(),
+      rawTmdbKey = rawTmdbKey,
       rawAddonUrls = rawAddons,
     )
     if (submission.isEmpty) {
       submissionState.compareAndSet(SubmissionState.Applying, SubmissionState.Available)
       return html(formPage(error = "Enter at least one value."))
     }
-    return when (val result = runCatching { onConfig(submission) }.getOrElse {
+    val result = runCatching { onConfig(submission) }.getOrElse {
       PairingApplyResult.Failed("The TV could not save those settings. Please try again.")
-    }) {
+    }
+    return when (result) {
       is PairingApplyResult.Saved -> {
         submissionState.set(SubmissionState.Consumed)
-        html(donePage(result.receipt))
+        html(donePage(result.receipt)) {
+          responseCompletionDispatcher { runCatching { onApplyResponseFinished(result) } }
+        }
       }
       is PairingApplyResult.Failed -> {
         submissionState.compareAndSet(SubmissionState.Applying, SubmissionState.Available)
-        html(formPage(error = result.message))
+        html(formPage(error = result.message)) {
+          responseCompletionDispatcher { runCatching { onApplyResponseFinished(result) } }
+        }
       }
     }
   }
 
-  private fun html(body: String): Response =
-    newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", body)
-      .also { it.addHeader("Cache-Control", "no-store") }
+  private fun html(body: String, onFinished: (() -> Unit)? = null): Response {
+    val response = if (onFinished == null) {
+      newFixedLengthResponse(Response.Status.OK, HTML_MIME, body)
+    } else {
+      ResponseWithCompletion(body, onFinished)
+    }
+    return response.also {
+      it.addHeader("Cache-Control", "no-store")
+      it.addHeader("Referrer-Policy", "no-referrer")
+      it.addHeader("X-Content-Type-Options", "nosniff")
+      it.addHeader(
+        "Content-Security-Policy",
+        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; " +
+          "base-uri 'none'; frame-ancestors 'none'",
+      )
+    }
+  }
 
   private fun forbidden(): Response =
     newFixedLengthResponse(
@@ -167,7 +201,7 @@ class ConfigPairingServer(
     }
     val errorDescription = if (error != null) " form-error" else ""
     return """
-      <!doctype html><html><head>
+      <!doctype html><html lang="en"><head>
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <meta name="referrer" content="no-referrer">
@@ -180,8 +214,12 @@ class ConfigPairingServer(
         main { width:100%; max-width:520px; padding:32px 20px 60px; }
         h1 { font-size:24px; margin:0 0 4px; letter-spacing:0.2px; }
         p.sub { color:#A9A4C7; margin:0 0 26px; font-size:14px; line-height:1.5; }
+        .steps { background:#121226; border:1px solid #2C2C52; border-radius:14px;
+                 padding:14px 16px; color:#C9C5E5; font-size:14px; line-height:1.55; }
+        .steps strong { color:#F2F0FF; }
         label { display:block; font-weight:600; margin:20px 0 8px; font-size:14px; color:#F2F0FF; }
         .hint { color:#A9A4C7; font-weight:400; font-size:12px; }
+        a { color:#BBA7FF; text-underline-offset:3px; }
         input, textarea { width:100%; background:#1E1E3C; color:#F2F0FF;
                 border:1px solid #2C2C52; border-radius:12px; padding:14px 16px; font-size:16px;
                 font-family:inherit; transition:border-color .15s ease; }
@@ -196,23 +234,31 @@ class ConfigPairingServer(
         .err { background:#40202e; color:#FF6B7A; padding:12px 16px; border-radius:12px; font-size:14px; }
       </style></head><body><main>
       <h1>Set up Nebula</h1>
-      <p class="sub">Paste your keys here, then tap Save. They go straight to your TV over your home
-      network. This page is not encrypted, so use it only on a trusted private network. Leave a box
-      empty to keep what the TV already has.</p>
+      <p class="sub">Enter the details below with your phone keyboard. Nebula checks them on the TV
+      before saving anything.</p>
+      <div class="steps"><strong>Your saved values stay private.</strong> This page never displays
+      the key or addon links already on the TV. It sends new values directly over your home network.
+      The connection is not encrypted, so use it only on a trusted private network. Leave either
+      field empty to keep its current value.</div>
       $errorHtml
       <form method="POST" action="/config?$TOKEN_FIELD=${escape(token)}">
         <label for="tmdb">TMDB API key
-          <span class="hint" id="tmdb-hint">themoviedb.org &rsaquo; Settings &rsaquo; API</span></label>
+          <span class="hint" id="tmdb-hint">Used for titles, artwork, details, and search.
+          <a href="https://www.themoviedb.org/settings/api" target="_blank"
+             rel="noopener noreferrer">Open TMDB API settings</a></span></label>
         <input id="tmdb" name="tmdb" aria-describedby="tmdb-hint$errorDescription"
                autocomplete="off" autocapitalize="off" spellcheck="false"
+               maxlength="${PairingSubmission.MAX_TMDB_KEY_CHARS}"
                placeholder="Leave empty to keep current key">
         <label for="addon">Stream addon manifest URLs
-          <span class="hint" id="addon-hint">one per line, up to ${AddonList.MAX_ADDONS} - e.g. your Comet instance, with your Real-Debrid key</span></label>
+          <span class="hint" id="addon-hint">Paste one manifest link per line, up to
+          ${AddonList.MAX_ADDONS}. Nebula accepts HTTPS manifest links and supported Stremio install links.</span></label>
         <textarea id="addon" name="addon" rows="4"
                aria-describedby="addon-hint$errorDescription"
                autocomplete="off" autocapitalize="off" spellcheck="false"
+               maxlength="${PairingSubmission.MAX_ADDON_INPUT_CHARS}"
                placeholder="Leave empty to keep the addons the TV already has"></textarea>
-        <button type="submit">Save to TV</button>
+        <button type="submit">Check and save to TV</button>
       </form>
       </main></body></html>
     """.trimIndent()
@@ -228,7 +274,7 @@ class ConfigPairingServer(
       else -> "${receipt.addonCount} saved"
     }
     return """
-      <!doctype html><html><head>
+      <!doctype html><html lang="en"><head>
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <meta name="referrer" content="no-referrer">
@@ -277,10 +323,43 @@ class ConfigPairingServer(
      */
     const val MAX_CONNECTIONS = 8
 
+    /**
+     * Pair-screen lifecycle callbacks also run on the main thread. Publishing the receipt there
+     * makes "response finished" and "screen resumed" a serial order: resume either sees the receipt
+     * or reuses the still-live session, but can never mint a session between receipt publication and
+     * closing the old one.
+     */
+    private fun dispatchCompletionOnMain(completion: () -> Unit) {
+      Handler(Looper.getMainLooper()).post(completion)
+    }
+
+    private const val HTML_MIME = "text/html; charset=utf-8"
+
     private val serverIndex = AtomicInteger()
   }
 
   private enum class SubmissionState { Available, Applying, Consumed }
+
+  /** Runs the completion hook after NanoHTTPD has finished, or attempted, the response write. */
+  private class ResponseWithCompletion(
+    body: String,
+    private val onFinished: () -> Unit,
+  ) : Response(
+    Response.Status.OK,
+    HTML_MIME,
+    body.toByteArray(StandardCharsets.UTF_8).let(::ByteArrayInputStream),
+    body.toByteArray(StandardCharsets.UTF_8).size.toLong(),
+  ) {
+    private val finished = AtomicBoolean(false)
+
+    override fun send(outputStream: OutputStream) {
+      try {
+        super.send(outputStream)
+      } finally {
+        if (finished.compareAndSet(false, true)) runCatching(onFinished)
+      }
+    }
+  }
 
   /**
    * A [NanoHTTPD.AsyncRunner] with a ceiling, replacing the default one thread per accepted socket.
@@ -333,12 +412,14 @@ class ConfigPairingServer(
     }
 
     override fun closeAll() {
-      // Sockets first, so the threads blocked reading them are already unwinding when they are
-      // interrupted. This runner is not reused: stop() ends the session, and the next pairing
-      // attempt builds a new server with a new token.
+      // Closing the sockets releases workers blocked in request I/O. Do not interrupt a worker
+      // already applying configuration: thread interruption can escape runBlocking's event-loop
+      // pump even when the commit coroutine is NonCancellable, producing a failure page for a
+      // DataStore edit that actually landed. Graceful shutdown lets that bounded request finish;
+      // this runner is not reused after stop().
       val snapshot = synchronized(running) { ArrayList(running) }
       snapshot.forEach { runCatching { it.close() } }
-      executor.shutdownNow()
+      executor.shutdown()
     }
 
     private companion object {

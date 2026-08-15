@@ -93,6 +93,14 @@ internal fun shouldLoadStreamsOnResume(
     addons?.isNotEmpty() == true
 }
 
+/**
+ * Places the focus target and, where possible, one better-ranked row in the viewport. Returning a
+ * concrete zero is important after a filtered-empty view: the remembered LazyListState may still
+ * be parked far down the old list even when the selected release is the first row.
+ */
+internal fun streamListFocusScrollIndex(preselectedRow: Int): Int? =
+  preselectedRow.takeIf { it >= 0 }?.let { (it - 1).coerceAtLeast(0) }
+
 @Composable
 fun StreamsScreen(
   viewModel: TvAppViewModel,
@@ -204,14 +212,29 @@ fun StreamsScreen(
   // been honoured the position is the viewer's, including when a filter hides the target (matched
   // goes null, which is not a new target) and a later press brings it back.
   var scrolledForPreselect by remember(screen) { mutableStateOf<AddonStream?>(null) }
-  LaunchedEffect(matched, preselectedRow) {
+  var showAllFocusPending by remember(screen) { mutableStateOf(false) }
+  LaunchedEffect(matched, preselectedRow, showAllFocusPending) {
+    if (showAllFocusPending) {
+      val scrollIndex = streamListFocusScrollIndex(preselectedRow)
+        ?: return@LaunchedEffect
+      // Show All replaces its focused button with the LazyColumn. Reset the retained list position
+      // before asking for focus so the destination is composed even after the viewer had scrolled
+      // far down the pre-filtered list.
+      listState.scrollToItem(scrollIndex)
+      scrolledForPreselect = matched
+      showAllFocusPending = false
+      streamListFocusTick++
+      return@LaunchedEffect
+    }
     val target = matched ?: return@LaunchedEffect
     if (scrolledForPreselect == target) return@LaunchedEffect
     scrolledForPreselect = target
     // Stops one row short so something ranked *above* the remembered one stays visible. Flush
     // against the top the picker looked like a list that begins at the viewer's old choice, with
     // every better release StreamOrder had put above it off screen and nothing saying so.
-    if (preselectedRow > 1) listState.scrollToItem(preselectedRow - 1)
+    streamListFocusScrollIndex(preselectedRow)
+      ?.takeIf { it > 0 }
+      ?.let { listState.scrollToItem(it) }
   }
 
   RequestInitialFocus(
@@ -254,6 +277,7 @@ fun StreamsScreen(
       ScreenHeader(
         title = screen.title,
         subtitle = if (screen.season != null) "S${screen.season}E${screen.episode}" else null,
+        subtitleSpokenLabel = A11yLabels.episodeCode(screen.season, screen.episode),
       )
     }
 
@@ -380,11 +404,12 @@ fun StreamsScreen(
               text = stringResource(R.string.streams_show_all_releases),
               onClick = {
                 filters = StreamFilters.SHOW_ALL
-                // The button leaves composition as soon as releases return. Re-aim at the
-                // remembered release (or first row) instead of stranding focus on the old node.
-                streamListFocusTick++
+                // The button leaves composition as soon as releases return. The effect above
+                // first restores the target to the viewport and only then re-aims focus.
+                showAllFocusPending = true
               },
               style = NebulaButtonStyle.Primary,
+              modifier = Modifier.initialFocusTarget(firstStreamFocus),
             )
           }
         } else {

@@ -1,36 +1,104 @@
 {
-  "schemaVersion": 1,
-  "releaseReady": false,
-  "gradleSbom": null,
-  "nativeSbom": null,
-  "nativeSourceArchive": null,
-  "nativeComponents": [
-    {
-      "name": "libmpv-android",
-      "version": "0.4.1",
-      "source": "https://github.com/jarnedemeulemeester/libmpv-android/commit/293d1a606413be36886a2ec922aee3d358690e07",
-      "license": "MIT",
-      "artifact": "dev.jdtech.mpv:libmpv:0.4.1",
-      "sha256": "361f4fecb2769fd77697e02f83e24e767431859560282225facc5310a60f6ab2"
+  "schemaVersion": 2,
+  "releaseReady": true,
+  "projectLicense": {
+    "spdx": "GPL-3.0-or-later",
+    "path": "LICENSE",
+    "sha256": "4493a7e97329a94c8b8d2b1db279821a5fabcd4fabcb34427d3b016494310e65"
+  },
+  "generators": {
+    "sbom": {
+      "path": "scripts/generate_release_sboms.js",
+      "sha256": "61b5c107f4f68b5f6433e5c870a882ebcc9d0c5781b8ee139503b422f7e2e754"
     },
-    {
-      "name": "mpv",
-      "version": null,
-      "source": null,
-      "license": null,
-      "sha256": null
-    },
-    {
-      "name": "FFmpeg",
-      "version": null,
-      "source": null,
-      "license": null,
-      "sha256": null
+    "nativeSource": {
+      "path": "scripts/generate_native_source_archive.js",
+      "sha256": "362d697218dfb4fd4b965db2bb3bbf35386229666f9090278e57edff98667295"
     }
-  ],
-  "blockers": [
-    "Resolve the exact embedded mpv and FFmpeg versions, build flags, licenses, source commits, and binary hashes.",
-    "Generate and review a pinned CycloneDX or SPDX JSON inventory for the locked Gradle graph.",
-    "Archive the corresponding native source trees, patches, and build scripts."
-  ]
+  },
+  "gradleSbom": {
+    "path": "release/gradle-sbom.cdx.json",
+    "sha256": "6333b3670e10cd09827354fd13ed5ecd2012377b6d8bbb026c8d1ffa6e9500df",
+    "format": "cyclonedx-json",
+    "componentCount": 127,
+    "requiredComponents": [
+      {
+        "group": "dev.jdtech.mpv",
+        "name": "libmpv",
+        "version": "0.4.1",
+        "license": "MIT"
+      },
+      {
+        "group": "org.nanohttpd",
+        "name": "nanohttpd",
+        "version": "2.3.1",
+        "license": "BSD-3-Clause"
+      },
+      {
+        "group": "androidx.datastore",
+        "name": "datastore-preferences",
+        "version": "1.1.1",
+        "license": "Apache-2.0"
+      },
+      {
+        "group": "org.jetbrains.kotlinx",
+        "name": "kotlinx-coroutines-android",
+        "version": "1.8.1",
+        "license": "Apache-2.0"
+      },
+      {
+        "group": "androidx.compose.ui",
+        "name": "ui",
+        "version": "1.7.0",
+        "license": "Apache-2.0"
+      }
+    ]
+  },
+  "nativeSourceManifest": {
+    "path": "release/native-source-manifest.json",
+    "sha256": "fea0fc30d8156f7849d69e05b615af28d5717e47d66e64a25cdf9b25e57e0a75",
+    "sourceCount": 18
+  },
+  "nativeSbom": {
+    "path": "release/native-sbom.cdx.json",
+    "sha256": "52e3de95ee6286b23ca858bf2de8ea7069a59396202c9b968356708613983f66",
+    "format": "cyclonedx-json",
+    "binariesPerAbi": 11,
+    "requiredBinaries": [
+      "libavcodec.so",
+      "libavformat.so",
+      "libavutil.so",
+      "libc++_shared.so",
+      "libmpv.so",
+      "libplayer.so"
+    ]
+  },
+  "nativeSourceArchive": {
+    "path": "dist/Nebula-native-sources.tar.gz",
+    "sha256": "a3481862d522edb3a54417c899d41c3312e3dc2bd13bc1c3ac21882250dac4df",
+    "format": "tar.gz",
+    "entryCount": 18145
+  },
+  "reviewedNativeBundle": {
+    "coordinate": "dev.jdtech.mpv:libmpv:0.4.1",
+    "version": "0.4.1",
+    "aarSha256": "361f4fecb2769fd77697e02f83e24e767431859560282225facc5310a60f6ab2",
+    "effectiveLicense": "GPL-3.0-or-later",
+    "libmpvAndroid": {
+      "version": "0.4.1",
+      "commit": "293d1a606413be36886a2ec922aee3d358690e07",
+      "license": "MIT"
+    },
+    "mpv": {
+      "version": "0.39.0",
+      "commit": "a0fba7be57f3822d967b04f0f6b6d6341e7516e7",
+      "license": "GPL-2.0-or-later"
+    },
+    "ffmpeg": {
+      "version": "7.1",
+      "commit": "b08d7969c550a804a59511c7b83f2dd8cc0499b8",
+      "license": "GPL-3.0-or-later"
+    }
+  },
+  "blockers": []
 }

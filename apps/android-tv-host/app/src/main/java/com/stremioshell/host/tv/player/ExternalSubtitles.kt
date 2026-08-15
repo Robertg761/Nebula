@@ -15,6 +15,11 @@ data class ExternalSubtitleOption(
   val url: String,
   /** Normalized language code, blank when the addon tagged the file with nothing. */
   val lang: String,
+  /**
+   * The addon's bounded original language tag, kept separately because canonical grouping folds
+   * `zht`/`zh-Hant` into `zho` while legacy charset detection still needs that distinction.
+   */
+  val encodingLanguageHint: String? = null,
   /** The language, because that is what the choice is actually about. */
   val label: String,
   val detail: String,
@@ -32,7 +37,10 @@ data class ExternalSubtitleOption(
   val source: ExternalSubtitleSource = ExternalSubtitleSource.Embedded,
   val ordinal: Int = 1,
   val total: Int = 1,
-)
+) {
+  /** Canonical language is the fallback for old/untagged callers. */
+  val charsetLanguageHint: String get() = encodingLanguageHint ?: lang
+}
 
 enum class ExternalSubtitleSource {
   Embedded,
@@ -52,23 +60,58 @@ object EmbeddedSubtitles {
   const val MAX_ID_LENGTH = 120
   const val MAX_LANGUAGE_LENGTH = 64
   const val MAX_CANDIDATES = MAX_OPTIONS * 4
+  internal const val MAX_TOTAL_CHARS = 48 * 1024
 
   fun sanitize(subtitles: List<AddonStreamSubtitle>): List<AddonStreamSubtitle> {
     val seenUrls = HashSet<String>()
+    var totalChars = 0
     return subtitles.asSequence()
       .take(MAX_CANDIDATES)
       .mapNotNull { subtitle ->
         val url = SubtitleUrlPolicy.allowedUrlOrNull(subtitle.url) ?: return@mapNotNull null
         if (!seenUrls.add(url)) return@mapNotNull null
-        subtitle.copy(
+        val bounded = subtitle.copy(
           url = url,
-          id = subtitle.id?.trim()?.takeIf { it.isNotEmpty() }?.take(MAX_ID_LENGTH),
-          lang = subtitle.lang?.trim()?.takeIf { it.isNotEmpty() }?.take(MAX_LANGUAGE_LENGTH),
+          id = subtitle.id
+            ?.let { PlayerPayloadBounds.truncateUtf16(it, MAX_ID_LENGTH) }
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() },
+          lang = boundedLanguageHint(subtitle.lang),
         )
+        val addedChars = bounded.url.length + bounded.id.orEmpty().length +
+          bounded.lang.orEmpty().length
+        if (totalChars + addedChars > MAX_TOTAL_CHARS) return@mapNotNull null
+        totalChars += addedChars
+        bounded
       }
       .take(MAX_OPTIONS)
       .toList()
   }
+
+  /** Pure embedded-route factory: canonical display matching and raw charset hints cannot drift. */
+  internal fun menuOption(
+    subtitle: AddonStreamSubtitle,
+    unknownLanguageLabel: String,
+    includedDetail: String,
+    fallbackTrackTitle: String,
+  ): ExternalSubtitleOption {
+    val languageHint = boundedLanguageHint(subtitle.lang)
+    val languageCode = LanguageCodes.normalize(languageHint)
+    return ExternalSubtitleOption(
+      url = subtitle.url,
+      lang = languageCode,
+      encodingLanguageHint = languageHint,
+      label = LanguageCodes.displayName(languageCode).ifBlank { unknownLanguageLabel },
+      detail = includedDetail,
+      trackTitle = subtitle.id?.trim()?.takeIf { it.isNotEmpty() } ?: fallbackTrackTitle,
+    )
+  }
+
+  internal fun boundedLanguageHint(raw: String?): String? =
+    raw
+      ?.let { PlayerPayloadBounds.truncateUtf16(it, MAX_LANGUAGE_LENGTH) }
+      ?.trim()
+      ?.takeIf { it.isNotEmpty() }
 
 }
 
@@ -194,12 +237,17 @@ object ExternalSubtitles {
     val seenUrls = HashSet<String>()
     // Insertion-ordered, so the cap below keeps the addon's own ranking within a
     // language rather than an arbitrary three of them.
-    val byLanguage = LinkedHashMap<String, MutableList<String>>()
+    val byLanguage = LinkedHashMap<String, MutableList<OnlineSubtitleCandidate>>()
     for (subtitle in subtitles.asSequence().take(MAX_CANDIDATES)) {
       val url = SubtitleUrlPolicy.allowedUrlOrNull(subtitle.url) ?: continue
       if (!seenUrls.add(url)) continue
-      val group = byLanguage.getOrPut(LanguageCodes.normalize(subtitle.lang)) { mutableListOf() }
-      if (group.size < PER_LANGUAGE) group += url
+      val encodingLanguageHint = EmbeddedSubtitles.boundedLanguageHint(subtitle.lang)
+      val group = byLanguage.getOrPut(LanguageCodes.normalize(encodingLanguageHint)) {
+        mutableListOf()
+      }
+      if (group.size < PER_LANGUAGE) {
+        group += OnlineSubtitleCandidate(url, encodingLanguageHint)
+      }
     }
     val preferred = preferredCode(preferredLanguage)
     // Resolved once per language rather than once per row: it is the sort key as well as the
@@ -212,12 +260,18 @@ object ExternalSubtitles {
       ),
     )
     val options = ArrayList<ExternalSubtitleOption>(minOf(MAX_OPTIONS, seenUrls.size))
-    for ((code, urls) in ordered) {
+    for ((code, candidates) in ordered) {
       // Whole languages, never part of one. Each row says "2 of 3", and a cap applied to the
       // flattened list cuts a group mid-way and leaves two rows both claiming there is a third.
-      if (options.size + urls.size > MAX_OPTIONS) break
-      urls.forEachIndexed { index, url ->
-        options += option(code, labels.getValue(code), url, index + 1, urls.size)
+      if (options.size + candidates.size > MAX_OPTIONS) break
+      candidates.forEachIndexed { index, candidate ->
+        options += option(
+          code,
+          labels.getValue(code),
+          candidate,
+          index + 1,
+          candidates.size,
+        )
       }
     }
     return options
@@ -240,7 +294,20 @@ object ExternalSubtitles {
     val seenUrls = HashSet<String>()
     val merged = ArrayList<ExternalSubtitleOption>(embedded.size + online.size)
     for (option in embedded) if (seenUrls.add(option.url)) merged += option
-    for (option in online) if (seenUrls.add(option.url)) merged += option
+    val survivingOnline = online.filter { seenUrls.add(it.url) }
+    val totals = survivingOnline.groupingBy { it.lang }.eachCount()
+    val ordinals = HashMap<String, Int>()
+    for (option in survivingOnline) {
+      val ordinal = (ordinals[option.lang] ?: 0) + 1
+      ordinals[option.lang] = ordinal
+      val total = totals.getValue(option.lang)
+      merged += option.copy(
+        detail = if (total == 1) SOURCE_LABEL else "$SOURCE_LABEL $ordinal of $total",
+        trackTitle = if (total == 1) TRACK_LABEL else "$TRACK_LABEL $ordinal",
+        ordinal = ordinal,
+        total = total,
+      )
+    }
     return merged
   }
 
@@ -302,12 +369,13 @@ object ExternalSubtitles {
   private fun option(
     code: String,
     label: String,
-    url: String,
+    candidate: OnlineSubtitleCandidate,
     ordinal: Int,
     total: Int,
   ) = ExternalSubtitleOption(
-    url = url,
+    url = candidate.url,
     lang = code,
+    encodingLanguageHint = candidate.encodingLanguageHint,
     label = label,
     detail = if (total == 1) SOURCE_LABEL else "$SOURCE_LABEL $ordinal of $total",
     trackTitle = if (total == 1) TRACK_LABEL else "$TRACK_LABEL $ordinal",
@@ -324,4 +392,9 @@ object ExternalSubtitles {
 
   /** Named because the default addon is the one every Stremio client offers. */
   private const val SOURCE = "OpenSubtitles"
+
+  private data class OnlineSubtitleCandidate(
+    val url: String,
+    val encodingLanguageHint: String?,
+  )
 }

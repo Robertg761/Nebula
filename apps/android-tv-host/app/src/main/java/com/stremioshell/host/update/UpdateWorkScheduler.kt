@@ -4,7 +4,9 @@ import android.content.Context
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.stremioshell.host.BuildConfig
@@ -24,6 +26,9 @@ object UpdateWorkScheduler {
    */
   private const val UNIQUE_WORK_NAME = "stremio-shell-update-v2"
 
+  /** Manual checks are deduplicated without changing the periodic chain's cadence. */
+  private const val MANUAL_UNIQUE_WORK_NAME = "stremio-shell-update-manual-v1"
+
   /** The v1 name, cancelled exactly once per install so its hourly spec cannot outlive this. */
   private const val LEGACY_UNIQUE_WORK_NAME = "stremio-shell-update-hourly"
 
@@ -38,29 +43,25 @@ object UpdateWorkScheduler {
    */
   private const val CHECK_PERIOD_HOURS = 6L
 
-  fun ensureScheduled(context: Context) {
-    if (BuildConfig.DEBUG) {
-      return
-    }
+  internal enum class ManualCheckRequest {
+    QUEUED,
+    UNAVAILABLE,
+    FAILED_TO_QUEUE,
+  }
 
+  fun ensureScheduled(context: Context) {
     val owner = BuildConfig.GITHUB_RELEASE_OWNER.trim()
     val repo = BuildConfig.GITHUB_RELEASE_REPO.trim()
-    if (owner.isBlank() || repo.isBlank()) {
+    if (!checksAvailable(BuildConfig.DEBUG, owner, repo)) {
       return
     }
-
-    val constraints = Constraints.Builder()
-      // Not merely CONNECTED: the download this leads to already refuses metered and roaming
-      // connections, so a check on one can only ever end in "found it, cannot fetch it".
-      .setRequiredNetworkType(NetworkType.UNMETERED)
-      .build()
 
     val request = PeriodicWorkRequestBuilder<BackgroundUpdateWorker>(
       CHECK_PERIOD_HOURS,
       TimeUnit.HOURS,
     )
-      .setConstraints(constraints)
-      .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 15, TimeUnit.MINUTES)
+      .setConstraints(updateConstraints())
+      .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, RETRY_BACKOFF_MINUTES, TimeUnit.MINUTES)
       .build()
 
     val workManager = WorkManager.getInstance(context)
@@ -73,6 +74,68 @@ object UpdateWorkScheduler {
       request
     )
   }
+
+  /**
+   * Queues the same worker used by the periodic path and waits only for WorkManager to persist it.
+   * A successful return means queued, never checked or downloaded. `KEEP` makes repeated presses
+   * share one unfinished manual request, while the worker's publication gate prevents that request
+   * and a periodic run from enqueueing duplicate APK downloads.
+   *
+   * Blocking by design. Settings calls this from Dispatchers.IO.
+   */
+  internal fun requestManualCheck(context: Context): ManualCheckRequest {
+    val appContext = context.applicationContext
+    val owner = BuildConfig.GITHUB_RELEASE_OWNER.trim()
+    val repo = BuildConfig.GITHUB_RELEASE_REPO.trim()
+    val statusStore = UpdateStatusStore(appContext)
+    if (!checksAvailable(BuildConfig.DEBUG, owner, repo)) {
+      statusStore.recordFailedCheck(
+        UpdateFailureKind.CONFIGURATION,
+        retryScheduled = false,
+      )
+      return ManualCheckRequest.UNAVAILABLE
+    }
+
+    val requestedAtMs = System.currentTimeMillis()
+    val queued = try {
+      val request = OneTimeWorkRequestBuilder<BackgroundUpdateWorker>()
+        .setConstraints(updateConstraints())
+        .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, RETRY_BACKOFF_MINUTES, TimeUnit.MINUTES)
+        .build()
+      WorkManager.getInstance(appContext)
+        .enqueueUniqueWork(MANUAL_UNIQUE_WORK_NAME, ExistingWorkPolicy.KEEP, request)
+        .result
+        .get(ENQUEUE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+      // The database accepted the request. This is still only QUEUED; if the worker already
+      // advanced or completed, the timestamp-aware reducer preserves that newer fact.
+      statusStore.recordQueued(requestedAtMs)
+      true
+    } catch (_: InterruptedException) {
+      Thread.currentThread().interrupt()
+      false
+    } catch (_: Exception) {
+      false
+    }
+
+    if (!queued) {
+      statusStore.recordFailedCheck(
+        UpdateFailureKind.SCHEDULING,
+        retryScheduled = false,
+      )
+      return ManualCheckRequest.FAILED_TO_QUEUE
+    }
+    return ManualCheckRequest.QUEUED
+  }
+
+  internal fun checksAvailable(debug: Boolean, owner: String, repo: String): Boolean =
+    !debug && owner.isNotBlank() && repo.isNotBlank()
+
+  /** One network policy for both manual and periodic checks. */
+  private fun updateConstraints(): Constraints = Constraints.Builder()
+    // Not merely CONNECTED: the download this leads to already refuses metered and roaming
+    // connections, so a check on one can only ever end in "found it, cannot fetch it".
+    .setRequiredNetworkType(NetworkType.UNMETERED)
+    .build()
 
   /**
    * The flag is what keeps this to one cancellation: without it every launch would query the
@@ -117,4 +180,6 @@ object UpdateWorkScheduler {
 
   /** Long enough for a database write behind a cold WorkManager, short enough not to be a hang. */
   private const val CANCEL_TIMEOUT_SECONDS = 10L
+  private const val ENQUEUE_TIMEOUT_SECONDS = 10L
+  private const val RETRY_BACKOFF_MINUTES = 15L
 }

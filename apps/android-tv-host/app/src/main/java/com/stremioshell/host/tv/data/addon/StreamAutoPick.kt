@@ -1,7 +1,13 @@
 package com.stremioshell.host.tv.data.addon
 
+import com.stremioshell.host.tv.data.PersistenceMutationClock
+import com.stremioshell.host.tv.data.PersistenceMutationToken
 import java.util.Locale
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 
 /**
  * What a viewer last chose for one series, kept so the next episode does not ask
@@ -11,7 +17,7 @@ import kotlinx.serialization.Serializable
  * release that only covers season 3 has nothing to offer season 4 - while the
  * resolution tier still says something useful about every episode of the show.
  */
-@Serializable
+@Serializable(with = StreamSelectionSerializer::class)
 data class StreamSelection(
   /** The series' IMDb id, which is the only id both the picker and the player hold. */
   val seriesId: String,
@@ -26,7 +32,59 @@ data class StreamSelection(
   /** The row's own label, for showing the viewer what was remembered. */
   val label: String? = null,
   val updatedAtMs: Long,
+  /** Monotonic persistence order; zero denotes a selection written by an older build. */
+  val mutationOrder: Long = 0L,
+  /** Captured before the persistence coroutine starts; omitted from the stored JSON. */
+  val pendingMutation: PersistenceMutationToken = PersistenceMutationClock.next(),
 )
+
+@Serializable
+private data class PersistedStreamSelection(
+  val seriesId: String,
+  val bingeGroup: String? = null,
+  val resolutionHeight: Int? = null,
+  val hdr: Boolean? = null,
+  val dolbyVision: Boolean? = null,
+  val label: String? = null,
+  val updatedAtMs: Long,
+  val mutationOrder: Long = 0L,
+)
+
+internal object StreamSelectionSerializer : KSerializer<StreamSelection> {
+  private val delegate = PersistedStreamSelection.serializer()
+  override val descriptor: SerialDescriptor = delegate.descriptor
+
+  override fun serialize(encoder: Encoder, value: StreamSelection) {
+    delegate.serialize(
+      encoder,
+      PersistedStreamSelection(
+        seriesId = value.seriesId,
+        bingeGroup = value.bingeGroup,
+        resolutionHeight = value.resolutionHeight,
+        hdr = value.hdr,
+        dolbyVision = value.dolbyVision,
+        label = value.label,
+        updatedAtMs = value.updatedAtMs,
+        mutationOrder = value.mutationOrder,
+      ),
+    )
+  }
+
+  override fun deserialize(decoder: Decoder): StreamSelection {
+    val value = delegate.deserialize(decoder)
+    return StreamSelection(
+      seriesId = value.seriesId,
+      bingeGroup = value.bingeGroup,
+      resolutionHeight = value.resolutionHeight,
+      hdr = value.hdr,
+      dolbyVision = value.dolbyVision,
+      label = value.label,
+      updatedAtMs = value.updatedAtMs,
+      mutationOrder = value.mutationOrder,
+      pendingMutation = PersistenceMutationToken.Unassigned,
+    )
+  }
+}
 
 /**
  * Matches a bingeGroup across episodes.

@@ -2,8 +2,8 @@ package com.stremioshell.host.tv.player
 
 import java.nio.ByteBuffer
 import java.nio.CharBuffer
-import java.nio.charset.CharsetDecoder
 import java.nio.charset.Charset
+import java.nio.charset.CharsetDecoder
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 
@@ -32,8 +32,8 @@ object SubtitleCharset {
    * [bytes] as UTF-8, given a subtitle the addon tagged as [lang].
    *
    * Returns the input array itself when it is already UTF-8, so the common case copies nothing.
-   * Never throws: the fallbacks are single-byte code pages, which have a character for every one
-   * of the 256 possible bytes, so there is no input this cannot produce *something* readable from.
+   * Never throws: Java's legacy decoders replace malformed input, so even a damaged multi-byte CJK
+   * file still produces valid UTF-8 rather than taking the subtitle selection down with it.
    */
   fun toUtf8(bytes: ByteArray, lang: String?): ByteArray {
     val bom = byteOrderMark(bytes)
@@ -49,8 +49,8 @@ object SubtitleCharset {
   }
 
   /**
-   * The single-byte code page a file tagged [lang] is most likely to be in, once it is known not
-   * to be UTF-8.
+   * The legacy charset a file tagged [lang] is most likely to be in, once it is known not to be
+   * UTF-8.
    *
    * One charset per language rather than any attempt at statistical detection: the alternative is
    * a heuristic that is wrong in a way nobody can explain, and the addon's own language tag is
@@ -59,6 +59,23 @@ object SubtitleCharset {
    * their ISO counterparts over the range that matters.
    */
   fun fallbackCharset(lang: String?): Charset {
+    val tagParts = lang.orEmpty().trim().lowercase().split('-', '_')
+    val rawBase = tagParts.firstOrNull().orEmpty()
+    val base = LanguageCodes.normalize(rawBase)
+    if (base == "srp" || base == "cnr") {
+      if ("latn" in tagParts) return resolved(WINDOWS_1250)
+      if ("cyrl" in tagParts) return resolved(WINDOWS_1251)
+    }
+    // These are multi-byte legacy encodings, so they cannot live in the single-byte table below.
+    // Script/region is significant for Chinese: generic and Hans use the GB18030 superset, while
+    // Hant/TW/HK/MO and OpenSubtitles' `zht` alias use Big5.
+    if (base == "jpn") return resolved(WINDOWS_31J)
+    if (base == "kor") return resolved(WINDOWS_949)
+    if (base == "zho" || rawBase == "zhs" || rawBase == "zht") {
+      val traditional = rawBase == "zht" ||
+        tagParts.any { it in setOf("hant", "tw", "hk", "mo") }
+      return resolved(if (traditional) BIG5 else GB18030)
+    }
     val code = LanguageCodes.normalize(lang)
     val name = CODE_PAGE_BY_LANGUAGE[code] ?: DEFAULT_CODE_PAGE
     return resolved(name)
@@ -127,6 +144,10 @@ object SubtitleCharset {
   private const val WINDOWS_1257 = "windows-1257"
   private const val WINDOWS_1258 = "windows-1258"
   private const val WINDOWS_874 = "windows-874"
+  private const val WINDOWS_31J = "windows-31j"
+  private const val WINDOWS_949 = "x-windows-949"
+  private const val GB18030 = "GB18030"
+  private const val BIG5 = "Big5"
 
   /** Western European, and the only honest answer for a language this list has never heard of. */
   private const val DEFAULT_CODE_PAGE = "windows-1252"
@@ -134,6 +155,8 @@ object SubtitleCharset {
   /** Fallback spellings, for the one page runtimes disagree about the name of. */
   private val CANDIDATES: Map<String, List<String>> = mapOf(
     WINDOWS_874 to listOf("x-windows-874", "TIS-620"),
+    WINDOWS_31J to listOf("Shift_JIS", "MS932"),
+    WINDOWS_949 to listOf("windows-949", "MS949", "EUC-KR"),
   )
 
   /**
@@ -145,10 +168,11 @@ object SubtitleCharset {
     fun page(charset: String, vararg codes: String) {
       for (code in codes) put(LanguageCodes.normalize(code), charset)
     }
-    page(WINDOWS_1251, "ru", "uk", "bg", "sr", "mk", "mkd", "be", "bel")
+    page(WINDOWS_1251, "ru", "uk", "bg", "sr", "mk", "mkd", "mac", "be", "bel")
     page(
       WINDOWS_1250,
       "pl", "cs", "sk", "hu", "hr", "sl", "ro", "sq", "sqi", "alb", "bs", "bos",
+      "cnr", "mne",
     )
     page(WINDOWS_1253, "el")
     page(WINDOWS_1254, "tr", "az", "aze")

@@ -41,7 +41,7 @@ class PairingValidationPolicyTest {
   }
 
   @Test
-  fun `failure copy names sources without exposing credentials`() {
+  fun `failure copy stays generic so stored addon brands remain write only`() {
     val message = PairingValidationPolicy.failureMessage(
       PairingValidation(
         hasTmdbKey = true,
@@ -53,7 +53,9 @@ class PairingValidationPolicyTest {
       ),
     )
     assertTrue(message.contains("TMDB"))
-    assertTrue(message.contains("Comet"))
+    assertTrue(message.contains("stream addons"))
+    assertFalse(message.contains("Comet"))
+    assertFalse(message.contains("Torrentio"))
     assertFalse(message.contains("https://"))
     assertFalse(message.contains("api_key"))
   }

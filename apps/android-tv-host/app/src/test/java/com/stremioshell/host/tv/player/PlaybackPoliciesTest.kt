@@ -155,6 +155,27 @@ class PlaybackPoliciesTest {
   }
 
   @Test
+  fun `request header aggregate is bounded for intent and saved state payloads`() {
+    val headers = (0 until 32).associate { index ->
+      "X-Token-$index" to "x".repeat(8 * 1024)
+    }
+
+    val safe = StreamRequestHeaders.sanitize(headers)
+    val totalChars = safe.entries.sumOf { (name, value) -> name.length + value.length + 2 }
+
+    assertTrue(totalChars <= StreamRequestHeaders.MAX_TOTAL_CHARS)
+  }
+
+  @Test
+  fun `irrelevant addon headers cannot consume mpv's playback allowlist budget`() {
+    val headers = linkedMapOf<String, String>()
+    repeat(40) { headers["X-Noise-$it"] = "value" }
+    headers["User-Agent"] = "Nebula"
+
+    assertEquals("User-Agent: Nebula", StreamRequestHeaders.mpvValue(headers))
+  }
+
+  @Test
   fun `subtitle inherits credentials only on the exact stream origin`() {
     val headers = mapOf("Authorization" to "Bearer secret", "Cookie" to "session=secret")
 
@@ -310,5 +331,96 @@ class PlaybackPoliciesTest {
         resetRequested = true,
       ),
     )
+  }
+
+  @Test
+  fun `a paused or backgrounded cache stall cannot become a playback failure`() {
+    assertTrue(
+      PlaybackStallPolicy.shouldReportFailure(
+        generationMatches = true,
+        buffering = true,
+        paused = false,
+        activityStarted = true,
+        hasPlaybackError = false,
+      ),
+    )
+    assertFalse(
+      PlaybackStallPolicy.shouldReportFailure(
+        generationMatches = true,
+        buffering = true,
+        paused = true,
+        activityStarted = true,
+        hasPlaybackError = false,
+      ),
+    )
+    assertFalse(
+      PlaybackStallPolicy.shouldReportFailure(
+        generationMatches = true,
+        buffering = true,
+        paused = false,
+        activityStarted = false,
+        hasPlaybackError = false,
+      ),
+    )
+  }
+
+  @Test
+  fun `common restoration load preserves pause while explicit play paths clear it`() {
+    assertTrue(
+      PlaybackLoadPausePolicy.pauseRequested(
+        current = true,
+        reason = PlaybackLoadReason.Common,
+      ),
+    )
+    listOf(
+      PlaybackLoadReason.ExplicitSelection,
+      PlaybackLoadReason.Retry,
+      PlaybackLoadReason.NextEpisode,
+    ).forEach { reason ->
+      assertFalse(PlaybackLoadPausePolicy.pauseRequested(current = true, reason = reason))
+    }
+    assertFalse(
+      PlaybackLoadPausePolicy.pauseRequested(
+        current = false,
+        reason = PlaybackLoadReason.Common,
+      ),
+    )
+  }
+
+  @Test
+  fun `sleep expiry rejects answers from both kinds of earlier resolver`() {
+    assertTrue(PlaybackResolutionPolicy.acceptsResult(4, 4))
+    assertFalse(PlaybackResolutionPolicy.acceptsResult(4, 5))
+  }
+
+  @Test
+  fun `media session seek transport is blocked for every up next state`() {
+    assertTrue(
+      PlaybackTransportPolicy.seekAllowed(
+        transportAllowed = true,
+        upNextVisible = false,
+        nextEpisodeResolving = false,
+      ),
+    )
+    assertFalse(
+      PlaybackTransportPolicy.seekAllowed(
+        transportAllowed = true,
+        upNextVisible = true,
+        nextEpisodeResolving = false,
+      ),
+    )
+    assertFalse(
+      PlaybackTransportPolicy.seekAllowed(
+        transportAllowed = true,
+        upNextVisible = false,
+        nextEpisodeResolving = true,
+      ),
+    )
+  }
+
+  @Test
+  fun `manual next marks credits watched but keeps a halfway episode resumable`() {
+    assertTrue(PlaybackNextPolicy.marksCurrentWatched(positionSec = 91.0, durationSec = 100.0))
+    assertFalse(PlaybackNextPolicy.marksCurrentWatched(positionSec = 50.0, durationSec = 100.0))
   }
 }

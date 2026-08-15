@@ -15,8 +15,8 @@ Create a branch ruleset for `main`:
 - require branches to be up to date;
 - require these checks:
   - `android-host`
-  - `TV instrumentation (26)`
-  - `TV instrumentation (34)`
+  - `Debug TV instrumentation (26)`
+  - `Debug TV instrumentation (34)`
   - `dependency-review`
 - block force pushes and deletion;
 - restrict bypass to emergency maintainers and audit every bypass.

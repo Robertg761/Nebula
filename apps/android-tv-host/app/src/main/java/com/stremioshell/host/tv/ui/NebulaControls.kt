@@ -21,6 +21,7 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -238,6 +239,7 @@ fun ScreenHeader(
   title: String,
   modifier: Modifier = Modifier,
   subtitle: String? = null,
+  subtitleSpokenLabel: String? = null,
 ) {
   Column(modifier = modifier.padding(start = NebulaDimens.ScreenEdge - NebulaDimens.TickInset)) {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -260,7 +262,13 @@ fun ScreenHeader(
         overflow = TextOverflow.Ellipsis,
         // Lands on the same line as the title above it, now that the tick hangs in the margin -
         // this used to be a hand-tuned 19dp chasing a number nothing else in the app used.
-        modifier = Modifier.padding(top = 6.dp, start = NebulaDimens.TickInset),
+        modifier = Modifier
+          .padding(top = 6.dp, start = NebulaDimens.TickInset)
+          // Some compact visual codes are poor speech. Clear Text semantics so TalkBack announces
+          // only the supplied phrase instead of reading both the phrase and the raw glyphs.
+          .clearAndSetSemantics {
+            contentDescription = subtitleSpokenLabel ?: subtitle
+          },
       )
     }
   }

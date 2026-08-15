@@ -341,6 +341,54 @@ class PlayerOptionsTest {
   }
 
   @Test
+  fun `a changed nonempty passthrough route refreshes the native audio chain`() {
+    assertEquals(
+      AudioRouteAction.RefreshPassthrough,
+      AudioRoutePolicy.action(
+        mode = AudioOutputMode.Passthrough,
+        appliedSpdifCodecs = "ac3,eac3,dts",
+        supportedSpdifCodecs = "ac3",
+      ),
+    )
+    assertEquals(
+      AudioRouteAction.None,
+      AudioRoutePolicy.action(
+        mode = AudioOutputMode.Passthrough,
+        appliedSpdifCodecs = "ac3",
+        supportedSpdifCodecs = "ac3",
+      ),
+    )
+    assertEquals(
+      AudioRouteAction.RefreshPassthrough,
+      AudioRoutePolicy.action(
+        mode = AudioOutputMode.Passthrough,
+        appliedSpdifCodecs = "ac3",
+        supportedSpdifCodecs = "ac3,eac3",
+      ),
+    )
+  }
+
+  @Test
+  fun `losing every passthrough codec falls back to decode`() {
+    assertEquals(
+      AudioRouteAction.Decode,
+      AudioRoutePolicy.action(
+        mode = AudioOutputMode.Passthrough,
+        appliedSpdifCodecs = "ac3,eac3",
+        supportedSpdifCodecs = "",
+      ),
+    )
+    assertEquals(
+      AudioRouteAction.None,
+      AudioRoutePolicy.action(
+        mode = AudioOutputMode.Decode,
+        appliedSpdifCodecs = "",
+        supportedSpdifCodecs = "ac3,eac3",
+      ),
+    )
+  }
+
+  @Test
   fun `delay steps in 25ms increments in both directions`() {
     assertEquals(0.025, DelaySteps.stepped(0.0, 1), 0.0001)
     assertEquals(-0.025, DelaySteps.stepped(0.0, -1), 0.0001)

@@ -23,7 +23,6 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
@@ -155,13 +154,8 @@ fun PairScreen(viewModel: TvAppViewModel, onPaired: () -> Unit) {
     visibilityGate.onVisible()
     onPauseOrDispose { visibilityGate.onHidden() }
   }
-  // Leaving is the other half of that rule: a receipt kept across a pause must not still be
-  // sitting there the next time this screen is opened, where it would show a stale confirmation
-  // and - because the gate reads it - refuse to start a new pairing at all. Disposal is the
-  // difference between "the viewer is elsewhere for a moment" and "the viewer left".
-  DisposableEffect(viewModel) {
-    onDispose { viewModel.stopPairing() }
-  }
+  // Route removal, rather than composition disposal, ends the session. Activity recreation also
+  // disposes this composition, but the retained ViewModel receipt must survive that operation.
 
   val goBack = rememberBackAction()
   val failed = state is TvAppViewModel.PairingState.Failed

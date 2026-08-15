@@ -2,10 +2,22 @@ package com.stremioshell.host.tv.data.addon
 
 import com.stremioshell.host.tv.data.HttpFetcher
 import com.stremioshell.host.tv.data.OkHttpFetcher
+import com.stremioshell.host.tv.data.PlaybackUrlPolicy
 import com.stremioshell.host.tv.data.decodeJsonOffMain
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.Transient
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.descriptors.buildClassSerialDescriptor
+import kotlinx.serialization.descriptors.element
+import kotlinx.serialization.encoding.CompositeDecoder
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.encoding.decodeStructure
+import kotlinx.serialization.encoding.encodeStructure
 import kotlinx.serialization.json.Json
 
 /**
@@ -51,7 +63,15 @@ class AddonClient(
   private suspend fun streams(manifestUrl: String, type: String, id: String): List<AddonStream> {
     val body = fetcher.get(streamUrl(manifestUrl, type, id))
     return decodeJsonOffMain { json.decodeFromString<AddonStreamsResponse>(body) }.streams
-      .filter { !it.url.isNullOrBlank() }
+      // The merged picker sorts and caps rows across every addon. Keeping an unplayable row until
+      // the player validates the selected item lets one broken addon fill that cap with high-ranked
+      // `file:`, cleartext or private-network URLs and crowd every valid row from healthy addons out
+      // of the picker. Apply the same pure policy here, before merge ordering, and retain its
+      // canonical spelling so the URL eventually handed to native mpv is the one already audited.
+      .mapNotNull { stream ->
+        PlaybackUrlPolicy.allowedUrlOrNull(stream.url.orEmpty())
+          ?.let { allowedUrl -> stream.copy(url = allowedUrl).boundedForApp() }
+      }
   }
 
   companion object {
@@ -69,8 +89,68 @@ data class AddonManifest(
   val description: String = "",
 )
 
-@Serializable
+/**
+ * Network decoding retains at most [MAX_ADDON_STREAM_ROWS] protocol rows from one addon.
+ *
+ * The HTTP body already has a byte ceiling, but a small JSON row can still expand into tens of
+ * thousands of Kotlin objects. The custom serializer continues decoding excess rows so the JSON
+ * remains validated, while discarding each one immediately instead of keeping the whole list.
+ */
+@Serializable(with = AddonStreamsResponseSerializer::class)
 data class AddonStreamsResponse(val streams: List<AddonStream> = emptyList())
+
+internal object AddonStreamsResponseSerializer : KSerializer<AddonStreamsResponse> {
+  private val streamsSerializer = BoundedListSerializer(
+    elementSerializer = AddonStream.serializer(),
+    maxSize = MAX_ADDON_STREAM_ROWS,
+  )
+
+  override val descriptor: SerialDescriptor = buildClassSerialDescriptor(
+    "com.stremioshell.host.tv.data.addon.AddonStreamsResponse",
+  ) {
+    element("streams", streamsSerializer.descriptor, isOptional = true)
+  }
+
+  override fun deserialize(decoder: Decoder): AddonStreamsResponse =
+    decoder.decodeStructure(descriptor) {
+      var streams = emptyList<AddonStream>()
+      while (true) {
+        when (val index = decodeElementIndex(descriptor)) {
+          CompositeDecoder.DECODE_DONE -> break
+          0 -> streams = decodeSerializableElement(descriptor, index, streamsSerializer)
+          else -> throw SerializationException("Unexpected addon response field index $index")
+        }
+      }
+      AddonStreamsResponse(streams)
+    }
+
+  override fun serialize(encoder: Encoder, value: AddonStreamsResponse) {
+    encoder.encodeStructure(descriptor) {
+      encodeSerializableElement(descriptor, 0, streamsSerializer, value.streams)
+    }
+  }
+}
+
+private class BoundedListSerializer<T>(
+  private val elementSerializer: KSerializer<T>,
+  private val maxSize: Int,
+) : KSerializer<List<T>> {
+  private val delegate = ListSerializer(elementSerializer)
+  override val descriptor: SerialDescriptor = delegate.descriptor
+
+  override fun deserialize(decoder: Decoder): List<T> = decoder.decodeStructure(descriptor) {
+    val retained = ArrayList<T>(maxSize)
+    while (true) {
+      val index = decodeElementIndex(descriptor)
+      if (index == CompositeDecoder.DECODE_DONE) break
+      val value = decodeSerializableElement(descriptor, index, elementSerializer)
+      if (retained.size < maxSize) retained += value
+    }
+    retained
+  }
+
+  override fun serialize(encoder: Encoder, value: List<T>) = delegate.serialize(encoder, value)
+}
 
 @Serializable
 data class AddonStream(
@@ -140,3 +220,95 @@ data class AddonProxyHeaders(
   @SerialName("request") val request: Map<String, String> = emptyMap(),
   @SerialName("response") val response: Map<String, String> = emptyMap(),
 )
+
+/** Keeps one untrusted stream row small before it enters picker or player state. */
+private fun AddonStream.boundedForApp(): AddonStream = copy(
+  name = name?.truncateUtf16(MAX_STREAM_LABEL_CHARS),
+  title = title?.truncateUtf16(MAX_STREAM_DETAIL_CHARS),
+  description = description?.truncateUtf16(MAX_STREAM_DETAIL_CHARS),
+  infoHash = infoHash.boundedIdentity(MAX_INFO_HASH_CHARS),
+  subtitles = subtitles.asSequence()
+    .take(MAX_SUBTITLE_CANDIDATES)
+    .mapNotNull { subtitle ->
+      subtitle.url.takeIf { it.length <= MAX_SUBTITLE_URL_CHARS }?.let { url ->
+        subtitle.copy(
+          url = url,
+          id = subtitle.id.boundedText(MAX_SUBTITLE_ID_CHARS),
+          lang = subtitle.lang.boundedText(MAX_SUBTITLE_LANGUAGE_CHARS),
+        )
+      }
+    }
+    .toList(),
+  behaviorHints = behaviorHints?.let { hints ->
+    hints.copy(
+      bingeGroup = hints.bingeGroup.boundedIdentity(MAX_BINGE_GROUP_CHARS),
+      filename = hints.filename.boundedText(MAX_FILENAME_CHARS),
+      videoHash = hints.videoHash.boundedIdentity(MAX_VIDEO_HASH_CHARS),
+      proxyHeaders = hints.proxyHeaders?.let { headers ->
+        AddonProxyHeaders(
+          request = headers.request.boundedHeaders(),
+          response = headers.response.boundedHeaders(),
+        )
+      },
+      countryWhitelist = hints.countryWhitelist.asSequence()
+        .take(MAX_COUNTRIES)
+        .mapNotNull { it.boundedIdentity(MAX_COUNTRY_CHARS) }
+        .toList(),
+    )
+  },
+)
+
+private fun String?.boundedIdentity(maxChars: Int): String? = this
+  ?.trim()
+  ?.takeIf { it.isNotEmpty() && it.length <= maxChars }
+
+private fun String?.boundedText(maxChars: Int): String? = this
+  ?.trim()
+  ?.takeIf { it.isNotEmpty() }
+  ?.truncateUtf16(maxChars)
+
+private fun String.truncateUtf16(maxChars: Int): String {
+  if (length <= maxChars) return this
+  var end = maxChars.coerceAtLeast(0)
+  if (end > 0 && this[end - 1].isHighSurrogate()) end -= 1
+  return substring(0, end)
+}
+
+private fun Map<String, String>.boundedHeaders(): Map<String, String> {
+  val bounded = linkedMapOf<String, String>()
+  var totalChars = 0
+  for ((name, value) in this) {
+    if (
+      bounded.size >= MAX_PROXY_HEADERS ||
+      name.length !in 1..MAX_HEADER_NAME_CHARS ||
+      value.length > MAX_HEADER_VALUE_CHARS
+    ) {
+      continue
+    }
+    val addedChars = name.length + value.length
+    if (totalChars + addedChars > MAX_PROXY_HEADER_CHARS) continue
+    bounded[name] = value
+    totalChars += addedChars
+  }
+  return bounded
+}
+
+private const val MAX_STREAM_LABEL_CHARS = 256
+private const val MAX_STREAM_DETAIL_CHARS = 2 * 1024
+private const val MAX_INFO_HASH_CHARS = 128
+private const val MAX_BINGE_GROUP_CHARS = 512
+private const val MAX_FILENAME_CHARS = 1024
+private const val MAX_VIDEO_HASH_CHARS = 256
+private const val MAX_SUBTITLE_CANDIDATES = 240
+private const val MAX_SUBTITLE_URL_CHARS = 4 * 1024
+private const val MAX_SUBTITLE_ID_CHARS = 120
+private const val MAX_SUBTITLE_LANGUAGE_CHARS = 64
+private const val MAX_COUNTRIES = 32
+private const val MAX_COUNTRY_CHARS = 8
+private const val MAX_PROXY_HEADERS = 32
+private const val MAX_HEADER_NAME_CHARS = 128
+private const val MAX_HEADER_VALUE_CHARS = 8 * 1024
+private const val MAX_PROXY_HEADER_CHARS = 16 * 1024
+
+/** Twice the final merged-picker cap leaves filtering headroom without an unbounded object graph. */
+internal const val MAX_ADDON_STREAM_ROWS = StreamMerge.MAX_MERGED_STREAMS * 2

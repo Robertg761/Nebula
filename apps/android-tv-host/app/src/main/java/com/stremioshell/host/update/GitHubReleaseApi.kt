@@ -13,7 +13,9 @@ internal data class GitHubAssetDto(
   val browserDownloadUrl: String,
   val size: Long?,
   /** Lower-case hex SHA-256 from the asset's `digest` field, null when the release omits it. */
-  val sha256: String? = null
+  val sha256: String? = null,
+  /** Immutable for one upload; deleting and re-uploading a corrected asset produces a new id. */
+  val id: Long? = null,
 )
 
 internal data class GitHubLatestReleaseDto(
@@ -21,22 +23,34 @@ internal data class GitHubLatestReleaseDto(
   val htmlUrl: String?,
   val body: String?,
   val publishedAt: String?,
-  val assets: List<GitHubAssetDto>
+  val assets: List<GitHubAssetDto>,
+  val prerelease: Boolean = false,
+  val draft: Boolean = false,
 )
+
+internal class GitHubApiException(
+  val statusCode: Int,
+  val rateLimited: Boolean,
+  val retryAfterSeconds: Long?,
+  val rateLimitResetEpochSeconds: Long?,
+  message: String,
+) : IllegalStateException(message)
 
 /**
  * The GitHub releases endpoint, over the app's shared OkHttp client.
  *
  * Blocking on purpose: its one caller is a WorkManager worker. Going through the shared client
  * buys three things a bare HttpURLConnection did not have - the app's connection pool, a response
- * that is always closed, and the disk cache. The last one matters most: `releases/latest` carries
+ * that is always closed, and the disk cache. The last one matters most: the releases list carries
  * an ETag, so a repeat check revalidates and comes back 304 without spending one of the sixty
  * anonymous API calls an hour this app is allowed.
  */
 class GitHubReleaseApi {
-  internal fun fetchLatestRelease(owner: String, repo: String): GitHubLatestReleaseDto {
+  internal fun fetchReleases(owner: String, repo: String): List<GitHubLatestReleaseDto> {
     val request = Request.Builder()
-      .url("https://api.github.com/repos/$owner/$repo/releases/latest")
+      // Unlike /releases/latest, this includes prereleases. Stable installs filter them in the
+      // repository; an installed beta needs them to discover beta.2 before stable exists.
+      .url("https://api.github.com/repos/$owner/$repo/releases?per_page=$MAX_RELEASES_PER_PAGE")
       // GitHub rejects anonymous API requests that do not identify themselves.
       .header("User-Agent", "StremioShell")
       .header("Accept", "application/vnd.github+json")
@@ -47,26 +61,67 @@ class GitHubReleaseApi {
       // limit applies either way, since an error page is not a size we control.
       val text = response.body?.readUtf8Limited(MAX_JSON_RESPONSE_BYTES).orEmpty()
       if (!response.isSuccessful) {
-        // BackgroundUpdateWorker.isRetryable reads the status back out of this message.
-        throw IllegalStateException("GitHub API error ${response.code}: $text")
+        throw apiException(
+          statusCode = response.code,
+          retryAfterHeader = response.header("Retry-After"),
+          rateLimitRemainingHeader = response.header("X-RateLimit-Remaining"),
+          rateLimitResetHeader = response.header("X-RateLimit-Reset"),
+          body = text,
+        )
       }
       text
     }
 
-    return parseRelease(JSONObject(body))
+    return parseReleases(JSONArray(body))
   }
 
   internal companion object {
     /** GitHub prefixes the asset digest with its algorithm, e.g. `sha256:9f86d0...`. */
     private const val SHA256_DIGEST_PREFIX = "sha256:"
+    private const val MAX_RELEASES_PER_PAGE = 100
+
+    internal fun parseReleases(json: JSONArray): List<GitHubLatestReleaseDto> = buildList {
+      for (index in 0 until json.length()) {
+        json.optJSONObject(index)?.let { add(parseRelease(it)) }
+      }
+    }
 
     internal fun parseRelease(json: JSONObject): GitHubLatestReleaseDto = GitHubLatestReleaseDto(
       tagName = json.optTrimmedOrNull("tag_name").orEmpty(),
       htmlUrl = json.optTrimmedOrNull("html_url"),
       body = json.optTrimmedOrNull("body"),
       publishedAt = json.optTrimmedOrNull("published_at"),
-      assets = parseAssets(json.optJSONArray("assets"))
+      assets = parseAssets(json.optJSONArray("assets")),
+      prerelease = json.optBoolean("prerelease", false),
+      draft = json.optBoolean("draft", false),
     )
+
+    /** GitHub uses both 403 and 429 for rate limiting; headers and its error body disambiguate 403. */
+    internal fun apiException(
+      statusCode: Int,
+      retryAfterHeader: String?,
+      rateLimitRemainingHeader: String?,
+      rateLimitResetHeader: String?,
+      body: String,
+    ): GitHubApiException {
+      val retryAfterSeconds = retryAfterHeader?.trim()?.toLongOrNull()?.takeIf { it >= 0L }
+      val resetEpochSeconds = rateLimitResetHeader?.trim()?.toLongOrNull()?.takeIf { it >= 0L }
+      val rateLimited = statusCode == 429 || (
+        statusCode == 403 && (
+          rateLimitRemainingHeader?.trim() == "0" ||
+            retryAfterSeconds != null ||
+            body.contains("rate limit", ignoreCase = true)
+          )
+        )
+      val summary = body.trim().replace(Regex("\\s+"), " ").take(512)
+      return GitHubApiException(
+        statusCode = statusCode,
+        rateLimited = rateLimited,
+        retryAfterSeconds = retryAfterSeconds,
+        rateLimitResetEpochSeconds = resetEpochSeconds,
+        message = "GitHub API error $statusCode${summary.takeIf { it.isNotEmpty() }?.let { ": $it" }.orEmpty()}",
+      )
+    }
 
     internal fun parseAssets(rawAssets: JSONArray?): List<GitHubAssetDto> {
       if (rawAssets == null || rawAssets.length() == 0) {
@@ -85,7 +140,8 @@ class GitHubReleaseApi {
           size = size,
           // Already in the JSON this call fetched. Ignoring it left the updater checking a
           // ~117 MB download by byte count alone; see DownloadIntegrityPolicy.
-          sha256 = parseSha256Digest(assetJson.optTrimmedOrNull("digest"))
+          sha256 = parseSha256Digest(assetJson.optTrimmedOrNull("digest")),
+          id = assetJson.optLong("id").takeIf { it > 0L },
         )
       }
       return parsed

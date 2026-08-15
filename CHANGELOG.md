@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+
+## [0.6.2] - 2026-08-15
+
 A detail pass over every surface, driven by an audit that turned up 255 findings. The 0.6.0 overhaul
 put the app onto one design system; this makes that system actually hold, and fixes a set of defects
 that only show up when you sit in front of the thing.
@@ -24,8 +27,8 @@ that only show up when you sit in front of the thing.
 - Bounded, redacted diagnostics stay local until the viewer shares a uniquely written report.
 - Credential-free Android TV checks now run against official API 26 and API 34 images. Dependency
   locks/checksums, pinned Actions, guarded manual promotion and provenance checks raise the release
-  floor; public publishing remains deliberately blocked until the native source inventory and
-  reviewed SBOM are complete.
+  floor. The GPL-3.0-or-later project license, reviewed Gradle/native SBOMs, and deterministic
+  corresponding-source archive now make the release inventory complete and digest-gated.
 
 **Titles are branded, not typeset.** Home's billboard and the Details header both lead with the
 title's own logotype where TMDB has one, falling back to type where it does not. (TMDB files SVG
@@ -64,6 +67,26 @@ scrolling row and nothing animates layout, which is what this hardware cannot af
   picture whenever the panel was up.
 
 **Fixes.**
+- Player recreation now restores the stream and episode actually in progress, including headers,
+  subtitles, resume/reset state and an intentional pause, instead of reopening the original intent
+  at the replacement episode's position. Pausing also disarms stall failure synchronously, sleep
+  expiry retires in-flight resolvers, manual Next uses one watched threshold, MediaSession cannot
+  seek behind Up Next, and passthrough routes refresh their exact codec set.
+- Legacy Japanese, Korean, Simplified Chinese and Traditional Chinese subtitle files are converted
+  with language-appropriate encodings instead of being decoded as Western European text.
+- Watch Next provider failures, null cursors/inserts and partial mutations are retryable rather than
+  reported as published. Its deep-link resume position now reaches the matching movie or episode as
+  a fallback when no local record exists, and a restored filtered-empty Streams screen has a real
+  initial D-pad focus target.
+- Watch-state and remembered-stream mutations use logical action order rather than wall-clock order,
+  so a clock correction cannot freeze progress, watched/reset/remove actions or resurrect a row from
+  a delayed save. Malformed addon-list JSON is preserved through both immediate edits and Save, and
+  immediate Settings operations keep their busy/result state across recreation.
+- Update download metadata, enqueue and ID publication are one process-atomic handoff; prompts and
+  permanent rejections are bound to the exact download/immutable GitHub asset, so concurrent checks
+  and corrected same-version uploads cannot orphan, cancel or hide the wrong APK. Invalid addon
+  stream URLs are discarded before the global result cap, and phone pairing binds only the selected
+  Wi-Fi/Ethernet address instead of every interface.
 - Watch Next/deep-link Details waits for the stored TMDB key to initialize instead of hanging on
   its cold-start sentinel; a genuinely missing key now offers a focused route to Settings.
 - Search results and paging are owned by both query and credential generation, so changing or

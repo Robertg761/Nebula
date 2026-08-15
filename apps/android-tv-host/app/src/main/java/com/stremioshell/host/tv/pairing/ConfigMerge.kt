@@ -16,6 +16,12 @@ data class PairingSubmission(val tmdbKey: String?, val addonUrls: List<String>?)
   val isEmpty: Boolean get() = tmdbKey == null && addonUrls == null
 
   companion object {
+    /** TMDB v3 keys and v4 tokens fit comfortably while malformed submissions stay bounded. */
+    const val MAX_TMDB_KEY_CHARS = 256
+
+    /** Keeps the browser form inside its 32 KiB encoded request cap even with escaped URL bytes. */
+    const val MAX_ADDON_INPUT_CHARS = 10_000
+
     /** Line breaks only: a comma or a space can appear inside a real manifest URL. */
     private val LINE_BREAK = Regex("""\R""")
 
@@ -43,6 +49,13 @@ data class PairingSubmission(val tmdbKey: String?, val addonUrls: List<String>?)
     fun addonUrlsIn(raw: String?): List<String> =
       AddonList.sanitized(raw.orEmpty().split(LINE_BREAK))
 
+    fun tmdbKeyInputError(raw: String?): String? =
+      if (raw != null && raw.length > MAX_TMDB_KEY_CHARS) {
+        "That TMDB key is too long. Check it and try again."
+      } else {
+        null
+      }
+
     /**
      * Validates the phone form before [of] normalises it.
      *
@@ -61,7 +74,11 @@ data class PairingSubmission(val tmdbKey: String?, val addonUrls: List<String>?)
      * mistake to fix rather than left to notice a missing row.
      */
     fun addonInputError(raw: String?): String? {
-      if (raw.isNullOrBlank()) return null
+      if (raw == null) return null
+      if (raw.length > MAX_ADDON_INPUT_CHARS) {
+        return "Those addon links are too long. Shorten them and try again."
+      }
+      if (raw.isBlank()) return null
       val lines = raw.split(LINE_BREAK).map(String::trim).filter(String::isNotEmpty)
       if (lines.size > AddonList.MAX_ADDONS) {
         return "Enter no more than ${AddonList.MAX_ADDONS} addon links."

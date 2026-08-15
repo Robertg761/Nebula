@@ -1,0 +1,2009 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "metadata": {
+    "component": {
+      "type": "library",
+      "group": "dev.jdtech.mpv",
+      "name": "libmpv",
+      "version": "0.4.1",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "361f4fecb2769fd77697e02f83e24e767431859560282225facc5310a60f6ab2"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "purl": "pkg:maven/dev.jdtech.mpv/libmpv@0.4.1"
+    },
+    "properties": [
+      {
+        "name": "nebula:consuming-application",
+        "value": "Nebula 0.6.2"
+      },
+      {
+        "name": "nebula:native-source-manifest",
+        "value": "release/native-source-manifest.json"
+      },
+      {
+        "name": "nebula:ffmpeg-build-flags",
+        "value": "--target-os=android --enable-cross-compile --enable-jni --enable-mediacodec --enable-mbedtls --enable-libdav1d --disable-vulkan --disable-static --enable-shared --enable-gpl --enable-version3 --disable-stripping --disable-doc --disable-programs --disable-muxers --disable-encoders --disable-devices --disable-filters --disable-v4l2-m2m"
+      },
+      {
+        "name": "nebula:mpv-build-flags",
+        "value": "--default-library=shared -Diconv=disabled -Dlua=enabled -Dlibmpv=true -Dcplayer=false -Dmanpage-build=disabled"
+      },
+      {
+        "name": "nebula:mpv-effective-gpl",
+        "value": "true"
+      }
+    ]
+  },
+  "components": [
+    {
+      "type": "library",
+      "name": "libmpv-android",
+      "version": "0.4.1",
+      "bom-ref": "source:sources/libmpv-android",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/jarnedemeulemeester/libmpv-android.git#293d1a606413be36886a2ec922aee3d358690e07"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/libmpv-android"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "Mbed TLS",
+      "version": "3.6.1",
+      "bom-ref": "source:sources/mbedtls",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/Mbed-TLS/mbedtls.git#71c569d44bf3a8bd53d874c81ee8ac644dd6e9e3"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/mbedtls"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "Mbed TLS framework",
+      "version": "3.6.1-submodule",
+      "bom-ref": "source:sources/mbedtls/framework",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/Mbed-TLS/mbedtls-framework.git#94599c0e3b5036e086446a51a3f79640f70f22f6"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/mbedtls/framework"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "dav1d",
+      "version": "1.4.3",
+      "bom-ref": "source:sources/dav1d",
+      "licenses": [
+        {
+          "expression": "BSD-2-Clause"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://code.videolan.org/videolan/dav1d.git#e9986de7f4264940af6fa1df1498fd2754077de4"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/dav1d"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "FFmpeg",
+      "version": "7.1",
+      "bom-ref": "source:sources/ffmpeg",
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/FFmpeg/FFmpeg.git#b08d7969c550a804a59511c7b83f2dd8cc0499b8"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/ffmpeg"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "FreeType",
+      "version": "2.13.3",
+      "bom-ref": "source:sources/freetype",
+      "licenses": [
+        {
+          "expression": "FTL OR GPL-2.0-or-later"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://gitlab.freedesktop.org/freetype/freetype.git#42608f77f20749dd6ddc9e0536788eaad70ea4b5"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/freetype"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "FriBidi",
+      "version": "1.0.16",
+      "bom-ref": "source:sources/fribidi",
+      "licenses": [
+        {
+          "expression": "LGPL-2.1-or-later"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/fribidi/fribidi.git#68162babff4f39c4e2dc164a5e825af93bda9983"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/fribidi"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "HarfBuzz",
+      "version": "10.0.1",
+      "bom-ref": "source:sources/harfbuzz",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/harfbuzz/harfbuzz.git#a1d9bfe62818ef0fa9cf63b6e6d51436b1c93cbc"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/harfbuzz"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "libass",
+      "version": "0.17.3",
+      "bom-ref": "source:sources/libass",
+      "licenses": [
+        {
+          "expression": "ISC"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/libass/libass.git#e46aedea0a0d17da4c4ef49d84b94a7994664ab5"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/libass"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "Lua",
+      "version": "5.2.4",
+      "bom-ref": "source:sources/lua",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://www.lua.org/ftp/lua-5.2.4.tar.gz",
+          "hashes": [
+            {
+              "alg": "SHA-256",
+              "content": "b9e2e4aad6789b3b63a056d442f7b39f0ecfca3ae0f1fc0ae4e9614401b69f4b"
+            }
+          ]
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/lua"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "libplacebo",
+      "version": "7.349.0",
+      "bom-ref": "source:sources/libplacebo",
+      "licenses": [
+        {
+          "expression": "LGPL-2.1-or-later"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://code.videolan.org/videolan/libplacebo.git#1fd3c7bde7b943fe8985c893310b5269a09b46c5"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/libplacebo"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "Vulkan-Headers",
+      "version": "libplacebo-submodule",
+      "bom-ref": "source:sources/libplacebo/3rdparty/Vulkan-Headers",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/KhronosGroup/Vulkan-Headers.git#d732b2de303ce505169011d438178191136bfb00"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/libplacebo/3rdparty/Vulkan-Headers"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "fast_float",
+      "version": "libplacebo-submodule",
+      "bom-ref": "source:sources/libplacebo/3rdparty/fast_float",
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/fastfloat/fast_float.git#2b2395f9ac836ffca6404424bcc252bff7aa80e4"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/libplacebo/3rdparty/fast_float"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "glad",
+      "version": "libplacebo-submodule",
+      "bom-ref": "source:sources/libplacebo/3rdparty/glad",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/Dav1dde/glad.git#d08b1aa01f8fe57498f04d47b5fa8c48725be877"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/libplacebo/3rdparty/glad"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "Jinja",
+      "version": "libplacebo-submodule",
+      "bom-ref": "source:sources/libplacebo/3rdparty/jinja",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/pallets/jinja.git#b08cd4bc64bb980df86ed2876978ae5735572280"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/libplacebo/3rdparty/jinja"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "MarkupSafe",
+      "version": "libplacebo-submodule",
+      "bom-ref": "source:sources/libplacebo/3rdparty/markupsafe",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/pallets/markupsafe.git#c0254f0cfe51720ecc9e72e8896022af29af5b44"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/libplacebo/3rdparty/markupsafe"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "Nuklear",
+      "version": "libplacebo-submodule",
+      "bom-ref": "source:sources/libplacebo/demos/3rdparty/nuklear",
+      "licenses": [
+        {
+          "expression": "Unlicense OR MIT"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/Immediate-Mode-UI/Nuklear.git#c512ac886425f6b6b6c816d67f4cb1385cd4cc53"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/libplacebo/demos/3rdparty/nuklear"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "mpv",
+      "version": "0.39.0",
+      "bom-ref": "source:sources/mpv",
+      "licenses": [
+        {
+          "expression": "GPL-2.0-or-later"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/mpv-player/mpv.git#a0fba7be57f3822d967b04f0f6b6d6341e7516e7"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:corresponding-source-path",
+          "value": "sources/mpv"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavcodec.so",
+      "version": "7.1",
+      "bom-ref": "native:arm64-v8a/libavcodec.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "7730418788f5b39a220914d5df4d3f9e9abe9ee593a7e6c1b05f9014afce3f6f"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "arm64-v8a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/arm64-v8a/libavcodec.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "11925456"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavdevice.so",
+      "version": "7.1",
+      "bom-ref": "native:arm64-v8a/libavdevice.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "1baab7eeb7b82a8fb887e93ba8487e9e4b202768c423d778230959901302c2ae"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "arm64-v8a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/arm64-v8a/libavdevice.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "8952"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavfilter.so",
+      "version": "7.1",
+      "bom-ref": "native:arm64-v8a/libavfilter.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "dcf15779995b8db140663c5937f90e29a90b94e22a2b71c36e709d476778074c"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "arm64-v8a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/arm64-v8a/libavfilter.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "125752"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavformat.so",
+      "version": "7.1",
+      "bom-ref": "native:arm64-v8a/libavformat.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "5d03474b3bfe30140a4729e5253d3608f876eb3c6733f4b1b42a991a1d176f5f"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "arm64-v8a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/arm64-v8a/libavformat.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "2475824"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavutil.so",
+      "version": "7.1",
+      "bom-ref": "native:arm64-v8a/libavutil.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "050c96fc1cf25337ddd256ac0b5b990d21e5713300462eda69bf852f9c7dfe27"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "arm64-v8a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/arm64-v8a/libavutil.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "716736"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libc++_shared.so",
+      "version": "27.1.12297006",
+      "bom-ref": "native:arm64-v8a/libc++_shared.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "3e852764502d06e0cf1080d532ae7c608b7649d946a3a9d7e84e3d4b7d683214"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "Apache-2.0 WITH LLVM-exception"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "arm64-v8a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/arm64-v8a/libc++_shared.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "Android NDK libc++"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "1292904"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libmpv.so",
+      "version": "0.39.0",
+      "bom-ref": "native:arm64-v8a/libmpv.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "7fdf00af2c729af7aaa9bbc994de3a100da1f47c8f14959aa49dd7946b5a2f9a"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-2.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "arm64-v8a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/arm64-v8a/libmpv.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "mpv"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "5585864"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libplayer.so",
+      "version": "0.4.1",
+      "bom-ref": "native:arm64-v8a/libplayer.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "762155c4a9a1a84610aea040fc4ca856ae4a45747f43dc62fbceb3987bf3de34"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "arm64-v8a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/arm64-v8a/libplayer.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "libmpv-android"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "18904"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libpostproc.so",
+      "version": "7.1",
+      "bom-ref": "native:arm64-v8a/libpostproc.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "2c6c7c3666f1a66a344cc2a0abcc0c102fbca5627bccf10d9df81f64d7e854c4"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "arm64-v8a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/arm64-v8a/libpostproc.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "37304"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libswresample.so",
+      "version": "7.1",
+      "bom-ref": "native:arm64-v8a/libswresample.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "e20e15bad2542d739303ee60116eee96de277ca6a1106d15079003fc8499b743"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "arm64-v8a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/arm64-v8a/libswresample.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "97128"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libswscale.so",
+      "version": "7.1",
+      "bom-ref": "native:arm64-v8a/libswscale.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "f320c879cc1e872b73af3e9f38b571f555bfdf38a2cb7407cac37fbc9058e830"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "arm64-v8a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/arm64-v8a/libswscale.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "753728"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavcodec.so",
+      "version": "7.1",
+      "bom-ref": "native:armeabi-v7a/libavcodec.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "cf7761d11d80c8359a660a0920a13394e1c0d38829b43b8282270651757c45c7"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "armeabi-v7a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/armeabi-v7a/libavcodec.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "11422236"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavdevice.so",
+      "version": "7.1",
+      "bom-ref": "native:armeabi-v7a/libavdevice.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "263f0cbda1bd0484ae09cb2cabb1dead067bb15f2bd3182fc83af8ed71c579e8"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "armeabi-v7a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/armeabi-v7a/libavdevice.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "6784"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavfilter.so",
+      "version": "7.1",
+      "bom-ref": "native:armeabi-v7a/libavfilter.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "3e24f44e068b128c5aed60adbe81bd205e18c22e9d06d304b597a60590a34637"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "armeabi-v7a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/armeabi-v7a/libavfilter.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "110392"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavformat.so",
+      "version": "7.1",
+      "bom-ref": "native:armeabi-v7a/libavformat.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "d9ef4285ecde307804e92aa6c528dfb656eef7e3edbb204fed7eff70a4ef7df0"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "armeabi-v7a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/armeabi-v7a/libavformat.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "2264384"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavutil.so",
+      "version": "7.1",
+      "bom-ref": "native:armeabi-v7a/libavutil.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "8b2c52343d64d3f1be010460d57961ccb207b5127712fcc7c6076ed0747bf9e4"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "armeabi-v7a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/armeabi-v7a/libavutil.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "633508"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libc++_shared.so",
+      "version": "27.1.12297006",
+      "bom-ref": "native:armeabi-v7a/libc++_shared.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "84e7d99b7b6df960b37c28e43808cc5c2c62d1bb9449e27683fc53309dea5b6c"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "Apache-2.0 WITH LLVM-exception"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "armeabi-v7a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/armeabi-v7a/libc++_shared.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "Android NDK libc++"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "872872"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libmpv.so",
+      "version": "0.39.0",
+      "bom-ref": "native:armeabi-v7a/libmpv.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "07ee3a117c105952c1fbe69160d867a761330e3f7caca40f8f2a4d791eb3a2b2"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-2.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "armeabi-v7a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/armeabi-v7a/libmpv.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "mpv"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "4876916"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libplayer.so",
+      "version": "0.4.1",
+      "bom-ref": "native:armeabi-v7a/libplayer.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "b6bb0f0e92de89c061ae9994120042815d9651f7a47fe4970ae3892a50317c61"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "armeabi-v7a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/armeabi-v7a/libplayer.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "libmpv-android"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "13180"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libpostproc.so",
+      "version": "7.1",
+      "bom-ref": "native:armeabi-v7a/libpostproc.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "fa09ea9c36746a258a09614a7a711980517d36e4de7fc5b29d0724b7ba834c53"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "armeabi-v7a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/armeabi-v7a/libpostproc.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "32188"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libswresample.so",
+      "version": "7.1",
+      "bom-ref": "native:armeabi-v7a/libswresample.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "4c7a9815659016f2f1b2a949ae8e186ec705769b5ec15846fd7d631a9b3b46f0"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "armeabi-v7a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/armeabi-v7a/libswresample.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "88696"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libswscale.so",
+      "version": "7.1",
+      "bom-ref": "native:armeabi-v7a/libswscale.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "4860a149fa8d869278377785c15daa43acd6ebbd3bf6ee1ab1c6a732d573f118"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "armeabi-v7a"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/armeabi-v7a/libswscale.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "477752"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavcodec.so",
+      "version": "7.1",
+      "bom-ref": "native:x86/libavcodec.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "05769cfde6307571e0d3d07ba621900766afc5058c90de8dce7ae5f6ed509575"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86/libavcodec.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "14449964"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavdevice.so",
+      "version": "7.1",
+      "bom-ref": "native:x86/libavdevice.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "80865cad9021b3fd7f92d37748742a65bc04ee80d10d241633a8fb94d21db002"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86/libavdevice.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "8064"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavfilter.so",
+      "version": "7.1",
+      "bom-ref": "native:x86/libavfilter.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "08d525936d99aaecc7f192854f33eaf17a3a9adea37fe9a7f33ea597b3dcbd02"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86/libavfilter.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "138872"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavformat.so",
+      "version": "7.1",
+      "bom-ref": "native:x86/libavformat.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "bb919c570495f9088881aec34460c382fe38ba1cd1a38de6fbb3966c05b20aae"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86/libavformat.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "2903792"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavutil.so",
+      "version": "7.1",
+      "bom-ref": "native:x86/libavutil.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "2e91644513301399b98a852ad5c16b3c319b95ae2db5cb0f00f25073a043c11a"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86/libavutil.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "771208"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libc++_shared.so",
+      "version": "27.1.12297006",
+      "bom-ref": "native:x86/libc++_shared.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "3bd6a3c5d1baa1fac3bdd8452ccc403fd1b464b3f80eb9fa207df5ec2d565129"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "Apache-2.0 WITH LLVM-exception"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86/libc++_shared.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "Android NDK libc++"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "1254988"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libmpv.so",
+      "version": "0.39.0",
+      "bom-ref": "native:x86/libmpv.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "63ff2c16ce3f5928c4ea1123b374b6650ff94378a860e0037a7d6112a80047ea"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-2.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86/libmpv.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "mpv"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "6006504"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libplayer.so",
+      "version": "0.4.1",
+      "bom-ref": "native:x86/libplayer.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "fd10aca3e8ca766f0ce12b9fc2f4a676940e45091efcce52e13d3cdf6d370522"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86/libplayer.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "libmpv-android"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "17496"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libpostproc.so",
+      "version": "7.1",
+      "bom-ref": "native:x86/libpostproc.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "c2d3a35d4bc09934a098e124b2489d943a0ef6b51bebd625ac0ab66eb3a3093c"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86/libpostproc.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "39280"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libswresample.so",
+      "version": "7.1",
+      "bom-ref": "native:x86/libswresample.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "2f370dae5e0e6e576198740a4b9f6f220243b31f8031f4c64838b5ad2764b792"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86/libswresample.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "116940"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libswscale.so",
+      "version": "7.1",
+      "bom-ref": "native:x86/libswscale.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "c408f89c128b3de76735b81356ac388ff3912aa5caaa49699dc76cd0ca0e0e9c"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86/libswscale.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "890500"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavcodec.so",
+      "version": "7.1",
+      "bom-ref": "native:x86_64/libavcodec.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "92727b76cabbb06cfaecf26f883df51b4c5a3ac1e06aa1a05ba32ac667ff70c1"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86_64"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86_64/libavcodec.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "16205264"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavdevice.so",
+      "version": "7.1",
+      "bom-ref": "native:x86_64/libavdevice.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "ce742e8de5d93f2b9cce9ac2ce2586b1f977a431ff8eed627e5e7a438bd4bc6d"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86_64"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86_64/libavdevice.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "8968"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavfilter.so",
+      "version": "7.1",
+      "bom-ref": "native:x86_64/libavfilter.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "67e2ecdd27ed1acf7bb8f092a70779f900ace3ea680dc1736c48223616966b2c"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86_64"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86_64/libavfilter.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "135224"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavformat.so",
+      "version": "7.1",
+      "bom-ref": "native:x86_64/libavformat.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "6fa6d5ae4aa100b9ad00b3f4c50a11d7c3d4cddf586fac6ff9967b969e37d918"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86_64"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86_64/libavformat.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "2544864"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libavutil.so",
+      "version": "7.1",
+      "bom-ref": "native:x86_64/libavutil.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "5a23eb7686e38ff013d142aae9da09e79e6d34816e707cdbf439ffdb20715c6e"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86_64"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86_64/libavutil.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "899096"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libc++_shared.so",
+      "version": "27.1.12297006",
+      "bom-ref": "native:x86_64/libc++_shared.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "0a2c7afa35b183fdd5a3cb20e2080ad54cbea06c2a4f0bc8f122cb7d1e9e0b9f"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "Apache-2.0 WITH LLVM-exception"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86_64"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86_64/libc++_shared.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "Android NDK libc++"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "1252080"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libmpv.so",
+      "version": "0.39.0",
+      "bom-ref": "native:x86_64/libmpv.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "44ba0a7419785ae116940a3c4a6a76bea214353abf66d7239e34665e6344dcc4"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-2.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86_64"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86_64/libmpv.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "mpv"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "5632144"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libplayer.so",
+      "version": "0.4.1",
+      "bom-ref": "native:x86_64/libplayer.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "7e4eed518bee2fbd9ada28ca3e105f6aa2a7d87404d5deabe22b86623243cb9a"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86_64"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86_64/libplayer.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "libmpv-android"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "18296"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libpostproc.so",
+      "version": "7.1",
+      "bom-ref": "native:x86_64/libpostproc.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "adaeaf3234669583ce6465add5ba9c7cb949f047d7f1f8c89f05a90ff6c05964"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86_64"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86_64/libpostproc.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "68824"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libswresample.so",
+      "version": "7.1",
+      "bom-ref": "native:x86_64/libswresample.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "8661ee30fe975d921420047f95614f65c4aa44df6c0e6aee7997a47c4fe90533"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86_64"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86_64/libswresample.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "136432"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "libswscale.so",
+      "version": "7.1",
+      "bom-ref": "native:x86_64/libswscale.so",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "0f46f04821a41a80a2a3f2d9b4e985a49ff57c3a70a67273d0d8a4d1c5c80d97"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "GPL-3.0-or-later"
+        }
+      ],
+      "properties": [
+        {
+          "name": "nebula:android-abi",
+          "value": "x86_64"
+        },
+        {
+          "name": "nebula:aar-entry",
+          "value": "jni/x86_64/libswscale.so"
+        },
+        {
+          "name": "nebula:source-component",
+          "value": "FFmpeg"
+        },
+        {
+          "name": "nebula:size-bytes",
+          "value": "1022104"
+        }
+      ]
+    }
+  ]
+}

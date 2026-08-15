@@ -35,6 +35,8 @@ Remote / Assistant / Watch Next
               |
           stream choice
               |
+      PlaybackProxyServer
+              |
        MpvPlayerActivity
 ```
 
@@ -45,17 +47,22 @@ Remote / Assistant / Watch Next
 - Phone pairing is token-gated but cleartext on the LAN.
 - External metadata, addon JSON, subtitles, artwork, and stream URLs are
   untrusted network input and must be size/time bounded.
-- Addon-provided playback URLs are reduced to canonical public HTTPS URLs
-  before they reach libmpv. Subtitle downloads additionally validate every
-  redirect and reject DNS answers containing a loopback, private, link-local,
-  multicast, or otherwise non-public address.
-- Native libmpv still owns stream redirects and DNS resolution after the
-  initial URL check. A complete rebinding/redirect boundary requires a
-  policy-enforcing stream transport (or equivalent native resolver hook);
-  initial validation must not be described as complete SSRF isolation. Until
-  then, only `Accept`, `Accept-Language`, and `User-Agent` addon headers are
-  handed to libmpv; credentials and arbitrary custom headers stay out of its
-  redirect chain.
+- Direct addon streams pass through `PlaybackProxyServer`. libmpv receives a
+  tokened loopback URL and never sees the remote URL or addon headers. The
+  proxy uses public-only DNS for every lookup, handles redirects itself, and
+  reapplies the public-HTTPS policy at every hop. Sensitive addon headers are
+  sent only to the exact original origin.
+- The proxy accepts direct media containers it can identify and bounded HLS
+  master/media playlists. Every child playlist, segment, key, and map URI is
+  replaced transactionally with an opaque loopback route; each nested fetch
+  retains the same URL, public-DNS, redirect, credential, cancellation, and
+  response-size checks. Exact byte-zero `#EXTM3U` permits suffixless signed HLS
+  URLs without treating a later marker as a playlist.
+- DASH, Smooth Streaming, legacy M3U/PLS/XSPF, HLS manifest-level byte-range
+  aliasing, and ambiguous payloads remain rejected rather than being handed
+  back to libmpv.
+- Subtitle downloads validate every redirect and reject DNS answers containing
+  a loopback, private, link-local, multicast, or otherwise non-public address.
 - The updater accepts only the canonical release asset and then verifies size,
   package name, version, version code, and Android signing lineage before
   opening the installer.

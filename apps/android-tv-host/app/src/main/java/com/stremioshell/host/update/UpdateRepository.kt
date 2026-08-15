@@ -1,5 +1,7 @@
 package com.stremioshell.host.update
 
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+
 class UpdateRepository(
   private val api: GitHubReleaseApi = GitHubReleaseApi()
 ) {
@@ -8,15 +10,8 @@ class UpdateRepository(
     repo: String,
     currentVersionName: String
   ): UpdateInfo? {
-    val latest = api.fetchLatestRelease(owner, repo)
+    val latest = selectRelease(api.fetchReleases(owner, repo), currentVersionName) ?: return null
     val latestTag = latest.tagName.trim()
-    if (latestTag.isBlank()) {
-      return null
-    }
-
-    if (!isNewerVersion(latestTag, currentVersionName)) {
-      return null
-    }
 
     val selectedApk = selectApkAsset(
       assets = latest.assets,
@@ -25,6 +20,9 @@ class UpdateRepository(
       // versionName rather than from the tag.
       versionName = SemVer.coreLabel(latestTag),
     ) ?: return null
+    if (!isTrustedApkUrl(selectedApk.browserDownloadUrl, owner, repo, selectedApk.name)) {
+      return null
+    }
     return UpdateInfo(
       latestVersionName = latestTag.removePrefix("v").removePrefix("V"),
       apkName = selectedApk.name,
@@ -33,27 +31,30 @@ class UpdateRepository(
       releaseUrl = latest.htmlUrl.orEmpty().trim(),
       apkSizeBytes = selectedApk.size,
       apkSha256 = selectedApk.sha256,
-      publishedAt = latest.publishedAt?.trim()
+      publishedAt = latest.publishedAt?.trim(),
+      apkAssetId = selectedApk.id,
     )
   }
 
-  /**
-   * Full semver ordering, pre-release included: the stable `v0.6.2` is newer than `0.6.2-beta.1`
-   * and has to be offered to whoever is running the beta. The string fallback below only runs for
-   * a tag no version parser can read, and it compares the normalized labels rather than the bare
-   * cores for the same reason.
-   */
-  private fun isNewerVersion(latestTag: String, currentVersionName: String): Boolean {
-    val latestSemVer = SemVer.parseOrNull(latestTag)
-    val currentSemVer = SemVer.parseOrNull(currentVersionName)
-    if (latestSemVer != null && currentSemVer != null) {
-      return latestSemVer > currentSemVer
+  companion object {
+    /** Stable installs stay on stable releases; prerelease installs may advance to either channel. */
+    internal fun selectRelease(
+      releases: List<GitHubLatestReleaseDto>,
+      currentVersionName: String,
+    ): GitHubLatestReleaseDto? {
+      val current = SemVer.parseOrNull(currentVersionName) ?: return null
+      val acceptsPrereleases = current.preRelease.isNotEmpty()
+      return releases.asSequence()
+        .filterNot { it.draft }
+        .filter { acceptsPrereleases || !it.prerelease }
+        .mapNotNull { release ->
+          SemVer.parseOrNull(release.tagName)?.let { version -> release to version }
+        }
+        .filter { (_, version) -> version > current }
+        .maxWithOrNull(compareBy<Pair<GitHubLatestReleaseDto, SemVer>> { it.second })
+        ?.first
     }
 
-    return SemVer.normalizeLabel(latestTag) != SemVer.normalizeLabel(currentVersionName)
-  }
-
-  companion object {
     /**
      * The release workflow publishes one canonical TV artifact. Do not fall
      * back to a debug, mobile, stale-version, or ambiguously duplicated APK if
@@ -65,6 +66,25 @@ class UpdateRepository(
     ): GitHubAssetDto? {
       val expectedName = "StremioShell-tv-$versionName.apk"
       return assets.filter { it.name == expectedName }.singleOrNull()
+    }
+
+    /** Accept only the canonical GitHub release-download route for this exact repository/asset. */
+    internal fun isTrustedApkUrl(
+      rawUrl: String,
+      owner: String,
+      repo: String,
+      assetName: String,
+    ): Boolean {
+      val url = rawUrl.toHttpUrlOrNull() ?: return false
+      if (!url.isHttps || !url.host.equals("github.com", ignoreCase = true)) return false
+      val segments = url.pathSegments
+      return segments.size == 6 &&
+        segments[0].equals(owner, ignoreCase = true) &&
+        segments[1].equals(repo, ignoreCase = true) &&
+        segments[2] == "releases" &&
+        segments[3] == "download" &&
+        segments[4].isNotBlank() &&
+        segments[5] == assetName
     }
   }
 }

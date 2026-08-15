@@ -2,6 +2,7 @@ package com.stremioshell.host.tv.player
 
 import com.stremioshell.host.tv.data.addon.AddonStreamSubtitle
 import com.stremioshell.host.tv.data.subtitles.AddonSubtitle
+import java.nio.charset.Charset
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -90,6 +91,62 @@ class ExternalSubtitlesTest {
 
     assertEquals(listOf("Portuguese", "Portuguese"), options.map { it.label })
     assertEquals("Online subtitle 1 of 2", options.first().detail)
+  }
+
+  @Test
+  fun `online traditional Chinese keeps its raw charset hint after canonical grouping`() {
+    val option = ExternalSubtitles.options(
+      listOf(subtitle("zh-Hant", "traditional")),
+      preferredLanguage = "",
+    ).single()
+
+    assertEquals("zho", option.lang)
+    assertEquals("zh-Hant", option.encodingLanguageHint)
+    assertEquals("zh-Hant", option.charsetLanguageHint)
+    val text = "繁體中文字幕"
+    assertEquals(
+      text,
+      SubtitleCharset.toUtf8(
+        text.toByteArray(Charset.forName("Big5")),
+        option.charsetLanguageHint,
+      ).toString(Charsets.UTF_8),
+    )
+  }
+
+  @Test
+  fun `zhs groups with standard Chinese while retaining its simplified charset hint`() {
+    val options = ExternalSubtitles.options(
+      listOf(subtitle("zhs", "simplified"), subtitle("zho", "standard")),
+      preferredLanguage = "",
+    )
+
+    assertEquals(listOf("zho", "zho"), options.map { it.lang })
+    assertEquals(listOf("zhs", "zho"), options.map { it.encodingLanguageHint })
+    assertEquals(listOf("Chinese", "Chinese"), options.map { it.label })
+    assertEquals(listOf(1, 2), options.map { it.ordinal })
+  }
+
+  @Test
+  fun `embedded traditional Chinese keeps its raw charset hint after canonical grouping`() {
+    val sanitized = EmbeddedSubtitles.sanitize(
+      listOf(
+        AddonStreamSubtitle(
+          id = "included",
+          url = "https://subs.example/traditional.srt",
+          lang = "zht",
+        ),
+      ),
+    ).single()
+    val option = EmbeddedSubtitles.menuOption(
+      subtitle = sanitized,
+      unknownLanguageLabel = "Unknown language",
+      includedDetail = "Included with the stream",
+      fallbackTrackTitle = "Stream subtitle 1",
+    )
+
+    assertEquals("zho", option.lang)
+    assertEquals("zht", option.encodingLanguageHint)
+    assertEquals("zht", option.charsetLanguageHint)
   }
 
   @Test
@@ -379,6 +436,10 @@ class ExternalSubtitlesTest {
 
     assertEquals(listOf("shared", "extra"), optionIds(merged))
     assertEquals(ExternalSubtitleSource.Embedded, merged.first().source)
+    assertEquals(1, merged.last().ordinal)
+    assertEquals(1, merged.last().total)
+    assertEquals("Online subtitle", merged.last().detail)
+    assertEquals("Online", merged.last().trackTitle)
   }
 
   @Test

@@ -1,0 +1,3 @@
+# The historical preimage contains an embedded NUL; force a reviewable text diff for its cleanup.
+/apps/android-tv-host/app/src/test/java/com/stremioshell/host/update/ApkUpdateManagerTest.kt diff
+/apps/android-tv-host/app/src/test/java/com/stremioshell/host/tv/search/LaunchIntentsTest.kt diff

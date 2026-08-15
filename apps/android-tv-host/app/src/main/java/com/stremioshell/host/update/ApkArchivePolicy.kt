@@ -42,7 +42,13 @@ internal object ApkArchivePolicy {
     if (normalizeVersion(archive.versionName) != expectedVersion) {
       return Verdict.WRONG_VERSION
     }
-    if (archive.versionCode <= installed.versionCode) {
+    if (archive.versionCode < installed.versionCode) {
+      return Verdict.NOT_NEWER
+    }
+    if (
+      archive.versionCode == installed.versionCode &&
+      !isSameCodePrereleaseUpgrade(installed.versionName, archive.versionName)
+    ) {
       return Verdict.NOT_NEWER
     }
 
@@ -58,12 +64,22 @@ internal object ApkArchivePolicy {
   }
 
   private fun normalizeVersion(value: String?): String? {
-    return value
-      ?.trim()
-      ?.removePrefix("v")
-      ?.removePrefix("V")
-      ?.substringBefore('-')
-      ?.takeIf { it.isNotBlank() }
+    return value?.let(SemVer::normalizeLabel)?.takeIf { it.isNotBlank() }
+  }
+
+  /**
+   * The release workflow may publish beta.1, beta.2 and stable from one numeric source version.
+   * Android permits an equal-versionCode replacement; allow it only when the embedded semantic
+   * version moves forward within that same numeric core. A stable-to-next-core release must still
+   * bump versionCode, and an identical release remains rejected.
+   */
+  private fun isSameCodePrereleaseUpgrade(installed: String?, archive: String?): Boolean {
+    val installedVersion = installed?.let(SemVer::parseOrNull) ?: return false
+    val archiveVersion = archive?.let(SemVer::parseOrNull) ?: return false
+    val sameCore = installedVersion.major == archiveVersion.major &&
+      installedVersion.minor == archiveVersion.minor &&
+      installedVersion.patch == archiveVersion.patch
+    return sameCore && archiveVersion > installedVersion
   }
 
   private fun isTrustedUpdate(

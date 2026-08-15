@@ -45,6 +45,56 @@ class WatchNextPublishWindowTest {
   }
 
   @Test
+  fun `two superseding failures cannot resurrect the first failed claim`() {
+    val first = window.claim(force = false, nowMs = 1_000L)!!
+    val second = window.claim(force = true, nowMs = 2_000L)!!
+
+    // The first failure cannot move the newer head, but it must poison its predecessor link. When
+    // the newer publish also fails, both claims collapse rather than restoring a ghost minute.
+    window.release(first)
+    window.release(second)
+
+    assertNotNull(window.claim(force = false, nowMs = 2_001L))
+  }
+
+  @Test
+  fun `successful claims prune obsolete predecessor history`() {
+    val first = window.claim(force = false, nowMs = 1_000L)!!
+    window.commit(first)
+    val second = window.claim(force = true, nowMs = 2_000L)!!
+
+    assertEquals(1_000L, second.previousMs)
+    window.commit(second)
+    assertEquals(0L, second.previousMs)
+
+    val third = window.claim(force = true, nowMs = 3_000L)!!
+    window.commit(third)
+    assertEquals(0L, third.previousMs)
+  }
+
+  @Test
+  fun `a newer failure restores the most recent successful claim after pruning`() {
+    val successful = window.claim(force = false, nowMs = 1_000L)!!
+    window.commit(successful)
+    val failing = window.claim(force = true, nowMs = 2_000L)!!
+
+    window.release(failing)
+
+    assertNull(window.claim(force = false, nowMs = 1_001L + 30_000L))
+    assertEquals(1_000L, failing.previousMs)
+  }
+
+  @Test
+  fun `equal timestamps still have distinct claim identities`() {
+    val stale = window.claim(force = false, nowMs = 1_000L)!!
+    window.claim(force = true, nowMs = 1_000L)!!
+
+    window.release(stale)
+
+    assertNull(window.claim(force = false, nowMs = 1_001L))
+  }
+
+  @Test
   fun `a forced publish always takes the window and can be handed back`() {
     window.claim(force = false, nowMs = 1_000L)
 

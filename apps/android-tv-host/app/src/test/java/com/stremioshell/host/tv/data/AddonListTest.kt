@@ -98,6 +98,21 @@ class AddonListTest {
   }
 
   @Test
+  fun `oversized manifest urls are rejected before parsing or storage`() {
+    val alreadyOversized = "https://addon.example/" + "x".repeat(AddonList.MAX_URL_CHARS)
+    assertEquals("", AddonList.normalize(alreadyOversized))
+    assertEquals(
+      "",
+      AddonList.normalize(" ".repeat(AddonList.MAX_URL_CHARS) + "addon.example"),
+    )
+
+    val prefix = "https://a.example/"
+    val exactRawLimit = prefix + "x".repeat(AddonList.MAX_URL_CHARS - prefix.length)
+    assertEquals(AddonList.MAX_URL_CHARS, exactRawLimit.length)
+    assertEquals("", AddonList.normalize(exactRawLimit))
+  }
+
+  @Test
   fun `an install that only ever stored one url sees it as the first list entry`() {
     // The migration that has to be invisible: the list key has never been written.
     assertEquals(

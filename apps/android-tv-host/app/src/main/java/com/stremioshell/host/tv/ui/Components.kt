@@ -349,6 +349,8 @@ fun MediaCard(
   onLongClick: (() -> Unit)? = null,
   /** 0f..1f watch position, drawn across the foot of the poster. Null when there is none. */
   progress: Float? = null,
+  /** Full spoken label when the visible caption is an abbreviation or omits a visual fact. */
+  accessibilityLabel: String? = null,
 ) {
   // Hoisted so the caption can answer to it. Twenty cards in a rail all captioned at full
   // brightness is what makes a poster wall fight the UI; dimming the unfocused ones is the
@@ -373,7 +375,8 @@ fun MediaCard(
       modifier = Modifier.width(NebulaDimens.PosterWidth).height(NebulaDimens.PosterHeight)
         .onFocusChanged { focused = it.isFocused }
         .semantics(mergeDescendants = true) {
-          contentDescription = A11yLabels.card(item.title, subtitle, manageable = onLongClick != null)
+          contentDescription = accessibilityLabel
+            ?: A11yLabels.card(item.title, subtitle, manageable = onLongClick != null)
         },
     ) {
       Box(modifier = Modifier.fillMaxSize()) {

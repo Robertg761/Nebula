@@ -50,8 +50,10 @@ data class SemVer(
       val input = raw.trim()
       val match = VERSION_RE.matchEntire(input) ?: return null
       val major = match.groupValues[1].toIntOrNull() ?: return null
-      val minor = match.groupValues[2].toIntOrNull() ?: 0
-      val patch = match.groupValues[3].toIntOrNull() ?: 0
+      val minorText = match.groupValues[2]
+      val patchText = match.groupValues[3]
+      val minor = if (minorText.isEmpty()) 0 else minorText.toIntOrNull() ?: return null
+      val patch = if (patchText.isEmpty()) 0 else patchText.toIntOrNull() ?: return null
       return SemVer(
         major = major,
         minor = minor,

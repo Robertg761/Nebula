@@ -2,8 +2,13 @@
 set -euo pipefail
 
 api="${1:-}"
+build_mode="${2:-debug}"
 if [ "$api" != "26" ] && [ "$api" != "34" ]; then
-  echo "Usage: $0 <26|34>" >&2
+  echo "Usage: $0 <26|34> [debug|release-like]" >&2
+  exit 2
+fi
+if [ "$build_mode" != "debug" ] && [ "$build_mode" != "release-like" ]; then
+  echo "Usage: $0 <26|34> [debug|release-like]" >&2
   exit 2
 fi
 
@@ -36,8 +41,8 @@ fi
 
 artifact_dir="${NEBULA_TV_TEST_ARTIFACT_DIR:-$android_project/app/build/outputs/tv-emulator}"
 mkdir -p "$artifact_dir"
-emulator_log="$artifact_dir/api-${api}-emulator.log"
-logcat_file="$artifact_dir/api-${api}-logcat.txt"
+emulator_log="$artifact_dir/api-${api}-${build_mode}-emulator.log"
+logcat_file="$artifact_dir/api-${api}-${build_mode}-logcat.txt"
 : > "$emulator_log"
 : > "$logcat_file"
 
@@ -145,8 +150,37 @@ done
 # to this fresh AVD's lifetime.
 "$adb" -s "$serial" logcat -c || true
 
-echo "Running credential-free instrumentation on $serial (Android TV API $api)."
+gradle_args=(":app:connectedDebugAndroidTest")
+build_label="debug"
+if [ "$build_mode" = "release-like" ]; then
+  gradle_args=(
+    "-PnebulaInstrumentationBuildType=emulatorRelease"
+    ":app:connectedEmulatorReleaseAndroidTest"
+  )
+  build_label="minified release-like"
+fi
+
+echo "Running credential-free $build_label instrumentation on $serial (Android TV API $api)."
 (
   cd "$android_project"
-  ANDROID_SERIAL="$serial" ./gradlew :app:connectedDebugAndroidTest --console=plain
+  ANDROID_SERIAL="$serial" ./gradlew "${gradle_args[@]}" --console=plain
 )
+
+if [ "$build_mode" = "release-like" ]; then
+  mapping="$android_project/app/build/outputs/mapping/emulatorRelease/mapping.txt"
+  target_apk="$android_project/app/build/outputs/apk/emulatorRelease/app-emulatorRelease.apk"
+  [ -s "$mapping" ] || {
+    echo "R8 mapping is missing for the emulatorRelease target: $mapping" >&2
+    exit 1
+  }
+  [ -s "$target_apk" ] || {
+    echo "Instrumented emulatorRelease APK is missing: $target_apk" >&2
+    exit 1
+  }
+  apksigner="$(find "$sdk_root/build-tools" -name apksigner -type f | sort -V | tail -n 1)"
+  [ -n "$apksigner" ] || {
+    echo "Could not locate Android apksigner." >&2
+    exit 1
+  }
+  "$apksigner" verify "$target_apk"
+fi
