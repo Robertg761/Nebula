@@ -257,7 +257,7 @@ dependencies {
   implementation("androidx.core:core-ktx:1.13.1")
   implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.5")
   implementation("androidx.work:work-runtime-ktx:2.9.1")
-  implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+  implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 
   // Native Compose TV app (Comet + Real-Debrid path)
   implementation(platform("androidx.compose:compose-bom:2024.09.00"))
@@ -275,7 +275,7 @@ dependencies {
   implementation("androidx.tvprovider:tvprovider:1.0.0")
   implementation("io.coil-kt:coil-compose:2.6.0")
   implementation("com.squareup.okhttp3:okhttp:4.12.0")
-  implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+  implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
   implementation("dev.jdtech.mpv:libmpv:0.4.1")
 
   // Phone-pairing config entry (QR + tiny on-device web form)
