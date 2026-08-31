@@ -4,7 +4,7 @@ plugins {
   id("org.jetbrains.kotlin.android") version "1.9.24" apply false
   id("org.jetbrains.kotlin.plugin.serialization") version "1.9.24" apply false
   id("org.jetbrains.kotlin.plugin.parcelize") version "1.9.24" apply false
-  id("androidx.baselineprofile") version "1.3.3" apply false
+  id("androidx.baselineprofile") version "1.4.1" apply false
 }
 
 // Keep every resolved configuration on the reviewed graph recorded in each
